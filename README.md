@@ -402,6 +402,20 @@ minimemory
 │   ├── WorkingContext    # Contexto actual
 │   ├── TaskEpisode       # Experiencias de tareas
 │   └── CodeSnippet       # Código aprendido
+├── Transfer              # Transferencia de conocimiento
+│   ├── TransferableMemory # Memoria transferible
+│   ├── KnowledgeDomain   # Dominios de conocimiento
+│   └── ProjectContext    # Contexto de proyecto
+├── MemoryTraits          # Sistema domain-agnostic
+│   ├── GenericMemory<P>  # Memoria genérica parametrizada
+│   ├── DomainPreset      # Configuración de dominio
+│   ├── TransferLevel     # Niveles de transferibilidad
+│   ├── Priority          # Sistema de prioridad híbrida
+│   ├── DecayConfig       # Decay temporal exponencial
+│   └── Presets           # Presets predefinidos
+│       ├── SoftwareDevelopment
+│       ├── Conversational
+│       └── CustomerService
 └── Distance              # Métricas
     ├── Cosine
     ├── Euclidean
@@ -737,6 +751,200 @@ println!("Snippets: {}", stats.code_snippets);
 println!("Soluciones: {}", stats.error_solutions);
 ```
 
+## Memoria Genérica (Domain-Agnostic)
+
+Sistema de memoria extensible que funciona para cualquier dominio, no solo desarrollo de software.
+
+### Conceptos Clave
+
+| Concepto | Descripción |
+|----------|-------------|
+| **DomainPreset** | Configuración completa para un dominio (traits + decay + weights) |
+| **TransferLevel** | Nivel de transferibilidad: Instance → Context → Domain → Universal |
+| **Priority** | Prioridad híbrida: Low, Normal, High, Critical |
+| **DecayConfig** | Configuración de decay temporal exponencial |
+
+### Presets Incluidos
+
+| Preset | Uso | Decay | Prioridad |
+|--------|-----|-------|-----------|
+| `SoftwareDevelopment` | Agentes de código | Lento (90 días) | Por utilidad |
+| `Conversational` | Chatbots | Rápido (7 días) | Por recencia |
+| `CustomerService` | Atención al cliente | Normal (30 días) | Manual |
+
+### Uso Básico
+
+```rust
+use minimemory::memory_traits::{GenericMemory, InstanceContext};
+use minimemory::memory_traits::presets::SoftwareDevelopment;
+
+// Crear memoria para desarrollo de software
+let memory = GenericMemory::<SoftwareDevelopment>::new(384)?;
+
+// Establecer contexto
+memory.set_instance("my-project", "rust", "backend");
+
+// Aprender (prioridad automática basada en contenido)
+memory.learn(
+    "fix-auth-bug",
+    &embedding,
+    "Fixed JWT validation bug",
+    "Security fix for token expiration",
+    "success"
+)?;
+
+// Recall con scoring híbrido
+let results = memory.recall(&query_embedding, 5)?;
+for r in results {
+    println!("{}: relevance={:.2}, priority={:?}, transfer={:?}",
+        r.id, r.relevance, r.priority, r.transfer_level);
+}
+```
+
+### Sistema de Prioridad Híbrida
+
+La prioridad se calcula combinando múltiples factores:
+
+```
+priority_score = (base × 0.4) + (frequency × 0.2) + (usefulness × 0.25) + (recency × 0.15) × decay
+```
+
+| Factor | Descripción |
+|--------|-------------|
+| **Base** | Prioridad manual o detectada por keywords (0.25 - 1.0) |
+| **Frequency** | log2(accesos + 1) / 10, capped at 1.0 |
+| **Usefulness** | útiles / accesos (ratio de feedback positivo) |
+| **Recency** | e^(-hours/168), decae con el tiempo |
+| **Decay** | 0.5^(age/half_life), exponencial configurable |
+
+```rust
+use minimemory::memory_traits::{Priority, DecayConfig, PriorityWeights};
+
+// Prioridad manual
+memory.learn_with_priority(
+    "critical-fix",
+    &embedding,
+    "Security patch",
+    "CVE-2024-1234 fix",
+    "deployed",
+    Priority::Critical
+)?;
+
+// Feedback positivo (aumenta usefulness)
+memory.mark_useful("fix-auth-bug");
+
+// Actualizar prioridad
+memory.update_priority("old-task", Priority::Low)?;
+
+// Configurar decay
+memory.set_decay_config(DecayConfig::fast()); // 7 días half-life
+
+// Configurar pesos de prioridad
+memory.set_priority_weights(PriorityWeights::usage_focused());
+```
+
+### Niveles de Transferencia
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     UNIVERSAL (1.0)                         │
+│        Patrones, algoritmos, principios generales           │
+├─────────────────────────────────────────────────────────────┤
+│                      DOMAIN (0.75)                          │
+│         Conocimiento específico del dominio                 │
+├─────────────────────────────────────────────────────────────┤
+│                     CONTEXT (0.50)                          │
+│            Conocimiento del contexto actual                 │
+├─────────────────────────────────────────────────────────────┤
+│                    INSTANCE (0.25)                          │
+│          Conocimiento específico de la instancia            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+```rust
+// Recall solo conocimiento universal
+let universal = memory.recall_universal(&query, 10)?;
+
+// Recall en el mismo dominio
+let domain = memory.recall_same_domain(&query, "backend", 10)?;
+
+// Recall en el mismo contexto
+let context = memory.recall_same_context(&query, "rust", 10)?;
+
+// Recall solo prioridad crítica
+let critical = memory.recall_critical(&query, 5)?;
+
+// Recall alta prioridad (High + Critical)
+let important = memory.recall_high_priority(&query, 10)?;
+```
+
+### Score Combinado Final
+
+```
+combined_score = (relevance × 0.4) + (transfer × 0.3) + (priority × 0.3)
+```
+
+```rust
+// Ajustar pesos del score final
+memory.set_score_weights(0.5, 0.25, 0.25); // 50% relevancia, 25% transfer, 25% priority
+
+// Ajustar umbral de transferibilidad
+memory.set_transfer_threshold(0.5); // Solo incluir si transfer_score >= 0.5
+```
+
+### Crear un Preset Personalizado
+
+```rust
+use minimemory::memory_traits::{
+    DomainClassifier, ConceptExtractor, ContextMatcher,
+    PriorityCalculator, DomainPreset, DecayConfig, PriorityWeights, Priority
+};
+
+// 1. Implementar los traits
+#[derive(Debug, Default)]
+struct MyDomainClassifier;
+
+impl DomainClassifier for MyDomainClassifier {
+    fn domains(&self) -> Vec<&'static str> {
+        vec!["finance", "trading", "risk"]
+    }
+
+    fn classify(&self, content: &str) -> String {
+        if content.contains("trade") { "trading".into() }
+        else if content.contains("risk") { "risk".into() }
+        else { "finance".into() }
+    }
+
+    fn is_related(&self, d1: &str, d2: &str) -> bool {
+        true // Todos relacionados en finanzas
+    }
+}
+
+// 2. Definir el preset
+struct FinancePreset;
+
+impl DomainPreset for FinancePreset {
+    type Domain = MyDomainClassifier;
+    type Concepts = MyConceptExtractor;
+    type Context = MyContextMatcher;
+    type Priority = MyPriorityCalculator;
+
+    fn name() -> &'static str { "Finance" }
+    fn description() -> &'static str { "Memory for financial applications" }
+
+    fn default_decay() -> DecayConfig {
+        DecayConfig::slow() // Conocimiento financiero persiste
+    }
+
+    fn default_weights() -> PriorityWeights {
+        PriorityWeights::manual_focused() // Prioridad manual importante
+    }
+}
+
+// 3. Usar
+let memory = GenericMemory::<FinancePreset>::new(768)?;
+```
+
 ## Rendimiento
 
 | Operación | Flat | HNSW |
@@ -798,6 +1006,11 @@ const results = db.search(new Array(384).fill(0.1), 10);
 - [x] **Índices parciales**
 - [x] **Replicación (Change Log, Sync, Snapshots)**
 - [x] **Memoria Agéntica (Agent Memory Framework)**
+- [x] **Transferencia de conocimiento entre proyectos**
+- [x] **Sistema domain-agnostic con traits**
+- [x] **Prioridad híbrida (manual + automática + uso + recencia)**
+- [x] **Decay temporal exponencial configurable**
+- [x] **Presets: SoftwareDevelopment, Conversational, CustomerService**
 
 ## Licencia
 
