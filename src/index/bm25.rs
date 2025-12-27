@@ -365,7 +365,8 @@ mod tests {
 
         // Search for programming
         let results = index.search("programming", 10);
-        assert_eq!(results.len(), 2); // doc-1 and doc-2 (has "is")
+        assert_eq!(results.len(), 1); // Only doc-1 contains "programming"
+        assert_eq!(results[0].id, "doc-1");
     }
 
     #[test]
