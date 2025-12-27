@@ -1,0 +1,35 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Implementation projects (separate repos)
+minimemory-service/
+minimemory-mcp/
+minimemory-dashboard/
+minimemory-py/
+minimemory-sdk/
+n8n-nodes-minimemory/
+
+# Node modules (if any)
+node_modules/
+
+# Demo data
+demo-data/
+
+# Temporary files
+*.tmp
+*.log
+nul
+
+# Claude
+.claude/
