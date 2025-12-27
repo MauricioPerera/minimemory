@@ -1,0 +1,52 @@
+export {
+  EmbeddingService,
+  createMockEmbeddingService,
+  type EmbeddingDimensions,
+  type EmbeddingOptions,
+  type EmbeddingResult,
+  type BatchEmbeddingResult,
+} from './EmbeddingService.js';
+
+export {
+  AuditService,
+  createAuditLogger,
+  type AuditAction,
+  type ResourceType,
+  type AuditEntry,
+  type AuditLogOptions,
+  type AuditQueryOptions,
+  type AuditQueryResult,
+} from './AuditService.js';
+
+export {
+  KnowledgeService,
+  type TextChunk,
+  type KnowledgeSearchResult,
+  type KnowledgeServiceConfig,
+} from './KnowledgeService.js';
+
+export {
+  WebhookService,
+  createWebhookTrigger,
+  WEBHOOK_EVENTS,
+  type WebhookEventType,
+  type Webhook,
+  type WebhookDelivery,
+  type WebhookEvent,
+  type DeliveryStatus,
+  type CreateWebhookOptions,
+  type UpdateWebhookOptions,
+  type DeliveryQueryOptions,
+  type DeliveryQueryResult,
+} from './WebhookService.js';
+
+export {
+  AgentTokenService,
+  type AgentPermission,
+  type AgentToken,
+  type CreateAgentTokenOptions,
+  type UpdateAgentTokenOptions,
+  type AgentValidationResult,
+  type AgentTokenQueryOptions,
+  type AgentTokenQueryResult,
+} from './AgentTokenService.js';

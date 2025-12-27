@@ -1,0 +1,47 @@
+[package]
+name = "minimemory"
+version = "0.1.0"
+edition = "2021"
+description = "Embedded vector database library for Rust - like SQLite for vectors"
+license = "MIT"
+repository = "https://github.com/yourusername/minimemory"
+keywords = ["vector", "database", "embeddings", "similarity", "hnsw"]
+categories = ["database", "data-structures"]
+
+[lib]
+name = "minimemory"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+memmap2 = "0.9"
+parking_lot = "0.12"
+rand = "0.8"
+rayon = "1.10"
+
+# Python bindings (optional)
+pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+
+# Node.js bindings (optional)
+napi = { version = "2", features = ["napi4"], optional = true }
+napi-derive = { version = "2", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+default = []
+python = ["pyo3"]
+nodejs = ["napi", "napi-derive"]
+ffi = []
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1

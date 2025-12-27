@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "minimemory"
+version = "0.1.0"
+description = "Embedded vector database for Python - like SQLite for vectors"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "minimemory contributors" }
+]
+keywords = ["vector", "database", "embedding", "similarity", "search", "hnsw"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/minimemory/minimemory"
+Repository = "https://github.com/minimemory/minimemory"
+
+[tool.maturin]
+features = ["python"]
+python-source = "python"
+module-name = "minimemory._minimemory"

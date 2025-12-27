@@ -1,0 +1,38 @@
+[
+  {
+    "id": "fruit-apple",
+    "embedding": [0.9, 0.1, 0.2, 0.1, 0.0],
+    "text": "Apple is a red fruit",
+    "category": "fruit"
+  },
+  {
+    "id": "fruit-orange",
+    "embedding": [0.85, 0.15, 0.25, 0.1, 0.0],
+    "text": "Orange is a citrus fruit",
+    "category": "fruit"
+  },
+  {
+    "id": "fruit-banana",
+    "embedding": [0.8, 0.2, 0.3, 0.15, 0.0],
+    "text": "Banana is a yellow fruit",
+    "category": "fruit"
+  },
+  {
+    "id": "animal-dog",
+    "embedding": [0.1, 0.9, 0.1, 0.8, 0.7],
+    "text": "Dog is a friendly pet",
+    "category": "animal"
+  },
+  {
+    "id": "animal-cat",
+    "embedding": [0.15, 0.85, 0.15, 0.75, 0.65],
+    "text": "Cat is an independent pet",
+    "category": "animal"
+  },
+  {
+    "id": "vehicle-car",
+    "embedding": [0.1, 0.1, 0.9, 0.1, 0.1],
+    "text": "Car is a fast vehicle",
+    "category": "vehicle"
+  }
+]
