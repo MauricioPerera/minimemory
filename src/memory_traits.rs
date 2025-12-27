@@ -119,11 +119,12 @@ pub trait ContextMatcher: Send + Sync + Default {
 
 /// Configuracion de un preset de dominio.
 ///
-/// Combina los tres traits en una configuracion cohesiva.
+/// Combina los cuatro traits en una configuracion cohesiva.
 pub trait DomainPreset: Send + Sync + 'static {
     type Domain: DomainClassifier;
     type Concepts: ConceptExtractor;
     type Context: ContextMatcher;
+    type Priority: PriorityCalculator;
 
     /// Nombre del preset.
     fn name() -> &'static str;
@@ -131,12 +132,23 @@ pub trait DomainPreset: Send + Sync + 'static {
     /// Descripcion del preset.
     fn description() -> &'static str;
 
+    /// Configuracion de decay por defecto para este dominio.
+    fn default_decay() -> DecayConfig {
+        DecayConfig::default()
+    }
+
+    /// Pesos de prioridad por defecto para este dominio.
+    fn default_weights() -> PriorityWeights {
+        PriorityWeights::default()
+    }
+
     /// Crea instancias de los componentes.
-    fn create() -> (Self::Domain, Self::Concepts, Self::Context) {
+    fn create() -> (Self::Domain, Self::Concepts, Self::Context, Self::Priority) {
         (
             Self::Domain::default(),
             Self::Concepts::default(),
             Self::Context::default(),
+            Self::Priority::default(),
         )
     }
 }
@@ -204,6 +216,303 @@ impl Default for TransferLevel {
 }
 
 // ============================================================================
+// Priority System (Hibrido)
+// ============================================================================
+
+/// Nivel de prioridad base (manual).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Priority {
+    /// Prioridad minima, puede ser olvidado.
+    Low = 1,
+    /// Prioridad normal, comportamiento por defecto.
+    Normal = 2,
+    /// Prioridad alta, preferido en recall.
+    High = 3,
+    /// Prioridad critica, siempre incluido.
+    Critical = 4,
+}
+
+impl Priority {
+    /// Convierte a string para metadata.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    /// Crea desde string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "low" | "minor" | "trivial" => Some(Self::Low),
+            "normal" | "medium" | "default" => Some(Self::Normal),
+            "high" | "important" | "major" => Some(Self::High),
+            "critical" | "urgent" | "essential" | "security" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
+    /// Score base de prioridad (0.25 - 1.0).
+    pub fn base_score(&self) -> f32 {
+        match self {
+            Self::Low => 0.25,
+            Self::Normal => 0.5,
+            Self::High => 0.75,
+            Self::Critical => 1.0,
+        }
+    }
+}
+
+impl Default for Priority {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+/// Estadisticas de uso de una memoria.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageStats {
+    /// Numero de veces que ha sido accedida.
+    pub access_count: u32,
+    /// Timestamp del ultimo acceso.
+    pub last_accessed: i64,
+    /// Timestamp de creacion.
+    pub created_at: i64,
+    /// Veces que fue util (feedback positivo).
+    pub useful_count: u32,
+}
+
+impl UsageStats {
+    /// Crea nuevas estadisticas con timestamp actual.
+    pub fn new() -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        Self {
+            access_count: 0,
+            last_accessed: now,
+            created_at: now,
+            useful_count: 0,
+        }
+    }
+
+    /// Registra un acceso.
+    pub fn record_access(&mut self) {
+        self.access_count += 1;
+        self.last_accessed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+    }
+
+    /// Registra que fue util.
+    pub fn record_useful(&mut self) {
+        self.useful_count += 1;
+    }
+
+    /// Calcula score por frecuencia de uso (0.0 - 1.0).
+    /// Usa logaritmo para evitar que memorias muy usadas dominen.
+    pub fn frequency_score(&self) -> f32 {
+        if self.access_count == 0 {
+            0.0
+        } else {
+            // log2(access + 1) / 10, capped at 1.0
+            ((self.access_count as f32 + 1.0).log2() / 10.0).min(1.0)
+        }
+    }
+
+    /// Calcula score de utilidad (0.0 - 1.0).
+    pub fn usefulness_score(&self) -> f32 {
+        if self.access_count == 0 {
+            0.5 // Neutral si nunca fue accedida
+        } else {
+            self.useful_count as f32 / self.access_count as f32
+        }
+    }
+
+    /// Edad en segundos.
+    pub fn age_seconds(&self) -> i64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        now - self.created_at
+    }
+
+    /// Segundos desde ultimo acceso.
+    pub fn staleness_seconds(&self) -> i64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        now - self.last_accessed
+    }
+}
+
+/// Configuracion de decay temporal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecayConfig {
+    /// Activar decay temporal.
+    pub enabled: bool,
+    /// Vida media en segundos (tiempo para perder 50% de prioridad).
+    pub half_life_seconds: i64,
+    /// Piso minimo de decay (nunca baja de este valor).
+    pub min_decay: f32,
+    /// Excepciones: niveles que no decaen.
+    pub immune_priorities: Vec<Priority>,
+}
+
+impl Default for DecayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            half_life_seconds: 30 * 24 * 60 * 60, // 30 dias
+            min_decay: 0.1,
+            immune_priorities: vec![Priority::Critical],
+        }
+    }
+}
+
+impl DecayConfig {
+    /// Sin decay (todo persiste igual).
+    pub fn no_decay() -> Self {
+        Self {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
+    /// Decay rapido (1 semana).
+    pub fn fast() -> Self {
+        Self {
+            enabled: true,
+            half_life_seconds: 7 * 24 * 60 * 60,
+            min_decay: 0.2,
+            immune_priorities: vec![Priority::Critical, Priority::High],
+        }
+    }
+
+    /// Decay lento (90 dias).
+    pub fn slow() -> Self {
+        Self {
+            enabled: true,
+            half_life_seconds: 90 * 24 * 60 * 60,
+            min_decay: 0.05,
+            immune_priorities: vec![Priority::Critical],
+        }
+    }
+
+    /// Calcula factor de decay basado en edad.
+    pub fn calculate_decay(&self, age_seconds: i64, priority: Priority) -> f32 {
+        if !self.enabled || self.immune_priorities.contains(&priority) {
+            return 1.0;
+        }
+
+        // Exponential decay: 0.5^(age / half_life)
+        let decay = 0.5_f32.powf(age_seconds as f32 / self.half_life_seconds as f32);
+        decay.max(self.min_decay)
+    }
+}
+
+/// Calculador de prioridad automatica basado en contenido.
+pub trait PriorityCalculator: Send + Sync + Default {
+    /// Calcula prioridad automatica basada en contenido.
+    fn calculate(&self, description: &str, content: &str, outcome: &str) -> Priority;
+
+    /// Keywords que indican prioridad critica.
+    fn critical_keywords(&self) -> Vec<&'static str>;
+
+    /// Keywords que indican prioridad alta.
+    fn high_keywords(&self) -> Vec<&'static str>;
+
+    /// Keywords que indican prioridad baja.
+    fn low_keywords(&self) -> Vec<&'static str>;
+}
+
+/// Pesos para combinar factores de prioridad.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityWeights {
+    /// Peso de prioridad manual/automatica.
+    pub base_priority: f32,
+    /// Peso de frecuencia de uso.
+    pub frequency: f32,
+    /// Peso de utilidad (feedback).
+    pub usefulness: f32,
+    /// Peso de recencia (inverso de staleness).
+    pub recency: f32,
+}
+
+impl Default for PriorityWeights {
+    fn default() -> Self {
+        Self {
+            base_priority: 0.4,
+            frequency: 0.2,
+            usefulness: 0.25,
+            recency: 0.15,
+        }
+    }
+}
+
+impl PriorityWeights {
+    /// Prioriza la prioridad manual.
+    pub fn manual_focused() -> Self {
+        Self {
+            base_priority: 0.6,
+            frequency: 0.15,
+            usefulness: 0.15,
+            recency: 0.1,
+        }
+    }
+
+    /// Prioriza el uso frecuente.
+    pub fn usage_focused() -> Self {
+        Self {
+            base_priority: 0.2,
+            frequency: 0.4,
+            usefulness: 0.25,
+            recency: 0.15,
+        }
+    }
+
+    /// Prioriza la recencia.
+    pub fn recency_focused() -> Self {
+        Self {
+            base_priority: 0.25,
+            frequency: 0.15,
+            usefulness: 0.2,
+            recency: 0.4,
+        }
+    }
+
+    /// Calcula score combinado de prioridad.
+    pub fn calculate_score(
+        &self,
+        base: f32,
+        frequency: f32,
+        usefulness: f32,
+        recency: f32,
+    ) -> f32 {
+        (self.base_priority * base
+            + self.frequency * frequency
+            + self.usefulness * usefulness
+            + self.recency * recency)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Score de recencia basado en staleness.
+pub fn recency_score(staleness_seconds: i64) -> f32 {
+    // Score exponencial: 1.0 si es reciente, decae con el tiempo
+    // 1 hora -> 0.95, 1 dia -> 0.75, 1 semana -> 0.5, 1 mes -> 0.25
+    let hours = staleness_seconds as f32 / 3600.0;
+    (-hours / 168.0).exp() // 168 horas = 1 semana como punto medio
+}
+
+// ============================================================================
 // Instance Context (Generico)
 // ============================================================================
 
@@ -252,7 +561,7 @@ impl InstanceContext {
 // Memory Recall (Generico)
 // ============================================================================
 
-/// Resultado de recall con informacion de transferibilidad.
+/// Resultado de recall con informacion de transferibilidad y prioridad.
 #[derive(Debug, Clone)]
 pub struct GenericRecall {
     /// ID del recuerdo.
@@ -261,10 +570,16 @@ pub struct GenericRecall {
     pub relevance: f32,
     /// Nivel de transferibilidad.
     pub transfer_level: TransferLevel,
-    /// Score combinado (relevancia * transferibilidad).
+    /// Prioridad base del recuerdo.
+    pub priority: Priority,
+    /// Score de prioridad hibrido (incluye uso, recencia, decay).
+    pub priority_score: f32,
+    /// Score combinado final.
     pub combined_score: f32,
     /// Conceptos abstractos asociados.
     pub concepts: Vec<String>,
+    /// Estadisticas de uso.
+    pub usage: UsageStats,
     /// Metadata del recuerdo.
     pub metadata: Metadata,
 }
@@ -283,10 +598,22 @@ pub struct GenericMemory<P: DomainPreset> {
     concept_extractor: P::Concepts,
     /// Evaluador de contexto.
     context_matcher: P::Context,
+    /// Calculador de prioridad.
+    priority_calculator: P::Priority,
     /// Contexto actual.
     current_context: RwLock<Option<InstanceContext>>,
-    /// Peso de relevancia vs transferibilidad.
+    /// Estadisticas de uso por ID.
+    usage_stats: RwLock<HashMap<String, UsageStats>>,
+    /// Configuracion de decay.
+    decay_config: DecayConfig,
+    /// Pesos de prioridad.
+    priority_weights: PriorityWeights,
+    /// Peso de relevancia vs transferibilidad vs prioridad.
     relevance_weight: f32,
+    /// Peso de transferibilidad.
+    transfer_weight: f32,
+    /// Peso de prioridad.
+    priority_weight: f32,
     /// Umbral minimo de transferibilidad.
     transfer_threshold: f32,
 }
@@ -296,15 +623,21 @@ impl<P: DomainPreset> GenericMemory<P> {
     pub fn new(dimensions: usize) -> Result<Self> {
         let config = Config::new(dimensions);
         let db = VectorDB::with_fulltext(config, vec!["content".into(), "description".into()])?;
-        let (domain_classifier, concept_extractor, context_matcher) = P::create();
+        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) = P::create();
 
         Ok(Self {
             db,
             domain_classifier,
             concept_extractor,
             context_matcher,
+            priority_calculator,
             current_context: RwLock::new(None),
-            relevance_weight: 0.6,
+            usage_stats: RwLock::new(HashMap::new()),
+            decay_config: P::default_decay(),
+            priority_weights: P::default_weights(),
+            relevance_weight: 0.4,
+            transfer_weight: 0.3,
+            priority_weight: 0.3,
             transfer_threshold: 0.3,
         })
     }
@@ -312,22 +645,42 @@ impl<P: DomainPreset> GenericMemory<P> {
     /// Crea con configuracion personalizada.
     pub fn with_config(config: Config) -> Result<Self> {
         let db = VectorDB::with_fulltext(config, vec!["content".into(), "description".into()])?;
-        let (domain_classifier, concept_extractor, context_matcher) = P::create();
+        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) = P::create();
 
         Ok(Self {
             db,
             domain_classifier,
             concept_extractor,
             context_matcher,
+            priority_calculator,
             current_context: RwLock::new(None),
-            relevance_weight: 0.6,
+            usage_stats: RwLock::new(HashMap::new()),
+            decay_config: P::default_decay(),
+            priority_weights: P::default_weights(),
+            relevance_weight: 0.4,
+            transfer_weight: 0.3,
+            priority_weight: 0.3,
             transfer_threshold: 0.3,
         })
     }
 
-    /// Establece el peso de relevancia (0.0 - 1.0).
-    pub fn set_relevance_weight(&mut self, weight: f32) {
-        self.relevance_weight = weight.clamp(0.0, 1.0);
+    /// Establece la configuracion de decay.
+    pub fn set_decay_config(&mut self, config: DecayConfig) {
+        self.decay_config = config;
+    }
+
+    /// Establece los pesos de prioridad.
+    pub fn set_priority_weights(&mut self, weights: PriorityWeights) {
+        self.priority_weights = weights;
+    }
+
+    /// Establece los pesos del score final.
+    /// Los tres pesos deben sumar 1.0.
+    pub fn set_score_weights(&mut self, relevance: f32, transfer: f32, priority: f32) {
+        let total = relevance + transfer + priority;
+        self.relevance_weight = relevance / total;
+        self.transfer_weight = transfer / total;
+        self.priority_weight = priority / total;
     }
 
     /// Establece el umbral de transferibilidad.
@@ -359,7 +712,7 @@ impl<P: DomainPreset> GenericMemory<P> {
         self.current_context.read().clone()
     }
 
-    /// Aprende nuevo conocimiento.
+    /// Aprende nuevo conocimiento con prioridad automatica.
     pub fn learn(
         &self,
         id: &str,
@@ -367,6 +720,21 @@ impl<P: DomainPreset> GenericMemory<P> {
         content: &str,
         description: &str,
         outcome: &str,
+    ) -> Result<VectorId> {
+        // Calcular prioridad automatica
+        let priority = self.priority_calculator.calculate(description, content, outcome);
+        self.learn_with_priority(id, embedding, content, description, outcome, priority)
+    }
+
+    /// Aprende nuevo conocimiento con prioridad manual.
+    pub fn learn_with_priority(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        content: &str,
+        description: &str,
+        outcome: &str,
+        priority: Priority,
     ) -> Result<VectorId> {
         let ctx = self.current_context.read().clone();
 
@@ -376,12 +744,17 @@ impl<P: DomainPreset> GenericMemory<P> {
         // Inferir nivel de transferencia
         let transfer_level = self.infer_transfer_level(&concepts, content);
 
+        // Crear estadisticas de uso
+        let usage = UsageStats::new();
+        self.usage_stats.write().insert(id.to_string(), usage);
+
         // Construir metadata
         let mut meta = Metadata::new();
         meta.insert("content", content);
         meta.insert("description", description);
         meta.insert("outcome", outcome);
         meta.insert("transfer_level", transfer_level.as_str());
+        meta.insert("priority", priority.as_str());
         meta.insert("concepts", concepts.join(","));
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -407,6 +780,26 @@ impl<P: DomainPreset> GenericMemory<P> {
 
         self.db.insert(id, embedding, Some(meta))?;
         Ok(id.to_string())
+    }
+
+    /// Registra feedback positivo (la memoria fue util).
+    pub fn mark_useful(&self, id: &str) {
+        if let Some(stats) = self.usage_stats.write().get_mut(id) {
+            stats.record_useful();
+        }
+    }
+
+    /// Actualiza la prioridad de una memoria existente.
+    pub fn update_priority(&self, id: &str, priority: Priority) -> Result<()> {
+        // Get current vector and update metadata
+        if let Some((vec_opt, meta_opt)) = self.db.get(id)? {
+            if let (Some(vec), Some(mut meta)) = (vec_opt, meta_opt) {
+                meta.insert("priority", priority.as_str());
+                // Re-insert with updated metadata
+                self.db.insert(id, &vec, Some(meta))?;
+            }
+        }
+        Ok(())
     }
 
     /// Inferir nivel de transferencia basado en conceptos y contenido.
@@ -450,7 +843,7 @@ impl<P: DomainPreset> GenericMemory<P> {
         }
     }
 
-    /// Recall con filtrado por transferibilidad.
+    /// Recall con filtrado por transferibilidad y prioridad hibrida.
     pub fn recall(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
         let ctx = self.current_context.read().clone();
 
@@ -461,6 +854,7 @@ impl<P: DomainPreset> GenericMemory<P> {
             .into_iter()
             .filter_map(|r| {
                 let meta = r.metadata?;
+                let id = r.id.clone();
 
                 // Obtener nivel de transferencia
                 let transfer_level = meta
@@ -476,34 +870,85 @@ impl<P: DomainPreset> GenericMemory<P> {
                     return None;
                 }
 
-                // Score combinado
+                // Obtener prioridad base
+                let priority = meta
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .and_then(Priority::from_str)
+                    .unwrap_or(Priority::Normal);
+
+                // Obtener o crear estadisticas de uso
+                let usage = self.usage_stats.read().get(&id).cloned().unwrap_or_default();
+
+                // Calcular score de prioridad hibrido
+                let priority_score = self.calculate_priority_score(&usage, priority);
+
+                // Score combinado final: relevancia + transferibilidad + prioridad
                 let relevance = 1.0 - r.distance; // Convertir distancia a similitud
                 let combined_score = relevance * self.relevance_weight
-                    + transfer_score * (1.0 - self.relevance_weight);
+                    + transfer_score * self.transfer_weight
+                    + priority_score * self.priority_weight;
 
                 // Extraer conceptos
                 let concepts = meta
                     .get("concepts")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.split(',').map(String::from).collect())
+                    .map(|s: &str| s.split(',').map(String::from).collect())
                     .unwrap_or_default();
 
                 Some(GenericRecall {
-                    id: r.id,
+                    id,
                     relevance,
                     transfer_level,
+                    priority,
+                    priority_score,
                     combined_score,
                     concepts,
+                    usage,
                     metadata: meta,
                 })
             })
             .collect();
+
+        // Registrar acceso para todas las memorias retornadas
+        {
+            let mut stats = self.usage_stats.write();
+            for recall in &recalls {
+                if let Some(s) = stats.get_mut(&recall.id) {
+                    s.record_access();
+                }
+            }
+        }
 
         // Ordenar por score combinado
         recalls.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap());
         recalls.truncate(k);
 
         Ok(recalls)
+    }
+
+    /// Calcula el score de prioridad hibrido.
+    fn calculate_priority_score(&self, usage: &UsageStats, priority: Priority) -> f32 {
+        // Score base de prioridad
+        let base = priority.base_score();
+
+        // Score de frecuencia
+        let frequency = usage.frequency_score();
+
+        // Score de utilidad
+        let usefulness = usage.usefulness_score();
+
+        // Score de recencia
+        let recency = recency_score(usage.staleness_seconds());
+
+        // Combinar con pesos
+        let raw_score = self.priority_weights.calculate_score(base, frequency, usefulness, recency);
+
+        // Aplicar decay temporal
+        let age = usage.age_seconds();
+        let decay = self.decay_config.calculate_decay(age, priority);
+
+        raw_score * decay
     }
 
     /// Calcula el score de transferibilidad para un recuerdo.
@@ -552,6 +997,43 @@ impl<P: DomainPreset> GenericMemory<P> {
         }
     }
 
+    /// Helper para crear GenericRecall con todos los campos.
+    fn make_recall(&self, id: String, distance: f32, meta: Metadata) -> GenericRecall {
+        let transfer_level = meta
+            .get("transfer_level")
+            .and_then(|v| v.as_str())
+            .and_then(TransferLevel::from_str)
+            .unwrap_or(TransferLevel::Instance);
+
+        let priority = meta
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .and_then(Priority::from_str)
+            .unwrap_or(Priority::Normal);
+
+        let usage = self.usage_stats.read().get(&id).cloned().unwrap_or_default();
+        let priority_score = self.calculate_priority_score(&usage, priority);
+        let relevance = 1.0 - distance;
+
+        let concepts = meta
+            .get("concepts")
+            .and_then(|v| v.as_str())
+            .map(|s: &str| s.split(',').map(String::from).collect())
+            .unwrap_or_default();
+
+        GenericRecall {
+            id,
+            relevance,
+            transfer_level,
+            priority,
+            priority_score,
+            combined_score: relevance, // Simple score for filtered queries
+            concepts,
+            usage,
+            metadata: meta,
+        }
+    }
+
     /// Recall solo de conocimiento universal.
     pub fn recall_universal(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
         let results = self.db.search_with_filter(
@@ -564,20 +1046,7 @@ impl<P: DomainPreset> GenericMemory<P> {
             .into_iter()
             .filter_map(|r| {
                 let meta = r.metadata?;
-                let concepts = meta
-                    .get("concepts")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.split(',').map(String::from).collect())
-                    .unwrap_or_default();
-
-                Some(GenericRecall {
-                    id: r.id,
-                    relevance: 1.0 - r.distance,
-                    transfer_level: TransferLevel::Universal,
-                    combined_score: 1.0 - r.distance,
-                    concepts,
-                    metadata: meta,
-                })
+                Some(self.make_recall(r.id, r.distance, meta))
             })
             .collect())
     }
@@ -605,26 +1074,7 @@ impl<P: DomainPreset> GenericMemory<P> {
             .into_iter()
             .filter_map(|r| {
                 let meta = r.metadata?;
-                let transfer_level = meta
-                    .get("transfer_level")
-                    .and_then(|v| v.as_str())
-                    .and_then(TransferLevel::from_str)
-                    .unwrap_or(TransferLevel::Domain);
-
-                let concepts = meta
-                    .get("concepts")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.split(',').map(String::from).collect())
-                    .unwrap_or_default();
-
-                Some(GenericRecall {
-                    id: r.id,
-                    relevance: 1.0 - r.distance,
-                    transfer_level,
-                    combined_score: 1.0 - r.distance,
-                    concepts,
-                    metadata: meta,
-                })
+                Some(self.make_recall(r.id, r.distance, meta))
             })
             .collect())
     }
@@ -652,28 +1102,51 @@ impl<P: DomainPreset> GenericMemory<P> {
             .into_iter()
             .filter_map(|r| {
                 let meta = r.metadata?;
-                let transfer_level = meta
-                    .get("transfer_level")
-                    .and_then(|v| v.as_str())
-                    .and_then(TransferLevel::from_str)
-                    .unwrap_or(TransferLevel::Context);
-
-                let concepts = meta
-                    .get("concepts")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.split(',').map(String::from).collect())
-                    .unwrap_or_default();
-
-                Some(GenericRecall {
-                    id: r.id,
-                    relevance: 1.0 - r.distance,
-                    transfer_level,
-                    combined_score: 1.0 - r.distance,
-                    concepts,
-                    metadata: meta,
-                })
+                Some(self.make_recall(r.id, r.distance, meta))
             })
             .collect())
+    }
+
+    /// Recall solo de prioridad critica.
+    pub fn recall_critical(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
+        let results = self.db.search_with_filter(
+            query_embedding,
+            k,
+            Filter::eq("priority", "critical"),
+        )?;
+
+        Ok(results
+            .into_iter()
+            .filter_map(|r| {
+                let meta = r.metadata?;
+                Some(self.make_recall(r.id, r.distance, meta))
+            })
+            .collect())
+    }
+
+    /// Recall de prioridad alta o critica.
+    pub fn recall_high_priority(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
+        let results = self.db.search_with_filter(
+            query_embedding,
+            k * 2,
+            Filter::or(vec![
+                Filter::eq("priority", "critical"),
+                Filter::eq("priority", "high"),
+            ]),
+        )?;
+
+        let mut recalls: Vec<GenericRecall> = results
+            .into_iter()
+            .filter_map(|r| {
+                let meta = r.metadata?;
+                Some(self.make_recall(r.id, r.distance, meta))
+            })
+            .collect();
+
+        // Sort by priority score
+        recalls.sort_by(|a, b| b.priority_score.partial_cmp(&a.priority_score).unwrap());
+        recalls.truncate(k);
+        Ok(recalls)
     }
 
     /// Busqueda por keywords.
@@ -689,19 +1162,30 @@ impl<P: DomainPreset> GenericMemory<P> {
                     .and_then(|v| v.as_str())
                     .and_then(TransferLevel::from_str)
                     .unwrap_or(TransferLevel::Instance);
+                let priority = meta
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .and_then(Priority::from_str)
+                    .unwrap_or(Priority::Normal);
+                let id = r.id.clone();
+                let usage = self.usage_stats.read().get(&id).cloned().unwrap_or_default();
+                let priority_score = self.calculate_priority_score(&usage, priority);
 
                 let concepts = meta
                     .get("concepts")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.split(',').map(String::from).collect())
+                    .map(|s: &str| s.split(',').map(String::from).collect())
                     .unwrap_or_default();
 
                 Some(GenericRecall {
-                    id: r.id,
+                    id,
                     relevance: r.score,
                     transfer_level,
+                    priority,
+                    priority_score,
                     combined_score: r.score,
                     concepts,
+                    usage,
                     metadata: meta,
                 })
             })
@@ -710,10 +1194,20 @@ impl<P: DomainPreset> GenericMemory<P> {
 
     /// Estadisticas de la memoria.
     pub fn stats(&self) -> MemoryStats {
+        let usage_stats = self.usage_stats.read();
+        let total_accesses: u32 = usage_stats.values().map(|u| u.access_count).sum();
+        let avg_usefulness = if usage_stats.is_empty() {
+            0.0
+        } else {
+            usage_stats.values().map(|u| u.usefulness_score()).sum::<f32>() / usage_stats.len() as f32
+        };
+
         MemoryStats {
             total_memories: self.db.len(),
             preset_name: P::name().to_string(),
             has_context: self.current_context.read().is_some(),
+            total_accesses,
+            avg_usefulness,
         }
     }
 }
@@ -724,6 +1218,8 @@ pub struct MemoryStats {
     pub total_memories: usize,
     pub preset_name: String,
     pub has_context: bool,
+    pub total_accesses: u32,
+    pub avg_usefulness: f32,
 }
 
 // ============================================================================
@@ -895,6 +1391,56 @@ pub mod presets {
         }
     }
 
+    /// Calculador de prioridad para desarrollo de software.
+    #[derive(Debug, Default)]
+    pub struct SoftwarePriorityCalculator;
+
+    impl PriorityCalculator for SoftwarePriorityCalculator {
+        fn calculate(&self, description: &str, content: &str, outcome: &str) -> Priority {
+            let text = format!("{} {} {}", description, content, outcome).to_lowercase();
+
+            // Critical: security, production issues, data loss
+            if self.critical_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::Critical;
+            }
+
+            // High: bugs, errors, performance
+            if self.high_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::High;
+            }
+
+            // Low: style, comments, documentation
+            if self.low_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::Low;
+            }
+
+            Priority::Normal
+        }
+
+        fn critical_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "security", "vulnerability", "cve", "injection", "xss", "csrf",
+                "production", "outage", "data loss", "corruption", "breach",
+                "critical", "urgent", "emergency", "hotfix",
+            ]
+        }
+
+        fn high_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "bug", "error", "exception", "crash", "failure", "broken",
+                "performance", "slow", "memory leak", "timeout",
+                "important", "priority", "blocking",
+            ]
+        }
+
+        fn low_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "style", "formatting", "comment", "typo", "rename",
+                "refactor", "cleanup", "todo", "nice to have",
+            ]
+        }
+    }
+
     /// Preset para desarrollo de software.
     pub struct SoftwareDevelopment;
 
@@ -902,6 +1448,7 @@ pub mod presets {
         type Domain = SoftwareDomainClassifier;
         type Concepts = SoftwareConceptExtractor;
         type Context = ProgrammingLanguageMatcher;
+        type Priority = SoftwarePriorityCalculator;
 
         fn name() -> &'static str {
             "Software Development"
@@ -909,6 +1456,21 @@ pub mod presets {
 
         fn description() -> &'static str {
             "Memory system for software development agents with code-aware transfer"
+        }
+
+        fn default_decay() -> DecayConfig {
+            // Code knowledge decays slowly (90 days)
+            DecayConfig::slow()
+        }
+
+        fn default_weights() -> PriorityWeights {
+            // Prioritize usefulness for code
+            PriorityWeights {
+                base_priority: 0.3,
+                frequency: 0.25,
+                usefulness: 0.35,
+                recency: 0.1,
+            }
         }
     }
 
@@ -1057,6 +1619,56 @@ pub mod presets {
         }
     }
 
+    /// Calculador de prioridad conversacional.
+    #[derive(Debug, Default)]
+    pub struct ConversationalPriorityCalculator;
+
+    impl PriorityCalculator for ConversationalPriorityCalculator {
+        fn calculate(&self, description: &str, content: &str, outcome: &str) -> Priority {
+            let text = format!("{} {} {}", description, content, outcome).to_lowercase();
+
+            // Critical: user preferences, safety, explicit requests
+            if self.critical_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::Critical;
+            }
+
+            // High: emotional states, important preferences
+            if self.high_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::High;
+            }
+
+            // Low: casual interactions, generic responses
+            if self.low_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::Low;
+            }
+
+            Priority::Normal
+        }
+
+        fn critical_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "never", "always", "hate", "love", "allergy", "allergic",
+                "important", "remember", "don't forget", "must",
+                "preference", "please don't", "stop",
+            ]
+        }
+
+        fn high_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "frustrated", "angry", "upset", "disappointed",
+                "happy", "excited", "grateful", "thank",
+                "favorite", "prefer", "like", "dislike",
+            ]
+        }
+
+        fn low_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "ok", "fine", "sure", "maybe", "whatever",
+                "casual", "just", "random",
+            ]
+        }
+    }
+
     /// Preset para chatbots y agentes conversacionales.
     pub struct Conversational;
 
@@ -1064,6 +1676,7 @@ pub mod presets {
         type Domain = ConversationalDomainClassifier;
         type Concepts = ConversationalConceptExtractor;
         type Context = ConversationalToneMatcher;
+        type Priority = ConversationalPriorityCalculator;
 
         fn name() -> &'static str {
             "Conversational"
@@ -1071,6 +1684,16 @@ pub mod presets {
 
         fn description() -> &'static str {
             "Memory system for chatbots and conversational agents"
+        }
+
+        fn default_decay() -> DecayConfig {
+            // Conversations decay faster (1 week)
+            DecayConfig::fast()
+        }
+
+        fn default_weights() -> PriorityWeights {
+            // Prioritize recency for conversations
+            PriorityWeights::recency_focused()
         }
     }
 
@@ -1214,6 +1837,56 @@ pub mod presets {
         }
     }
 
+    /// Calculador de prioridad para servicio al cliente.
+    #[derive(Debug, Default)]
+    pub struct CustomerServicePriorityCalculator;
+
+    impl PriorityCalculator for CustomerServicePriorityCalculator {
+        fn calculate(&self, description: &str, content: &str, outcome: &str) -> Priority {
+            let text = format!("{} {} {}", description, content, outcome).to_lowercase();
+
+            // Critical: VIP, legal, escalations
+            if self.critical_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::Critical;
+            }
+
+            // High: complaints, refunds, unhappy
+            if self.high_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::High;
+            }
+
+            // Low: general inquiries, routine
+            if self.low_keywords().iter().any(|k| text.contains(k)) {
+                return Priority::Low;
+            }
+
+            Priority::Normal
+        }
+
+        fn critical_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "vip", "enterprise", "legal", "lawyer", "sue",
+                "escalate", "manager", "supervisor", "ceo",
+                "fraud", "breach", "unauthorized",
+            ]
+        }
+
+        fn high_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "complaint", "unhappy", "refund", "cancel",
+                "broken", "defective", "wrong", "missing",
+                "urgent", "immediately", "asap",
+            ]
+        }
+
+        fn low_keywords(&self) -> Vec<&'static str> {
+            vec![
+                "question", "inquiry", "information", "how to",
+                "general", "routine", "standard",
+            ]
+        }
+    }
+
     /// Preset para servicio al cliente.
     pub struct CustomerService;
 
@@ -1221,6 +1894,7 @@ pub mod presets {
         type Domain = CustomerServiceDomainClassifier;
         type Concepts = CustomerServiceConceptExtractor;
         type Context = CustomerTierMatcher;
+        type Priority = CustomerServicePriorityCalculator;
 
         fn name() -> &'static str {
             "Customer Service"
@@ -1228,6 +1902,16 @@ pub mod presets {
 
         fn description() -> &'static str {
             "Memory system for customer service agents"
+        }
+
+        fn default_decay() -> DecayConfig {
+            // Customer interactions decay moderately (30 days)
+            DecayConfig::default()
+        }
+
+        fn default_weights() -> PriorityWeights {
+            // Prioritize manual priority for customer service
+            PriorityWeights::manual_focused()
         }
     }
 }
@@ -1364,5 +2048,191 @@ mod tests {
         assert_eq!(SoftwareDevelopment::name(), "Software Development");
         assert_eq!(Conversational::name(), "Conversational");
         assert_eq!(CustomerService::name(), "Customer Service");
+    }
+
+    // ========================================================================
+    // Priority System Tests
+    // ========================================================================
+
+    #[test]
+    fn test_priority_ordering() {
+        assert!(Priority::Critical > Priority::High);
+        assert!(Priority::High > Priority::Normal);
+        assert!(Priority::Normal > Priority::Low);
+    }
+
+    #[test]
+    fn test_priority_scores() {
+        assert_eq!(Priority::Critical.base_score(), 1.0);
+        assert_eq!(Priority::High.base_score(), 0.75);
+        assert_eq!(Priority::Normal.base_score(), 0.5);
+        assert_eq!(Priority::Low.base_score(), 0.25);
+    }
+
+    #[test]
+    fn test_priority_from_str() {
+        assert_eq!(Priority::from_str("critical"), Some(Priority::Critical));
+        assert_eq!(Priority::from_str("urgent"), Some(Priority::Critical));
+        assert_eq!(Priority::from_str("high"), Some(Priority::High));
+        assert_eq!(Priority::from_str("normal"), Some(Priority::Normal));
+        assert_eq!(Priority::from_str("low"), Some(Priority::Low));
+        assert_eq!(Priority::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_usage_stats_frequency_score() {
+        let mut stats = UsageStats::new();
+        assert_eq!(stats.frequency_score(), 0.0);
+
+        stats.access_count = 1;
+        assert!(stats.frequency_score() > 0.0);
+
+        stats.access_count = 100;
+        assert!(stats.frequency_score() > 0.5);
+        assert!(stats.frequency_score() <= 1.0);
+    }
+
+    #[test]
+    fn test_usage_stats_usefulness() {
+        let mut stats = UsageStats::new();
+        assert_eq!(stats.usefulness_score(), 0.5); // Neutral when no access
+
+        stats.access_count = 10;
+        stats.useful_count = 8;
+        assert_eq!(stats.usefulness_score(), 0.8);
+    }
+
+    #[test]
+    fn test_decay_config_calculation() {
+        let config = DecayConfig::default();
+
+        // Critical priority should not decay
+        assert_eq!(config.calculate_decay(1000000, Priority::Critical), 1.0);
+
+        // Normal priority should decay
+        let decay = config.calculate_decay(30 * 24 * 60 * 60, Priority::Normal);
+        assert!(decay < 1.0);
+        assert!(decay >= 0.4); // After half-life, should be around 0.5
+    }
+
+    #[test]
+    fn test_decay_config_no_decay() {
+        let config = DecayConfig::no_decay();
+        assert_eq!(config.calculate_decay(1000000, Priority::Low), 1.0);
+    }
+
+    #[test]
+    fn test_priority_weights() {
+        let weights = PriorityWeights::default();
+        let score = weights.calculate_score(0.5, 0.3, 0.8, 0.6);
+        assert!(score > 0.0 && score <= 1.0);
+    }
+
+    #[test]
+    fn test_recency_score() {
+        // Very recent should be high
+        assert!(recency_score(0) > 0.99);
+
+        // 1 week old should be around 0.37 (e^-1)
+        let week_old = recency_score(7 * 24 * 60 * 60);
+        assert!(week_old > 0.3 && week_old < 0.5);
+
+        // Very old should be low
+        assert!(recency_score(365 * 24 * 60 * 60) < 0.1);
+    }
+
+    #[test]
+    fn test_software_priority_calculator() {
+        let calc = SoftwarePriorityCalculator;
+
+        // Security issue = Critical
+        assert_eq!(
+            calc.calculate("XSS vulnerability fix", "sanitize input", "fixed"),
+            Priority::Critical
+        );
+
+        // Bug = High
+        assert_eq!(
+            calc.calculate("Bug fix", "crash on startup", "resolved"),
+            Priority::High
+        );
+
+        // Style = Low
+        assert_eq!(
+            calc.calculate("Formatting", "apply prettier", "done"),
+            Priority::Low
+        );
+
+        // Normal code = Normal
+        assert_eq!(
+            calc.calculate("Add feature", "new button", "completed"),
+            Priority::Normal
+        );
+    }
+
+    #[test]
+    fn test_conversational_priority_calculator() {
+        let calc = ConversationalPriorityCalculator;
+
+        // User preference = Critical
+        assert_eq!(
+            calc.calculate("User preference", "I never want spam", "noted"),
+            Priority::Critical
+        );
+
+        // Emotional state = High
+        assert_eq!(
+            calc.calculate("User upset", "I'm frustrated", "apologized"),
+            Priority::High
+        );
+
+        // Casual = Low
+        assert_eq!(
+            calc.calculate("Casual chat", "just ok", "acknowledged"),
+            Priority::Low
+        );
+    }
+
+    #[test]
+    fn test_customer_service_priority_calculator() {
+        let calc = CustomerServicePriorityCalculator;
+
+        // VIP = Critical
+        assert_eq!(
+            calc.calculate("VIP customer", "enterprise account", "handled"),
+            Priority::Critical
+        );
+
+        // Complaint = High
+        assert_eq!(
+            calc.calculate("Customer complaint", "refund request", "processed"),
+            Priority::High
+        );
+
+        // Inquiry = Low
+        assert_eq!(
+            calc.calculate("General question", "product information", "answered"),
+            Priority::Low
+        );
+    }
+
+    #[test]
+    fn test_priority_weights_presets() {
+        let manual = PriorityWeights::manual_focused();
+        assert!(manual.base_priority > manual.frequency);
+
+        let usage = PriorityWeights::usage_focused();
+        assert!(usage.frequency > usage.base_priority);
+
+        let recency = PriorityWeights::recency_focused();
+        assert!(recency.recency > recency.base_priority);
+    }
+
+    #[test]
+    fn test_memory_stats_includes_usage() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(4).unwrap();
+        let stats = memory.stats();
+        assert_eq!(stats.total_accesses, 0);
+        assert_eq!(stats.avg_usefulness, 0.0);
     }
 }
