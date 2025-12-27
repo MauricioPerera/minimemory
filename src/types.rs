@@ -114,6 +114,40 @@ impl From<bool> for MetadataValue {
     }
 }
 
+impl MetadataValue {
+    /// Returns the value as a string slice if it's a String variant.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            MetadataValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as an i64 if it's an Int variant.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            MetadataValue::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as an f64 if it's a Float variant.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            MetadataValue::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as a bool if it's a Bool variant.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            MetadataValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
 /// Resultado de una búsqueda de similitud.
 ///
 /// Contiene el ID del vector encontrado, su distancia al query,

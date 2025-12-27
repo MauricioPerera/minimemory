@@ -153,6 +153,7 @@ pub mod partial_index;
 pub mod replication;
 pub mod agent_memory;
 pub mod transfer;
+pub mod memory_traits;
 
 // Bindings para otros lenguajes
 #[cfg(any(feature = "python", feature = "nodejs", feature = "ffi"))]
