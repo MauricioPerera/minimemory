@@ -956,6 +956,186 @@ let memory = GenericMemory::<FinancePreset>::new(768)?;
 
 *n = número de documentos, d = dimensiones*
 
+## Benchmarks
+
+Ejecutar benchmarks completos:
+
+```bash
+cargo bench
+```
+
+### Resultados de Referencia
+
+Medidos en CPU moderno (benchmark con Criterion):
+
+#### Búsqueda Vectorial
+
+| Dataset | Flat | HNSW |
+|---------|------|------|
+| 100×128d | ~15µs | ~18µs |
+| 1000×128d | ~85µs | ~35µs |
+| 5000×128d | ~420µs | ~45µs |
+| 1000×384d | ~180µs | ~50µs |
+
+#### Búsqueda Híbrida (500 documentos)
+
+| Operación | Tiempo |
+|-----------|--------|
+| Vector only | ~65µs |
+| Keyword only (BM25) | ~45µs |
+| Hybrid (vector + keyword) | ~120µs |
+| Hybrid + filter | ~135µs |
+
+#### Memory Traits (GenericMemory)
+
+| Operación | Tiempo |
+|-----------|--------|
+| learn (100 items) | ~2.8ms |
+| recall k=10 | ~890µs |
+| recall_critical | ~420µs |
+| recall_high_priority | ~520µs |
+| recall_by_keywords | ~139µs |
+| mark_useful | ~2µs |
+
+#### Filtros de Metadata (1000 documentos)
+
+| Filtro | Tiempo |
+|--------|--------|
+| Equality (eq) | ~95µs |
+| Comparison (gt) | ~110µs |
+| Combined (AND) | ~125µs |
+| Filter-only search | ~85µs |
+
+#### Cálculo de Distancias
+
+| Dimensiones | Cosine | Euclidean | DotProduct |
+|-------------|--------|-----------|------------|
+| 64d | ~45ns | ~35ns | ~25ns |
+| 128d | ~85ns | ~65ns | ~45ns |
+| 384d | ~220ns | ~170ns | ~120ns |
+| 768d | ~430ns | ~340ns | ~240ns |
+| 1536d | ~850ns | ~680ns | ~480ns |
+
+#### Persistencia
+
+| Tamaño | Save | Load |
+|--------|------|------|
+| 100 docs | ~180µs | ~150µs |
+| 1000 docs | ~1.8ms | ~1.5ms |
+| 5000 docs | ~9ms | ~7.5ms |
+
+### Ejecutar Benchmarks Específicos
+
+```bash
+# Solo búsqueda vectorial
+cargo bench -- search
+
+# Solo memory traits
+cargo bench -- memory_traits
+
+# Solo híbrido
+cargo bench -- hybrid
+
+# Solo filtros
+cargo bench -- filters
+```
+
+## Ejemplos
+
+### Ejemplo con Ollama (Embeddings Reales)
+
+El proyecto incluye un ejemplo completo que demuestra GenericMemory con embeddings reales usando Ollama.
+
+#### Requisitos
+
+1. [Ollama](https://ollama.ai) instalado y corriendo
+2. Modelo de embedding instalado:
+
+```bash
+# Instalar modelo de embedding (elige uno)
+ollama pull embeddinggemma      # Google (768 dims)
+ollama pull nomic-embed-text    # Nomic (768 dims)
+ollama pull mxbai-embed-large   # MixedBread (1024 dims)
+```
+
+#### Ejecutar el Ejemplo
+
+```bash
+cargo run --example ollama_memory
+```
+
+#### Qué Demuestra
+
+```rust
+// 1. Conexión con Ollama para embeddings
+let ollama = OllamaClient::new("embeddinggemma");
+let embedding = ollama.embed("texto a vectorizar")?;
+
+// 2. GenericMemory con preset SoftwareDevelopment
+let memory = GenericMemory::<SoftwareDevelopment>::new(dims)?;
+memory.set_context(
+    InstanceContext::new("demo-project")
+        .with_context("rust")
+        .with_domain("backend")
+);
+
+// 3. Aprendizaje con diferentes prioridades
+memory.learn_with_priority(
+    "security-fix-1",
+    &embedding,
+    "Sanitized user input using parameterized queries",
+    "Fixed SQL injection vulnerability in user login",
+    "success",
+    Priority::Critical
+)?;
+
+// 4. Recall con diferentes estrategias
+let results = memory.recall(&query, 5)?;           // General
+let critical = memory.recall_critical(&query, 5)?; // Solo Critical
+let high = memory.recall_high_priority(&query, 10)?; // High + Critical
+
+// 5. Sistema de feedback
+memory.mark_useful("security-fix-1");  // Aumenta usefulness score
+
+// 6. Búsqueda por keywords (BM25)
+let keyword_results = memory.recall_by_keywords("JWT token", 5)?;
+
+// 7. Estadísticas
+let stats = memory.stats();
+println!("Total: {}, Accesos: {}, Utilidad: {:.0}%",
+    stats.total_memories,
+    stats.total_accesses,
+    stats.avg_usefulness * 100.0
+);
+```
+
+#### Salida Esperada
+
+```
+=== minimemory + Ollama Demo ===
+
+Conectando con Ollama... OK! (modelo: embeddinggemma, dims: 768)
+Memoria inicializada con preset: SoftwareDevelopment
+
+--- Fase 1: Aprendiendo experiencias ---
+  Aprendiendo: security-fix-1... OK (priority: Critical)
+  Aprendiendo: bug-fix-1... OK (priority: High)
+  ...
+
+--- Fase 2: Probando recall ---
+Query: 'security vulnerability fix'
+Top 3 resultados:
+  1. security-fix-1 (relevance: 0.923, priority: Critical, transfer: Domain)
+  2. bug-fix-1 (relevance: 0.756, priority: High, transfer: Context)
+  ...
+
+--- Estadísticas finales ---
+Total memorias: 8
+Preset: SoftwareDevelopment
+Total accesos: 24
+Utilidad promedio: 50.00%
+```
+
 ## Bindings
 
 ### Python
