@@ -543,6 +543,177 @@ impl VectorDB {
         &self.bm25_fields
     }
 
+    // ==================== INTEGRACIÓN CON CHUNKING ====================
+
+    /// Inserta un chunk de documento con su metadata.
+    ///
+    /// Método de conveniencia para insertar chunks generados por el módulo `chunking`.
+    /// El contenido del chunk se almacena en el campo "content" de la metadata.
+    ///
+    /// # Argumentos
+    ///
+    /// * `chunk` - Chunk a insertar
+    /// * `vector` - Vector embedding opcional para el chunk
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust,ignore
+    /// use minimemory::{VectorDB, Config};
+    /// use minimemory::chunking::{chunk_markdown, ChunkConfig};
+    ///
+    /// let db = VectorDB::with_fulltext(
+    ///     Config::new(384),
+    ///     vec!["content".into(), "heading".into()]
+    /// ).unwrap();
+    ///
+    /// let result = chunk_markdown("# Title\nContent here", &ChunkConfig::default()).unwrap();
+    ///
+    /// for chunk in result.chunks {
+    ///     // Generar embedding con tu modelo preferido
+    ///     let embedding = generate_embedding(&chunk.content);
+    ///     db.insert_chunk(&chunk, Some(&embedding)).unwrap();
+    /// }
+    /// ```
+    pub fn insert_chunk(
+        &self,
+        chunk: &crate::chunking::Chunk,
+        vector: Option<&[f32]>,
+    ) -> Result<()> {
+        // Validar dimensiones si hay vector
+        if let Some(vec) = vector {
+            if vec.len() != self.config.dimensions {
+                return Err(Error::DimensionMismatch {
+                    expected: self.config.dimensions,
+                    got: vec.len(),
+                });
+            }
+        }
+
+        if self.storage.contains(&chunk.id) {
+            return Err(Error::AlreadyExists(chunk.id.clone()));
+        }
+
+        // Construir metadata combinando la del chunk con el contenido
+        let mut metadata = chunk.metadata.to_metadata();
+        metadata.insert("content", chunk.content.as_str());
+
+        let vec_data = vector.map(|v| v.to_vec());
+        self.storage.insert(chunk.id.clone(), vec_data, Some(metadata.clone()))?;
+
+        // Solo indexar en índice vectorial si hay vector
+        if let Some(vec) = vector {
+            self.index.add(&chunk.id, vec)?;
+        }
+
+        // Indexar en BM25 si está habilitado
+        if let Some(ref bm25) = self.bm25_index {
+            bm25.add(&chunk.id, Some(&metadata))?;
+        }
+
+        Ok(())
+    }
+
+    /// Inserta múltiples chunks en lote.
+    ///
+    /// # Argumentos
+    ///
+    /// * `chunks` - Iterator de tuplas (chunk, vector_opcional)
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust,ignore
+    /// use minimemory::{VectorDB, Config};
+    /// use minimemory::chunking::{chunk_markdown, ChunkConfig};
+    ///
+    /// let db = VectorDB::with_fulltext(Config::new(384), vec!["content".into()]).unwrap();
+    /// let result = chunk_markdown(content, &ChunkConfig::default()).unwrap();
+    ///
+    /// // Con embeddings pregenerados
+    /// let chunks_with_vectors: Vec<_> = result.chunks.iter()
+    ///     .map(|c| (c, Some(generate_embedding(&c.content))))
+    ///     .collect();
+    ///
+    /// db.insert_chunks(chunks_with_vectors).unwrap();
+    /// ```
+    pub fn insert_chunks<'a>(
+        &self,
+        chunks: impl IntoIterator<Item = (&'a crate::chunking::Chunk, Option<Vec<f32>>)>,
+    ) -> Result<()> {
+        for (chunk, vector) in chunks {
+            self.insert_chunk(chunk, vector.as_deref())?;
+        }
+        Ok(())
+    }
+
+    /// Procesa e inserta un documento Markdown completo.
+    ///
+    /// Combina chunking + inserción en una sola operación.
+    /// Útil para documentos sin embeddings (solo BM25/keyword search).
+    ///
+    /// # Argumentos
+    ///
+    /// * `content` - Contenido Markdown
+    /// * `config` - Configuración de chunking
+    ///
+    /// # Retorna
+    ///
+    /// Número de chunks insertados.
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust,ignore
+    /// use minimemory::{VectorDB, Config};
+    /// use minimemory::chunking::ChunkConfig;
+    ///
+    /// let db = VectorDB::with_fulltext(
+    ///     Config::new(3), // dimensiones no importan para keyword search
+    ///     vec!["content".into(), "heading".into()]
+    /// ).unwrap();
+    ///
+    /// let markdown = "# Title\nContent...";
+    /// let count = db.ingest_markdown(markdown, &ChunkConfig::default()).unwrap();
+    /// println!("Ingested {} chunks", count);
+    /// ```
+    pub fn ingest_markdown(
+        &self,
+        content: &str,
+        config: &crate::chunking::ChunkConfig,
+    ) -> Result<usize> {
+        let result = crate::chunking::chunk_markdown(content, config)?;
+        let count = result.chunks.len();
+
+        for chunk in &result.chunks {
+            self.insert_chunk(chunk, None)?;
+        }
+
+        Ok(count)
+    }
+
+    /// Procesa e inserta un archivo Markdown.
+    ///
+    /// # Argumentos
+    ///
+    /// * `path` - Ruta al archivo Markdown
+    /// * `config` - Configuración de chunking
+    ///
+    /// # Retorna
+    ///
+    /// Número de chunks insertados.
+    pub fn ingest_markdown_file(
+        &self,
+        path: &std::path::Path,
+        config: &crate::chunking::ChunkConfig,
+    ) -> Result<usize> {
+        let result = crate::chunking::chunk_markdown_file(path, config)?;
+        let count = result.chunks.len();
+
+        for chunk in &result.chunks {
+            self.insert_chunk(chunk, None)?;
+        }
+
+        Ok(count)
+    }
+
     // ==================== BÚSQUEDA HÍBRIDA ====================
 
     /// Búsqueda híbrida con parámetros configurables.

@@ -147,6 +147,7 @@ mod storage;
 mod types;
 pub mod query;
 pub mod search;
+pub mod chunking;
 
 // Bindings para otros lenguajes
 #[cfg(any(feature = "python", feature = "nodejs", feature = "ffi"))]

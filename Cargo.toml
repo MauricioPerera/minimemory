@@ -21,6 +21,10 @@ memmap2 = "0.9"
 parking_lot = "0.12"
 rand = "0.8"
 rayon = "1.10"
+regex-lite = "0.1"
+
+# Markdown processing (optional - for chunking)
+mq-markdown = { git = "https://github.com/harehare/mq", optional = true, features = ["json"] }
 
 # Python bindings (optional)
 pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
@@ -37,6 +41,7 @@ default = []
 python = ["pyo3"]
 nodejs = ["napi", "napi-derive"]
 ffi = []
+chunking = ["mq-markdown"]
 
 [[bench]]
 name = "benchmark"
