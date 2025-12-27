@@ -388,10 +388,353 @@ minimemory
 ├── Chunking              # Procesamiento de Markdown
 │   ├── ChunkStrategy     # Estrategias de división
 │   └── Chunk             # Unidad de contenido
+├── Quantization          # Compresión de vectores
+│   ├── Quantizer         # Motor de quantización
+│   ├── Int8              # Scalar 4x compression
+│   └── Binary            # 32x compression
+├── PartialIndex          # Índices sobre subconjuntos
+│   ├── PartialIndexConfig # Configuración de filtros
+│   └── PartialIndexManager # Gestor de índices
+├── Replication           # Sincronización entre instancias
+│   ├── ChangeLog         # Registro de operaciones
+│   └── ReplicationManager # Gestor de sync
+├── AgentMemory           # Memoria para agentes de código
+│   ├── WorkingContext    # Contexto actual
+│   ├── TaskEpisode       # Experiencias de tareas
+│   └── CodeSnippet       # Código aprendido
 └── Distance              # Métricas
     ├── Cosine
     ├── Euclidean
     └── DotProduct
+```
+
+## Quantización de Vectores
+
+minimemory soporta quantización para reducir el uso de memoria manteniendo calidad de búsqueda.
+
+### Tipos de Quantización
+
+| Tipo | Compresión | Precisión | Uso |
+|------|------------|-----------|-----|
+| `None` | 1x (4 bytes/dim) | 100% | Default, máxima precisión |
+| `Int8` | 4x (1 byte/dim) | ~99% | Balance memoria/precisión |
+| `Binary` | 32x (1 bit/dim) | ~90-95% | Máxima compresión |
+
+### Configuración
+
+```rust
+use minimemory::{Config, Distance, QuantizationType};
+
+// Sin quantización (default)
+let config = Config::new(384);
+
+// Quantización Int8 (recomendada para embeddings)
+let config = Config::new(1536)
+    .with_quantization(QuantizationType::Int8);
+
+// Quantización binaria (para embeddings muy grandes)
+let config = Config::new(4096)
+    .with_quantization(QuantizationType::Binary);
+```
+
+### Uso Manual del Quantizador
+
+```rust
+use minimemory::quantization::{Quantizer, QuantizationType};
+
+// Crear quantizador entrenado con samples
+let samples: Vec<Vec<f32>> = vec![/* tus vectores */];
+let sample_refs: Vec<&[f32]> = samples.iter().map(|v| v.as_slice()).collect();
+
+let quantizer = Quantizer::int8_trained(384, &sample_refs);
+
+// Quantizar un vector
+let vector = vec![0.1; 384];
+let quantized = quantizer.quantize(&vector).unwrap();
+
+// Ver ahorro de memoria
+println!("Original: {} bytes", 384 * 4);
+println!("Quantizado: {} bytes", quantized.memory_bytes());
+
+// Dequantizar si es necesario
+let restored = quantized.to_f32();
+```
+
+### Distancias con Vectores Quantizados
+
+```rust
+use minimemory::{Distance, quantization::quantized_distance};
+
+let dist = quantized_distance(&quant_a, &quant_b, Distance::Cosine).unwrap();
+```
+
+## Índices Parciales
+
+Los índices parciales permiten crear índices sobre subconjuntos de documentos, mejorando el rendimiento de consultas frecuentes sobre categorías específicas.
+
+### Beneficios
+
+- **Menor uso de memoria**: Solo indexa documentos relevantes
+- **Búsquedas más rápidas**: Índices más pequeños = menos comparaciones
+- **Especialización**: Índices optimizados para patrones de consulta específicos
+
+### Creación de Índices Parciales
+
+```rust
+use minimemory::{VectorDB, Config, Filter};
+use minimemory::partial_index::PartialIndexConfig;
+
+let db = VectorDB::new(Config::new(384)).unwrap();
+
+// Crear índice parcial para documentos de categoría "tech"
+db.create_partial_index(
+    "tech_docs",
+    PartialIndexConfig::new(Filter::eq("category", "tech"))
+).unwrap();
+
+// Crear índice HNSW para documentos activos con score alto
+db.create_partial_index(
+    "premium_docs",
+    PartialIndexConfig::new(
+        Filter::eq("status", "active")
+            .and(Filter::gt("score", 0.8f64))
+    ).with_hnsw(16, 200)
+).unwrap();
+```
+
+### Búsqueda en Índices Parciales
+
+```rust
+// Buscar solo en documentos de tecnología (más rápido que buscar en todo)
+let results = db.search_partial("tech_docs", &query_vector, 10).unwrap();
+
+for result in results {
+    println!("{}: {:.4}", result.id, result.distance);
+}
+```
+
+### Gestión de Índices
+
+```rust
+// Listar todos los índices parciales
+let indexes = db.list_partial_indexes();
+for idx in indexes {
+    println!("{}: {} documentos", idx.name, idx.document_count);
+}
+
+// Reconstruir índice después de cambios masivos
+let count = db.rebuild_partial_index("tech_docs").unwrap();
+println!("Índice reconstruido con {} documentos", count);
+
+// Eliminar índice
+db.drop_partial_index("tech_docs").unwrap();
+```
+
+### Sincronización Automática
+
+Los índices parciales se actualizan automáticamente cuando:
+- Se insertan nuevos documentos que cumplen el filtro
+- Se eliminan documentos del índice principal
+
+## Replicación
+
+minimemory soporta replicación para sincronizar datos entre múltiples instancias.
+
+### Change Log
+
+El Change Log registra todas las operaciones para permitir replicación incremental.
+
+```rust
+use minimemory::replication::{ChangeLog, ReplicationManager};
+
+// Crear log de cambios
+let log = ChangeLog::new();
+
+// Registrar operaciones
+log.track_insert("doc-1", &vec![0.1; 384], None);
+log.track_update("doc-1", &vec![0.2; 384], None);
+log.track_delete("doc-2");
+
+// Exportar cambios desde checkpoint
+let checkpoint = log.checkpoint();
+// ... más operaciones ...
+let changes = log.export_since_checkpoint();
+```
+
+### Snapshot y Restauración
+
+```rust
+use minimemory::{VectorDB, Config};
+use minimemory::replication::ReplicationManager;
+
+// Crear snapshot de la DB primaria
+let primary = VectorDB::new(Config::new(384)).unwrap();
+primary.insert("doc-1", &vec![0.1; 384], None).unwrap();
+
+let snapshot = ReplicationManager::create_snapshot(&primary).unwrap();
+
+// Restaurar en réplica
+let replica = VectorDB::new(Config::new(384)).unwrap();
+let count = ReplicationManager::apply_snapshot(&replica, &snapshot).unwrap();
+println!("Restaurados {} documentos", count);
+```
+
+### Sincronización Incremental
+
+```rust
+use minimemory::replication::{ChangeLog, ReplicationManager};
+
+// En instancia primaria
+let log = ChangeLog::with_instance_id("primary");
+
+// Registrar cambios
+log.track_insert("doc-1", &vec![0.1; 384], None);
+primary.insert("doc-1", &vec![0.1; 384], None).unwrap();
+
+// Exportar cambios
+let changes = log.export_since(0);
+
+// En réplica: aplicar cambios
+let result = ReplicationManager::apply_changes(&replica, &changes).unwrap();
+println!("Aplicados: {}, Omitidos: {}", result.applied, result.skipped);
+```
+
+### Resolución de Conflictos
+
+```rust
+use minimemory::replication::{ReplicationManager, ConflictResolution};
+
+// Estrategias disponibles:
+// - KeepLocal: mantener versión local
+// - ApplyRemote: aplicar versión remota
+// - LastWriteWins: gana el timestamp más reciente (default)
+
+let manager = ReplicationManager::new()
+    .with_conflict_strategy(ConflictResolution::LastWriteWins);
+```
+
+## Memoria Agéntica
+
+Sistema de memoria diseñado para agentes de IA que desarrollan código.
+
+### Tipos de Memoria
+
+| Tipo | Uso |
+|------|-----|
+| **Episódica** | Experiencias de tareas (éxitos/fallos) |
+| **Semántica** | Conocimiento de APIs, patrones, código |
+| **Working** | Contexto actual (proyecto, goals) |
+
+### Inicialización
+
+```rust
+use minimemory::agent_memory::{AgentMemory, MemoryConfig, TaskOutcome};
+
+// Crear memoria (1536 dims para OpenAI embeddings)
+let mut memory = AgentMemory::new(MemoryConfig::openai()).unwrap();
+
+// Para modelos pequeños (384 dims)
+let memory = AgentMemory::new(MemoryConfig::small()).unwrap();
+
+// Establecer función de embedding
+memory.set_embed_fn(|text| {
+    // Tu implementación de embedding aquí
+    openai_embed(text)
+});
+```
+
+### Aprender (Learning)
+
+```rust
+use minimemory::agent_memory::{TaskEpisode, CodeSnippet, ErrorSolution, Language, TaskOutcome};
+
+// Aprender de una tarea completada
+memory.learn_task(
+    "Implementar autenticación JWT",
+    "fn verify_token(token: &str) -> Result<Claims> { ... }",
+    TaskOutcome::Success,
+    vec!["Usar jsonwebtoken crate", "Validar expiration"]
+).unwrap();
+
+// Aprender snippet de código
+memory.learn_code(CodeSnippet {
+    code: "async fn fetch_data() { ... }".to_string(),
+    description: "Fetch async con retry".to_string(),
+    language: Language::Rust,
+    dependencies: vec!["reqwest".into()],
+    use_case: "HTTP requests con reintentos".to_string(),
+    quality_score: 0.95,
+    tags: vec!["async".into(), "http".into()],
+}).unwrap();
+
+// Aprender solución a un error
+memory.learn_error_solution(ErrorSolution {
+    error_message: "cannot borrow as mutable".to_string(),
+    error_type: "E0596".to_string(),
+    root_cause: "Missing mut keyword".to_string(),
+    solution: "Add mut to variable declaration".to_string(),
+    fixed_code: Some("let mut x = 5;".to_string()),
+    language: Language::Rust,
+}).unwrap();
+```
+
+### Recordar (Recall)
+
+```rust
+// Buscar experiencias similares
+let experiences = memory.recall_similar("autenticación de usuarios", 5).unwrap();
+
+// Buscar código similar
+let snippets = memory.recall_code("HTTP client async", 5).unwrap();
+
+// Buscar soluciones a errores
+let solutions = memory.recall_error_solutions("borrow checker error", 3).unwrap();
+
+// Buscar solo experiencias exitosas
+let successes = memory.recall_successful("database migration", 5).unwrap();
+
+// Buscar en el proyecto actual (usa índice parcial)
+memory.focus_project("my-project").unwrap();
+let project_results = memory.recall_in_project("authentication", 10).unwrap();
+```
+
+### Working Memory (Contexto Actual)
+
+```rust
+// Establecer contexto de trabajo
+memory.with_working_context(|ctx| {
+    ctx.set_project("my-app");
+    ctx.set_task("Implementar login");
+    ctx.add_goal("Escribir tests");
+    ctx.add_goal("Documentar API");
+    ctx.add_open_file("src/auth.rs");
+    ctx.add_conversation("user", "Necesito login con OAuth");
+});
+
+// Leer contexto
+let ctx = memory.working_context();
+println!("Proyecto: {:?}", ctx.current_project);
+println!("Goals: {:?}", ctx.active_goals);
+```
+
+### Persistencia
+
+```rust
+// Guardar memoria
+memory.save("agent_memory.mmdb").unwrap();
+
+// Cargar memoria
+let memory = AgentMemory::load("agent_memory.mmdb", MemoryConfig::openai()).unwrap();
+```
+
+### Estadísticas
+
+```rust
+let stats = memory.stats().unwrap();
+println!("Total: {} entradas", stats.total_entries);
+println!("Episodios: {}", stats.episodes);
+println!("Snippets: {}", stats.code_snippets);
+println!("Soluciones: {}", stats.error_solutions);
 ```
 
 ## Rendimiento
@@ -451,9 +794,10 @@ const results = db.search(new Array(384).fill(0.1), 10);
 - [x] **Filtros de metadata con operadores**
 - [x] **Búsqueda híbrida (RRF fusion)**
 - [x] **Integración mq para chunking**
-- [ ] Quantización de vectores
-- [ ] Índices parciales
-- [ ] Replicación
+- [x] **Quantización de vectores (Int8, Binary)**
+- [x] **Índices parciales**
+- [x] **Replicación (Change Log, Sync, Snapshots)**
+- [x] **Memoria Agéntica (Agent Memory Framework)**
 
 ## Licencia
 

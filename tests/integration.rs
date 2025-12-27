@@ -52,7 +52,7 @@ mod basic {
         db.insert("test", &original, None).unwrap();
 
         let (retrieved, _) = db.get("test").unwrap().unwrap();
-        assert_eq!(retrieved, original);
+        assert_eq!(retrieved, Some(original));
     }
 
     #[test]
@@ -91,7 +91,7 @@ mod basic {
         db.update("updatable", &[4.0, 5.0, 6.0], None).unwrap();
 
         let (vector, _) = db.get("updatable").unwrap().unwrap();
-        assert_eq!(vector, vec![4.0, 5.0, 6.0]);
+        assert_eq!(vector, Some(vec![4.0, 5.0, 6.0]));
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod distance_metrics {
 
 mod metadata {
     use super::*;
-    use minimemory::types::MetadataValue;
+    use minimemory::MetadataValue;
 
     #[test]
     fn test_insert_with_metadata() {
@@ -461,7 +461,7 @@ mod persistence {
             assert!(db.contains("doc2"));
 
             let (vector, _) = db.get("doc1").unwrap().unwrap();
-            assert_eq!(vector, vec![1.0, 2.0, 3.0]);
+            assert_eq!(vector, Some(vec![1.0, 2.0, 3.0]));
         }
 
         fs::remove_file(&path).ok();

@@ -3,7 +3,7 @@
 //! Proporciona persistencia para la base de datos vectorial.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 use crate::error::Result;
@@ -17,7 +17,7 @@ pub fn save_vectors<P: AsRef<Path>>(
     header: &mut FileHeader,
     vectors: impl Iterator<Item = StoredVector>,
 ) -> Result<()> {
-    let file = File::create(path)?;
+    let file = File::create(path.as_ref())?;
     let mut writer = BufWriter::new(file);
 
     // Reservar espacio para el header (lo escribiremos al final con offsets correctos)
@@ -104,17 +104,6 @@ pub fn load_vectors<P: AsRef<Path>>(
     }
 
     Ok((header, vectors))
-}
-
-/// Extensión del trait Read para obtener posición del stream
-trait StreamPosition {
-    fn stream_position(&mut self) -> std::io::Result<u64>;
-}
-
-impl<W: Write + std::io::Seek> StreamPosition for BufWriter<W> {
-    fn stream_position(&mut self) -> std::io::Result<u64> {
-        self.seek(std::io::SeekFrom::Current(0))
-    }
 }
 
 #[cfg(test)]

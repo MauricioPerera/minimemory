@@ -19,7 +19,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("Serialization error: {0}")]
-    Serialization(#[from] bincode::Error),
+    Serialization(String),
+
+    #[error("Bincode error: {0}")]
+    Bincode(#[from] bincode::Error),
 
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),

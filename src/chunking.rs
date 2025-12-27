@@ -877,7 +877,7 @@ Short intro.
 
 ## Long Section
 
-"# + &"Long content. ".repeat(500) + r#"
+"#.to_owned() + &"Long content. ".repeat(500) + r#"
 
 ## Short Section
 
@@ -888,7 +888,7 @@ Brief content.
             max_heading_level: 2,
             max_chunk_size: 500,
         });
-        let result = chunk_markdown(content, &config).unwrap();
+        let result = chunk_markdown(&content, &config).unwrap();
 
         // Long section should be split into multiple chunks
         assert!(result.total_chunks >= 3);

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::distance::Distance;
 use crate::error::{Error, Result};
 use crate::index::{BM25Index, FlatIndex, HNSWIndex, Index, IndexType};
+use crate::partial_index::{PartialIndexConfig, PartialIndexManager, PartialIndexStats};
 use crate::query::Filter;
 use crate::search::{HybridSearch, HybridSearchParams};
 use crate::storage::{disk, format::FileHeader, MemoryStorage, Storage};
@@ -45,6 +46,8 @@ pub struct VectorDB {
     bm25_index: Option<Arc<BM25Index>>,
     /// Campos indexados por BM25
     bm25_fields: Vec<String>,
+    /// Gestor de índices parciales
+    partial_indexes: PartialIndexManager,
 }
 
 impl VectorDB {
@@ -71,6 +74,7 @@ impl VectorDB {
             index,
             bm25_index: None,
             bm25_fields: Vec::new(),
+            partial_indexes: PartialIndexManager::new(),
         })
     }
 
@@ -102,6 +106,7 @@ impl VectorDB {
             index,
             bm25_index: Some(bm25_index),
             bm25_fields: indexed_fields,
+            partial_indexes: PartialIndexManager::new(),
         })
     }
 
@@ -127,6 +132,7 @@ impl VectorDB {
             dimensions: header.dimensions as usize,
             distance: header.get_distance(),
             index: header.get_index_type(),
+            quantization: crate::quantization::QuantizationType::None, // Legacy files don't have quantization
         };
 
         let storage = Arc::new(MemoryStorage::new());
@@ -148,6 +154,7 @@ impl VectorDB {
             index,
             bm25_index: None,
             bm25_fields: Vec::new(),
+            partial_indexes: PartialIndexManager::new(),
         })
     }
 
@@ -169,6 +176,7 @@ impl VectorDB {
             dimensions: header.dimensions as usize,
             distance: header.get_distance(),
             index: header.get_index_type(),
+            quantization: crate::quantization::QuantizationType::None, // Legacy files don't have quantization
         };
 
         let storage = Arc::new(MemoryStorage::new());
@@ -193,6 +201,7 @@ impl VectorDB {
             index,
             bm25_index: Some(bm25_index),
             bm25_fields: indexed_fields,
+            partial_indexes: PartialIndexManager::new(),
         })
     }
 
@@ -261,6 +270,9 @@ impl VectorDB {
             bm25.add(&id, metadata.as_ref())?;
         }
 
+        // Añadir a índices parciales que coincidan
+        let _ = self.partial_indexes.on_insert(&id, vector, metadata.as_ref());
+
         Ok(())
     }
 
@@ -324,6 +336,8 @@ impl VectorDB {
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
             self.index.add(&id, vec)?;
+            // Añadir a índices parciales que coincidan
+            let _ = self.partial_indexes.on_insert(&id, vec, metadata.as_ref());
         }
 
         // Indexar en BM25 si está habilitado
@@ -422,6 +436,8 @@ impl VectorDB {
             if let Some(ref bm25) = self.bm25_index {
                 bm25.remove(id)?;
             }
+            // Remover de índices parciales
+            let _ = self.partial_indexes.on_delete(id);
         }
         Ok(deleted)
     }
@@ -483,6 +499,11 @@ impl VectorDB {
         self.storage.len()
     }
 
+    /// Retorna todos los IDs de documentos.
+    pub fn list_ids(&self) -> Result<Vec<VectorId>> {
+        Ok(self.storage.ids())
+    }
+
     /// Verifica si la base de datos está vacía.
     pub fn is_empty(&self) -> bool {
         self.storage.is_empty()
@@ -541,6 +562,139 @@ impl VectorDB {
     /// Retorna los campos indexados para BM25.
     pub fn bm25_fields(&self) -> &[String] {
         &self.bm25_fields
+    }
+
+    // ==================== ÍNDICES PARCIALES ====================
+
+    /// Crea un nuevo índice parcial.
+    ///
+    /// Un índice parcial solo incluye documentos que cumplen con el filtro especificado.
+    /// Esto mejora el rendimiento de búsquedas sobre subconjuntos específicos de datos.
+    ///
+    /// # Argumentos
+    ///
+    /// * `name` - Nombre único para el índice
+    /// * `config` - Configuración con filtro y tipo de índice
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust,ignore
+    /// use minimemory::{VectorDB, Config, Filter};
+    /// use minimemory::partial_index::PartialIndexConfig;
+    ///
+    /// let db = VectorDB::new(Config::new(384)).unwrap();
+    ///
+    /// // Crear índice parcial para documentos de categoría "tech"
+    /// db.create_partial_index(
+    ///     "tech_docs",
+    ///     PartialIndexConfig::new(Filter::eq("category", "tech"))
+    /// ).unwrap();
+    ///
+    /// // Crear índice HNSW para documentos activos
+    /// db.create_partial_index(
+    ///     "active_docs",
+    ///     PartialIndexConfig::new(Filter::eq("status", "active"))
+    ///         .with_hnsw(16, 200)
+    /// ).unwrap();
+    /// ```
+    pub fn create_partial_index(&self, name: &str, config: PartialIndexConfig) -> Result<()> {
+        self.partial_indexes.create_index(name, config)
+    }
+
+    /// Elimina un índice parcial.
+    ///
+    /// # Errores
+    ///
+    /// Retorna error si el índice no existe.
+    pub fn drop_partial_index(&self, name: &str) -> Result<()> {
+        self.partial_indexes.drop_index(name)
+    }
+
+    /// Lista todos los índices parciales y sus estadísticas.
+    pub fn list_partial_indexes(&self) -> Vec<PartialIndexStats> {
+        self.partial_indexes.list_indexes()
+    }
+
+    /// Busca en un índice parcial específico.
+    ///
+    /// Esta búsqueda es más rápida que buscar en todo el índice principal
+    /// cuando se trabaja con subconjuntos de datos.
+    ///
+    /// # Argumentos
+    ///
+    /// * `index_name` - Nombre del índice parcial
+    /// * `query` - Vector de consulta
+    /// * `k` - Número máximo de resultados
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust,ignore
+    /// // Buscar solo en documentos de tecnología (más rápido)
+    /// let results = db.search_partial("tech_docs", &query_vector, 10).unwrap();
+    ///
+    /// for result in results {
+    ///     println!("{}: {:.4}", result.id, result.distance);
+    /// }
+    /// ```
+    pub fn search_partial(&self, index_name: &str, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        // Validar dimensiones
+        if query.len() != self.config.dimensions {
+            return Err(Error::DimensionMismatch {
+                expected: self.config.dimensions,
+                got: query.len(),
+            });
+        }
+
+        let results = self.partial_indexes.search(index_name, query, k)?;
+
+        // Convertir a SearchResult con metadata
+        let mut search_results = Vec::with_capacity(results.len());
+        for (id, distance) in results {
+            let metadata = self.storage.get(&id)?.and_then(|sv| sv.metadata);
+            search_results.push(SearchResult {
+                id,
+                distance,
+                metadata,
+            });
+        }
+
+        Ok(search_results)
+    }
+
+    /// Reconstruye un índice parcial con los documentos actuales.
+    ///
+    /// Útil después de cambios masivos en los datos o para optimizar el índice.
+    ///
+    /// # Retorna
+    ///
+    /// Número de documentos añadidos al índice.
+    pub fn rebuild_partial_index(&self, index_name: &str) -> Result<usize> {
+        let index = self.partial_indexes.get_index(index_name)
+            .ok_or_else(|| Error::NotFound(index_name.to_string()))?;
+
+        // Obtener todos los documentos con vector
+        let all_ids = self.storage.ids();
+        let documents: Vec<_> = all_ids.iter()
+            .filter_map(|id| {
+                if let Ok(Some(sv)) = self.storage.get(id) {
+                    sv.vector.map(|vec| (id.clone(), vec, sv.metadata))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Reconstruir
+        let docs_iter = documents.iter().map(|(id, vec, meta)| {
+            (id.as_str(), vec.as_slice(), meta.as_ref())
+        });
+
+        index.rebuild(docs_iter)
+    }
+
+    /// Verifica si existe un índice parcial con el nombre dado.
+    pub fn has_partial_index(&self, name: &str) -> bool {
+        self.partial_indexes.get_index(name).is_some()
     }
 
     // ==================== INTEGRACIÓN CON CHUNKING ====================

@@ -148,6 +148,11 @@ mod types;
 pub mod query;
 pub mod search;
 pub mod chunking;
+pub mod quantization;
+pub mod partial_index;
+pub mod replication;
+pub mod agent_memory;
+pub mod transfer;
 
 // Bindings para otros lenguajes
 #[cfg(any(feature = "python", feature = "nodejs", feature = "ffi"))]
@@ -160,3 +165,4 @@ pub use index::IndexType;
 pub use types::{Config, HybridSearchResult, Metadata, MetadataValue, SearchResult, StoredVector, Vector, VectorId};
 pub use query::{Filter, FilterOp};
 pub use search::{HybridSearchParams, SearchMode};
+pub use quantization::{QuantizationType, Quantizer, QuantizedVector};

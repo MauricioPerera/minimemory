@@ -143,10 +143,12 @@ pub struct SearchResult {
 ///
 /// ```rust
 /// use minimemory::{Config, Distance, IndexType};
+/// use minimemory::quantization::QuantizationType;
 ///
 /// let config = Config::new(384)           // 384 dimensiones
 ///     .with_distance(Distance::Cosine)    // Similitud coseno
-///     .with_index(IndexType::Flat);       // Búsqueda exacta
+///     .with_index(IndexType::Flat)        // Búsqueda exacta
+///     .with_quantization(QuantizationType::Int8); // Compresión 4x
 /// ```
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -156,6 +158,8 @@ pub struct Config {
     pub distance: crate::Distance,
     /// Tipo de índice para búsqueda
     pub index: crate::IndexType,
+    /// Tipo de quantización para vectores
+    pub quantization: crate::quantization::QuantizationType,
 }
 
 impl Config {
@@ -164,6 +168,7 @@ impl Config {
     /// Valores por defecto:
     /// - Distancia: `Cosine`
     /// - Índice: `Flat`
+    /// - Quantización: `None` (f32 completo)
     ///
     /// # Argumentos
     ///
@@ -173,6 +178,7 @@ impl Config {
             dimensions,
             distance: crate::Distance::Cosine,
             index: crate::IndexType::Flat,
+            quantization: crate::quantization::QuantizationType::None,
         }
     }
 
@@ -196,6 +202,33 @@ impl Config {
     /// - `IndexType::HNSW { m, ef_construction }` - Búsqueda aproximada O(log n)
     pub fn with_index(mut self, index: crate::IndexType) -> Self {
         self.index = index;
+        self
+    }
+
+    /// Establece el tipo de quantización para vectores.
+    ///
+    /// # Opciones
+    ///
+    /// - `QuantizationType::None` - Sin compresión, f32 completo (4 bytes/dim)
+    /// - `QuantizationType::Int8` - Compresión 4x (1 byte/dim), ~99% precisión
+    /// - `QuantizationType::Binary` - Compresión 32x (1 bit/dim), ~90-95% precisión
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust
+    /// use minimemory::{Config, Distance};
+    /// use minimemory::quantization::QuantizationType;
+    ///
+    /// // Para embeddings grandes donde memoria es crítica
+    /// let config = Config::new(1536)
+    ///     .with_quantization(QuantizationType::Int8);
+    ///
+    /// // Para máxima compresión en embeddings muy grandes
+    /// let config = Config::new(4096)
+    ///     .with_quantization(QuantizationType::Binary);
+    /// ```
+    pub fn with_quantization(mut self, quantization: crate::quantization::QuantizationType) -> Self {
+        self.quantization = quantization;
         self
     }
 }
