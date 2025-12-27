@@ -7,7 +7,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 use crate::error::Result;
-use crate::types::{Metadata, StoredVector};
+use crate::types::StoredVector;
 
 use super::format::{FileHeader, VectorEntry, HEADER_SIZE};
 
@@ -111,6 +111,7 @@ mod tests {
     use super::*;
     use crate::distance::Distance;
     use crate::index::IndexType;
+    use crate::types::Metadata;
     use std::fs;
     use std::path::PathBuf;
 

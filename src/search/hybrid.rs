@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::index::{BM25Index, Index};
 use crate::query::{Filter, FilterEvaluator};
 use crate::storage::Storage;
-use crate::types::{HybridSearchResult, Metadata, VectorId};
+use crate::types::HybridSearchResult;
 
 use super::rrf::{weighted_reciprocal_rank_fusion, RankedResult, DEFAULT_RRF_K};
 

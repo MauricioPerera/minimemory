@@ -36,7 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::partial_index::PartialIndexConfig;
 use crate::query::Filter;
 use crate::replication::ChangeLog;

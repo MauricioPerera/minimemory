@@ -434,7 +434,7 @@ impl ReplicationManager {
     pub fn apply_changes(db: &VectorDB, changes: &[ChangeEntry]) -> Result<SyncResult> {
         let mut applied = 0;
         let mut skipped = 0;
-        let mut conflicts = Vec::new();
+        let conflicts = Vec::new();
         let mut last_seq = 0u64;
 
         for change in changes {
@@ -728,7 +728,7 @@ mod tests {
 
         // Réplica sincroniza solo cambios nuevos
         let replica = VectorDB::new(Config::new(3)).unwrap();
-        let manager = ReplicationManager::new();
+        let _manager = ReplicationManager::new();
 
         // Primera sync: snapshot inicial
         let snapshot = ReplicationManager::create_snapshot(&primary).unwrap();

@@ -23,8 +23,10 @@ pub struct HNSWIndex {
     /// Estructura interna protegida por RwLock para thread-safety
     inner: RwLock<HNSWInner>,
     /// Número de conexiones por nodo en niveles > 0
+    #[allow(dead_code)]
     m: usize,
     /// Número máximo de conexiones en nivel 0
+    #[allow(dead_code)]
     m_max0: usize,
     /// Tamaño del beam durante construcción
     ef_construction: usize,
@@ -221,6 +223,7 @@ impl HNSWIndex {
     }
 
     /// Selecciona los mejores vecinos usando heurística simple
+    #[allow(dead_code)]
     fn select_neighbors(
         &self,
         candidates: Vec<Candidate>,
@@ -233,6 +236,7 @@ impl HNSWIndex {
     }
 
     /// Agrega conexiones bidireccionales
+    #[allow(dead_code)]
     fn connect_neighbors(
         &self,
         inner: &mut HNSWInner,
@@ -275,7 +279,7 @@ impl HNSWIndex {
 }
 
 impl Index for HNSWIndex {
-    fn add(&self, id: &str, vector: &[f32]) -> Result<()> {
+    fn add(&self, id: &str, _vector: &[f32]) -> Result<()> {
         let mut inner = self.inner.write();
 
         // Verificar si ya existe

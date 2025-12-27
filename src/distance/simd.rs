@@ -110,9 +110,10 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // ============================================================================
-// Implementaciones AVX2
+// Implementaciones AVX2 (reservadas para futuro uso con feature flags)
 // ============================================================================
 
+#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[target_feature(enable = "fma")]
@@ -141,6 +142,7 @@ unsafe fn euclidean_avx2(a: &[f32], b: &[f32]) -> f32 {
     result.sqrt()
 }
 
+#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[target_feature(enable = "fma")]
@@ -181,6 +183,7 @@ unsafe fn cosine_avx2(a: &[f32], b: &[f32]) -> f32 {
     1.0 - (dot / denom)
 }
 
+#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[target_feature(enable = "fma")]
@@ -207,6 +210,7 @@ unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Suma horizontal de un registro AVX2 de 8 floats
+#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]

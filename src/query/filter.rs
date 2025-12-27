@@ -1,6 +1,5 @@
 //! Filtros de metadata con operadores lógicos y soporte para dot notation.
 
-use std::collections::HashMap;
 use crate::types::{Metadata, MetadataValue};
 use super::FilterOp;
 
@@ -286,6 +285,7 @@ impl FilterEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn create_test_metadata() -> Metadata {
         let mut meta = Metadata::new();

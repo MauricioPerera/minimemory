@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::types::{Metadata, MetadataValue};
+use crate::types::Metadata;
 
 /// Estrategia de chunking para dividir documentos.
 #[derive(Debug, Clone, Serialize, Deserialize)]

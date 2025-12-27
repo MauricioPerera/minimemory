@@ -4,7 +4,6 @@
 //! incluyendo todas las funcionalidades principales.
 
 use minimemory::{Config, Distance, IndexType, Metadata, VectorDB};
-use std::collections::HashSet;
 
 // ============================================================================
 // Tests básicos de VectorDB
