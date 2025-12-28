@@ -33,6 +33,11 @@ pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
 napi = { version = "2", features = ["napi4"], optional = true }
 napi-derive = { version = "2", optional = true }
 
+# WASM bindings (optional)
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
+
 [dev-dependencies]
 criterion = "0.5"
 
@@ -42,6 +47,7 @@ python = ["pyo3"]
 nodejs = ["napi", "napi-derive"]
 ffi = []
 chunking = ["mq-markdown"]
+wasm = ["wasm-bindgen", "js-sys", "getrandom"]
 
 [[bench]]
 name = "benchmark"
