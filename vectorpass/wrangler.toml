@@ -11,15 +11,15 @@ compatibility_date = "2024-01-01"
 # KV Namespaces
 [[kv_namespaces]]
 binding = "USERS"        # User data, API keys, verification codes
-id = "REPLACE_WITH_USERS_KV_ID"
+id = "6e8c4591923b41fdb569a341138ca01a"
 
 [[kv_namespaces]]
 binding = "VECTORS"      # Vector databases per user
-id = "REPLACE_WITH_VECTORS_KV_ID"
+id = "14cbf98553b54bcc95a5fe375cfb333b"
 
 [[kv_namespaces]]
 binding = "RATE_LIMITS"  # Rate limiting counters
-id = "REPLACE_WITH_RATE_LIMITS_KV_ID"
+id = "34804b8aebdd4da2aec3ade0c25f37b3"
 
 # Workers AI binding
 [ai]
