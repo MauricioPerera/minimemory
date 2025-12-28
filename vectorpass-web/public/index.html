@@ -244,33 +244,48 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
     <!-- Docs Section -->
     <section id="docs" class="py-20 px-4 bg-white">
         <div class="max-w-4xl mx-auto">
-            <h2 class="text-3xl font-bold text-center mb-12">Quick Start</h2>
+            <h2 class="text-3xl font-bold text-center mb-4">Documentation</h2>
+            <p class="text-gray-600 text-center mb-12">Everything you need to integrate semantic search into your AI agents</p>
 
-            <div class="space-y-8">
+            <div class="space-y-10">
+                <!-- Quick Start -->
                 <div>
-                    <h3 class="text-xl font-semibold mb-4">1. Get your API key</h3>
-                    <p class="text-gray-600 mb-4">Register for free and verify your email to get your API key.</p>
+                    <h3 class="text-2xl font-semibold mb-6 flex items-center">
+                        <span class="bg-primary text-white w-8 h-8 rounded-full flex items-center justify-center text-sm mr-3">1</span>
+                        Get your API key
+                    </h3>
+                    <p class="text-gray-600 mb-4">Register for free and verify your email. Your API key will be displayed immediately.</p>
                 </div>
 
                 <div>
-                    <h3 class="text-xl font-semibold mb-4">2. Index documents</h3>
-                    <div class="code-block">
+                    <h3 class="text-2xl font-semibold mb-6 flex items-center">
+                        <span class="bg-primary text-white w-8 h-8 rounded-full flex items-center justify-center text-sm mr-3">2</span>
+                        Index documents
+                    </h3>
+                    <div class="code-block mb-4">
                         <code>
 curl -X POST https://vectorpass-api.automators.work/v1/index \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "id": "doc1",
-    "text": "Your document content here",
-    "metadata": {"category": "docs"}
+    "text": "Your document content here. Can be any length!",
+    "metadata": {"category": "docs", "author": "John"}
   }'
                         </code>
+                    </div>
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
+                        <strong class="text-blue-800">Automatic Chunking:</strong>
+                        <span class="text-blue-700">Long documents are automatically split into ~1500 character chunks with 200 char overlap. Each chunk is indexed separately for better retrieval.</span>
                     </div>
                 </div>
 
                 <div>
-                    <h3 class="text-xl font-semibold mb-4">3. Search semantically</h3>
-                    <div class="code-block">
+                    <h3 class="text-2xl font-semibold mb-6 flex items-center">
+                        <span class="bg-primary text-white w-8 h-8 rounded-full flex items-center justify-center text-sm mr-3">3</span>
+                        Search semantically
+                    </h3>
+                    <div class="code-block mb-4">
                         <code>
 curl -X POST https://vectorpass-api.automators.work/v1/search \
   -H "X-API-Key: YOUR_API_KEY" \
@@ -278,27 +293,112 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
   -d '{"query": "find relevant documents", "k": 10}'
                         </code>
                     </div>
+                    <p class="text-gray-600 text-sm mb-4">Response:</p>
+                    <div class="code-block">
+                        <code>
+{
+  "success": true,
+  "data": {
+    "results": [
+      {
+        "id": "doc1",
+        "distance": 0.234,
+        "metadata": {"category": "docs", "_snippet": "Your document..."}
+      }
+    ],
+    "query": "find relevant documents",
+    "k": 10
+  }
+}
+                        </code>
+                    </div>
                 </div>
 
+                <!-- API Reference -->
                 <div>
-                    <h3 class="text-xl font-semibold mb-4">API Endpoints</h3>
+                    <h3 class="text-2xl font-semibold mb-6">API Reference</h3>
                     <div class="overflow-x-auto">
                         <table class="w-full text-sm">
                             <thead>
-                                <tr class="border-b">
-                                    <th class="text-left py-2">Endpoint</th>
-                                    <th class="text-left py-2">Description</th>
+                                <tr class="border-b bg-gray-50">
+                                    <th class="text-left py-3 px-4">Endpoint</th>
+                                    <th class="text-left py-3 px-4">Description</th>
+                                    <th class="text-left py-3 px-4">Body</th>
                                 </tr>
                             </thead>
                             <tbody class="text-gray-600">
-                                <tr class="border-b"><td class="py-2 font-mono">POST /v1/index</td><td>Index a document</td></tr>
-                                <tr class="border-b"><td class="py-2 font-mono">POST /v1/batch</td><td>Batch index documents</td></tr>
-                                <tr class="border-b"><td class="py-2 font-mono">POST /v1/search</td><td>Semantic search</td></tr>
-                                <tr class="border-b"><td class="py-2 font-mono">POST /v1/keyword</td><td>Keyword search (BM25)</td></tr>
-                                <tr class="border-b"><td class="py-2 font-mono">DELETE /v1/vectors/:id</td><td>Delete document</td></tr>
-                                <tr><td class="py-2 font-mono">GET /v1/stats</td><td>Usage statistics</td></tr>
+                                <tr class="border-b">
+                                    <td class="py-3 px-4 font-mono text-primary">POST /v1/index</td>
+                                    <td>Index a document</td>
+                                    <td class="font-mono text-xs">{id, text, metadata?}</td>
+                                </tr>
+                                <tr class="border-b">
+                                    <td class="py-3 px-4 font-mono text-primary">POST /v1/batch</td>
+                                    <td>Batch index (up to tier limit)</td>
+                                    <td class="font-mono text-xs">{items: [{id, text, metadata?}]}</td>
+                                </tr>
+                                <tr class="border-b">
+                                    <td class="py-3 px-4 font-mono text-primary">POST /v1/search</td>
+                                    <td>Semantic vector search</td>
+                                    <td class="font-mono text-xs">{query, k?}</td>
+                                </tr>
+                                <tr class="border-b">
+                                    <td class="py-3 px-4 font-mono text-primary">POST /v1/keyword</td>
+                                    <td>BM25 keyword search</td>
+                                    <td class="font-mono text-xs">{query, k?}</td>
+                                </tr>
+                                <tr class="border-b">
+                                    <td class="py-3 px-4 font-mono text-primary">DELETE /v1/vectors/:id</td>
+                                    <td>Delete document + chunks</td>
+                                    <td class="font-mono text-xs">-</td>
+                                </tr>
+                                <tr>
+                                    <td class="py-3 px-4 font-mono text-primary">GET /v1/stats</td>
+                                    <td>Usage statistics</td>
+                                    <td class="font-mono text-xs">-</td>
+                                </tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- Features -->
+                <div class="grid md:grid-cols-2 gap-6">
+                    <div class="bg-gray-50 rounded-xl p-6">
+                        <h4 class="font-semibold mb-3">Automatic Chunking</h4>
+                        <ul class="text-sm text-gray-600 space-y-2">
+                            <li>Long documents split into ~1500 char chunks</li>
+                            <li>200 char overlap for context continuity</li>
+                            <li>Intelligent sentence boundary detection</li>
+                            <li>Each chunk indexed as <code class="bg-gray-200 px-1 rounded">id:chunk_N</code></li>
+                        </ul>
+                    </div>
+                    <div class="bg-gray-50 rounded-xl p-6">
+                        <h4 class="font-semibold mb-3">Embedding Model</h4>
+                        <ul class="text-sm text-gray-600 space-y-2">
+                            <li>EmbeddingGemma-300m (100+ languages)</li>
+                            <li>Matryoshka: 768d truncated to 256d</li>
+                            <li>Int8 quantization (4x compression)</li>
+                            <li>HNSW index for fast search</li>
+                        </ul>
+                    </div>
+                    <div class="bg-gray-50 rounded-xl p-6">
+                        <h4 class="font-semibold mb-3">Authentication</h4>
+                        <ul class="text-sm text-gray-600 space-y-2">
+                            <li>Header: <code class="bg-gray-200 px-1 rounded">X-API-Key: vp_live_xxx</code></li>
+                            <li>Or: <code class="bg-gray-200 px-1 rounded">Authorization: Bearer vp_live_xxx</code></li>
+                            <li>Email verification required for writes</li>
+                            <li>Rate limits per tier (see Pricing)</li>
+                        </ul>
+                    </div>
+                    <div class="bg-gray-50 rounded-xl p-6">
+                        <h4 class="font-semibold mb-3">Response Format</h4>
+                        <ul class="text-sm text-gray-600 space-y-2">
+                            <li>All responses: <code class="bg-gray-200 px-1 rounded">{success, data?, error?}</code></li>
+                            <li>Search results include distance (0-2)</li>
+                            <li>Lower distance = more similar</li>
+                            <li>Metadata preserved from indexing</li>
+                        </ul>
                     </div>
                 </div>
             </div>

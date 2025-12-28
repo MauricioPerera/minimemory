@@ -17,8 +17,59 @@ const CONFIG = {
     quantization: "int8",   // 4x compression
     model: "@cf/google/embeddinggemma-300m",
     hnswM: 16,
-    hnswEf: 200
+    hnswEf: 200,
+    maxChunkChars: 1500,    // ~375 tokens, safe limit for embedding
+    chunkOverlap: 200       // Overlap between chunks for context continuity
 };
+
+/**
+ * Split text into chunks with overlap
+ * Returns array of { text, startPos, endPos }
+ */
+function chunkText(text: string, maxChars: number = CONFIG.maxChunkChars, overlap: number = CONFIG.chunkOverlap): Array<{ text: string; start: number; end: number }> {
+    // If text fits in one chunk, return as-is
+    if (text.length <= maxChars) {
+        return [{ text, start: 0, end: text.length }];
+    }
+
+    const chunks: Array<{ text: string; start: number; end: number }> = [];
+    let pos = 0;
+
+    while (pos < text.length) {
+        let end = Math.min(pos + maxChars, text.length);
+
+        // Try to break at sentence boundary (. ! ? followed by space)
+        if (end < text.length) {
+            const searchStart = Math.max(pos + maxChars - 200, pos);
+            const searchText = text.slice(searchStart, end);
+            const sentenceEnd = searchText.search(/[.!?]\s+[A-Z]/);
+
+            if (sentenceEnd > 0) {
+                end = searchStart + sentenceEnd + 2; // Include the punctuation and space
+            } else {
+                // Fall back to word boundary
+                const spacePos = text.lastIndexOf(' ', end);
+                if (spacePos > pos + maxChars / 2) {
+                    end = spacePos;
+                }
+            }
+        }
+
+        chunks.push({
+            text: text.slice(pos, end).trim(),
+            start: pos,
+            end
+        });
+
+        // Move position, accounting for overlap
+        pos = end - overlap;
+        if (pos >= text.length - overlap) {
+            break;
+        }
+    }
+
+    return chunks;
+}
 
 // Flag to track if we're using real WASM or fallback
 let useWasm = false;
@@ -153,45 +204,63 @@ export class VectorDB {
     }
 
     /**
-     * Index a document
+     * Index a document (with automatic chunking for long texts)
      */
     async index(id: string, text: string, metadata?: Record<string, any>): Promise<void> {
-        const embedding = await this.embed(text);
-        const meta = metadata ? { ...metadata, _snippet: text.slice(0, 500) } : { _snippet: text.slice(0, 500) };
+        const chunks = chunkText(text);
 
-        if (this.isWasm) {
-            // WASM: uses auto-truncate methods
-            this.db.insert_auto_with_metadata(id, embedding, JSON.stringify(meta));
+        // If single chunk, use original ID
+        if (chunks.length === 1) {
+            const embedding = await this.embed(text);
+            const meta = metadata ? { ...metadata, _snippet: text.slice(0, 500) } : { _snippet: text.slice(0, 500) };
+
+            if (this.isWasm) {
+                this.db.insert_auto_with_metadata(id, embedding, JSON.stringify(meta));
+            } else {
+                const truncated = this.truncateAndNormalize(embedding);
+                this.db.insert(id, truncated, meta);
+            }
         } else {
-            // JS fallback: manual truncate
-            const truncated = this.truncateAndNormalize(embedding);
-            this.db.insert(id, truncated, meta);
+            // Multiple chunks: store each with id:chunk_N format
+            for (let i = 0; i < chunks.length; i++) {
+                const chunk = chunks[i];
+                const chunkId = `${id}:chunk_${i}`;
+                const embedding = await this.embed(chunk.text);
+                const meta = {
+                    ...(metadata || {}),
+                    _snippet: chunk.text.slice(0, 500),
+                    _parentId: id,
+                    _chunkIndex: i,
+                    _totalChunks: chunks.length,
+                    _charRange: [chunk.start, chunk.end]
+                };
+
+                if (this.isWasm) {
+                    this.db.insert_auto_with_metadata(chunkId, embedding, JSON.stringify(meta));
+                } else {
+                    const truncated = this.truncateAndNormalize(embedding);
+                    this.db.insert(chunkId, truncated, meta);
+                }
+            }
         }
 
         this.vectorCount = this.db.len();
     }
 
     /**
-     * Batch index documents
+     * Batch index documents (with chunking support)
      */
     async indexBatch(items: Array<{ id: string; text: string; metadata?: Record<string, any> }>): Promise<number> {
-        const texts = items.map(i => i.text);
-        const embeddings = await this.embedBatch(texts);
+        let totalVectors = 0;
 
-        for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            const meta = { ...(item.metadata || {}), _snippet: item.text.slice(0, 500) };
-
-            if (this.isWasm) {
-                this.db.insert_auto_with_metadata(item.id, embeddings[i], JSON.stringify(meta));
-            } else {
-                const truncated = this.truncateAndNormalize(embeddings[i]);
-                this.db.insert(item.id, truncated, meta);
-            }
+        // Process each document - chunking if needed
+        for (const item of items) {
+            await this.index(item.id, item.text, item.metadata);
+            totalVectors++;
         }
 
         this.vectorCount = this.db.len();
-        return items.length;
+        return totalVectors;
     }
 
     /**
@@ -243,14 +312,32 @@ export class VectorDB {
     }
 
     /**
-     * Delete a document
+     * Delete a document (and all its chunks)
      */
     delete(id: string): boolean {
-        const result = this.isWasm ? this.db.delete(id) : this.db.delete(id);
-        if (result) {
+        let deleted = false;
+
+        // Delete main document if exists
+        if (this.db.contains(id)) {
+            this.db.delete(id);
+            deleted = true;
+        }
+
+        // Delete all chunks (id:chunk_0, id:chunk_1, etc.)
+        for (let i = 0; i < 1000; i++) {
+            const chunkId = `${id}:chunk_${i}`;
+            if (this.db.contains(chunkId)) {
+                this.db.delete(chunkId);
+                deleted = true;
+            } else {
+                break; // No more chunks
+            }
+        }
+
+        if (deleted) {
             this.vectorCount = this.db.len();
         }
-        return result;
+        return deleted;
     }
 
     /**
