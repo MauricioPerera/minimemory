@@ -32,8 +32,8 @@
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    Config as RustConfig, Distance as RustDistance, IndexType as RustIndexType,
-    Metadata as RustMetadata, VectorDB as RustVectorDB,
+    quantization::QuantizationType, Config as RustConfig, Distance as RustDistance,
+    IndexType as RustIndexType, Metadata as RustMetadata, VectorDB as RustVectorDB,
 };
 
 /// Base de datos vectorial para WebAssembly.
@@ -92,6 +92,98 @@ impl WasmVectorDB {
         let config = RustConfig::new(dimensions)
             .with_distance(dist)
             .with_index(RustIndexType::HNSW { m, ef_construction });
+
+        let db = RustVectorDB::new(config)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(Self { inner: db })
+    }
+
+    /// Crea una base de datos con cuantizacion Int8 (4x menos memoria).
+    ///
+    /// # Arguments
+    /// * `dimensions` - Numero de dimensiones
+    /// * `distance` - "cosine", "euclidean", "dot"
+    /// * `index_type` - "flat" o "hnsw"
+    #[wasm_bindgen]
+    pub fn new_int8(dimensions: usize, distance: &str, index_type: &str) -> Result<WasmVectorDB, JsError> {
+        let dist = parse_distance(distance)?;
+        let index = parse_index(index_type)?;
+
+        let config = RustConfig::new(dimensions)
+            .with_distance(dist)
+            .with_index(index)
+            .with_quantization(QuantizationType::Int8);
+
+        let db = RustVectorDB::new(config)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(Self { inner: db })
+    }
+
+    /// Crea una base de datos con cuantizacion binaria (32x menos memoria).
+    /// Ideal para vectores de alta dimension (256+).
+    ///
+    /// # Arguments
+    /// * `dimensions` - Numero de dimensiones
+    /// * `distance` - "cosine", "euclidean", "dot"
+    /// * `index_type` - "flat" o "hnsw"
+    #[wasm_bindgen]
+    pub fn new_binary(dimensions: usize, distance: &str, index_type: &str) -> Result<WasmVectorDB, JsError> {
+        let dist = parse_distance(distance)?;
+        let index = parse_index(index_type)?;
+
+        let config = RustConfig::new(dimensions)
+            .with_distance(dist)
+            .with_index(index)
+            .with_quantization(QuantizationType::Binary);
+
+        let db = RustVectorDB::new(config)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(Self { inner: db })
+    }
+
+    /// Crea una base de datos con configuracion completa.
+    ///
+    /// # Arguments
+    /// * `dimensions` - Numero de dimensiones
+    /// * `distance` - "cosine", "euclidean", "dot"
+    /// * `index_type` - "flat" o "hnsw"
+    /// * `quantization` - "none", "int8", "binary"
+    /// * `hnsw_m` - Parametro M para HNSW (default 16)
+    /// * `hnsw_ef` - ef_construction para HNSW (default 200)
+    #[wasm_bindgen]
+    pub fn new_with_config(
+        dimensions: usize,
+        distance: &str,
+        index_type: &str,
+        quantization: &str,
+        hnsw_m: Option<usize>,
+        hnsw_ef: Option<usize>,
+    ) -> Result<WasmVectorDB, JsError> {
+        let dist = parse_distance(distance)?;
+
+        let index = match index_type {
+            "flat" | "brute" | "exact" => RustIndexType::Flat,
+            "hnsw" => RustIndexType::HNSW {
+                m: hnsw_m.unwrap_or(16),
+                ef_construction: hnsw_ef.unwrap_or(200),
+            },
+            i => return Err(JsError::new(&format!("Unknown index: {}", i))),
+        };
+
+        let quant = match quantization {
+            "none" | "f32" | "float32" => QuantizationType::None,
+            "int8" | "i8" | "scalar" => QuantizationType::Int8,
+            "binary" | "bit" | "1bit" => QuantizationType::Binary,
+            q => return Err(JsError::new(&format!("Unknown quantization: {}. Use 'none', 'int8', or 'binary'", q))),
+        };
+
+        let config = RustConfig::new(dimensions)
+            .with_distance(dist)
+            .with_index(index)
+            .with_quantization(quant);
 
         let db = RustVectorDB::new(config)
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -257,6 +349,34 @@ impl WasmVectorDB {
 
         serde_json::to_string(&json_results)
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+/// Parsea string de distancia a enum
+fn parse_distance(distance: &str) -> Result<RustDistance, JsError> {
+    match distance {
+        "cosine" | "cos" => Ok(RustDistance::Cosine),
+        "euclidean" | "l2" => Ok(RustDistance::Euclidean),
+        "dot" | "dot_product" | "inner" => Ok(RustDistance::DotProduct),
+        d => Err(JsError::new(&format!(
+            "Unknown distance: {}. Use 'cosine', 'euclidean', or 'dot'",
+            d
+        ))),
+    }
+}
+
+/// Parsea string de indice a enum
+fn parse_index(index_type: &str) -> Result<RustIndexType, JsError> {
+    match index_type {
+        "flat" | "brute" | "exact" => Ok(RustIndexType::Flat),
+        "hnsw" => Ok(RustIndexType::HNSW {
+            m: 16,
+            ef_construction: 200,
+        }),
+        i => Err(JsError::new(&format!(
+            "Unknown index: {}. Use 'flat' or 'hnsw'",
+            i
+        ))),
     }
 }
 
