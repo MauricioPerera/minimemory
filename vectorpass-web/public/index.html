@@ -34,9 +34,80 @@
             font-size: 14px;
         }
         .hidden { display: none !important; }
+
+        /* Toast notifications */
+        #toast-container {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .toast {
+            padding: 12px 20px;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideIn 0.3s ease-out;
+            max-width: 350px;
+        }
+        .toast.success { background: #10b981; }
+        .toast.error { background: #ef4444; }
+        .toast.info { background: #3b82f6; }
+        .toast.warning { background: #f59e0b; }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(100%); opacity: 0; }
+        }
+
+        /* Form validation */
+        input:invalid:not(:placeholder-shown) {
+            border-color: #ef4444;
+        }
+        input:valid:not(:placeholder-shown) {
+            border-color: #10b981;
+        }
+        .input-error {
+            color: #ef4444;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        /* Button loading state */
+        .btn-loading {
+            position: relative;
+            pointer-events: none;
+            opacity: 0.8;
+        }
+        .btn-loading::after {
+            content: '';
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 16px;
+            border: 2px solid transparent;
+            border-top-color: currentColor;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: translateY(-50%) rotate(360deg); }
+        }
     </style>
 </head>
 <body class="bg-gray-50">
+    <!-- Toast Container -->
+    <div id="toast-container"></div>
+
     <!-- Navigation -->
     <nav class="fixed w-full bg-white/90 backdrop-blur-sm z-50 border-b border-gray-100">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -47,11 +118,29 @@
                     </svg>
                     <span class="text-xl font-bold text-gray-900">VectorPass</span>
                 </a>
-                <div class="flex items-center space-x-4">
+                <!-- Desktop nav -->
+                <div class="hidden md:flex items-center space-x-4">
                     <a href="#pricing" class="text-gray-600 hover:text-gray-900">Pricing</a>
                     <a href="#docs" class="text-gray-600 hover:text-gray-900">Docs</a>
                     <button onclick="showAuth('login')" class="text-gray-600 hover:text-gray-900">Login</button>
                     <button onclick="showAuth('register')" class="bg-primary text-white px-4 py-2 rounded-lg hover:bg-secondary transition">
+                        Get Started
+                    </button>
+                </div>
+                <!-- Mobile menu button -->
+                <button id="mobileMenuBtn" onclick="toggleMobileMenu()" class="md:hidden p-2 rounded-lg hover:bg-gray-100">
+                    <svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                    </svg>
+                </button>
+            </div>
+            <!-- Mobile nav -->
+            <div id="mobileMenu" class="hidden md:hidden pb-4 border-t border-gray-100 mt-2">
+                <div class="flex flex-col space-y-2 pt-4">
+                    <a href="#pricing" onclick="toggleMobileMenu()" class="text-gray-600 hover:text-gray-900 px-2 py-2">Pricing</a>
+                    <a href="#docs" onclick="toggleMobileMenu()" class="text-gray-600 hover:text-gray-900 px-2 py-2">Docs</a>
+                    <button onclick="toggleMobileMenu(); showAuth('login')" class="text-left text-gray-600 hover:text-gray-900 px-2 py-2">Login</button>
+                    <button onclick="toggleMobileMenu(); showAuth('register')" class="bg-primary text-white px-4 py-2 rounded-lg hover:bg-secondary transition text-center">
                         Get Started
                     </button>
                 </div>
@@ -165,7 +254,7 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
             <h2 class="text-3xl font-bold text-center mb-4">Simple, transparent pricing</h2>
             <p class="text-gray-600 text-center mb-12">Start free, scale as you grow</p>
 
-            <div class="grid md:grid-cols-4 gap-6">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                 <!-- Free -->
                 <div class="bg-white rounded-2xl p-6 border border-gray-200">
                     <h3 class="text-xl font-semibold mb-2">Free</h3>
@@ -518,11 +607,27 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
                     </svg>
                 </div>
                 <h2 class="text-2xl font-bold mb-2">Welcome!</h2>
-                <p class="text-gray-600 mb-4">Your API key:</p>
-                <div class="bg-gray-100 p-3 rounded-lg font-mono text-sm break-all mb-4" id="apiKeyDisplay"></div>
-                <button onclick="copyApiKey()" class="text-primary hover:underline text-sm mb-4">Copy to clipboard</button>
-                <br>
-                <button onclick="goToDashboard()" class="bg-primary text-white px-6 py-2 rounded-lg hover:bg-secondary transition">
+                <p class="text-gray-600 mb-2">Your API key:</p>
+                <div class="bg-gray-100 p-3 rounded-lg font-mono text-sm break-all mb-2 relative" id="apiKeyDisplay"></div>
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-left">
+                    <div class="flex items-start gap-2">
+                        <svg class="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                        </svg>
+                        <div class="text-xs text-amber-800">
+                            <strong>Security:</strong> Save this key now! It will only be shown in full once. You can view a masked version in your dashboard.
+                        </div>
+                    </div>
+                </div>
+                <div class="flex gap-2 justify-center mb-4">
+                    <button onclick="copyApiKey()" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition text-sm flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"/>
+                        </svg>
+                        Copy Key
+                    </button>
+                </div>
+                <button onclick="goToDashboard()" class="bg-primary text-white px-6 py-2 rounded-lg hover:bg-secondary transition w-full">
                     Go to Dashboard
                 </button>
             </div>
@@ -541,6 +646,26 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
         const API_URL = 'https://vectorpass-api.automators.work';
         let currentEmail = '';
         let currentApiKey = '';
+
+        // Mobile menu toggle
+        function toggleMobileMenu() {
+            const menu = document.getElementById('mobileMenu');
+            menu.classList.toggle('hidden');
+        }
+
+        // Toast notification system
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.animation = 'slideOut 0.3s ease-out forwards';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
 
         function showAuth(type) {
             document.getElementById('authModal').classList.remove('hidden');
@@ -670,31 +795,58 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
         }
 
         function copyApiKey() {
-            navigator.clipboard.writeText(currentApiKey);
-            alert('API key copied!');
+            navigator.clipboard.writeText(currentApiKey).then(() => {
+                showToast('API key copied to clipboard!', 'success');
+            }).catch(() => {
+                showToast('Failed to copy. Please copy manually.', 'error');
+            });
         }
 
         function goToDashboard() {
             window.location.href = '/dashboard.html';
         }
 
-        function checkout(tier) {
+        async function checkout(tier) {
             // Check if logged in
             const apiKey = localStorage.getItem('vp_api_key');
             if (!apiKey) {
+                showToast('Please create an account first', 'info');
                 showAuth('register');
                 return;
             }
 
-            // Redirect to Stripe checkout
-            const prices = {
-                starter: 'price_1SjCW8DqXeTbPD4KRmH9mmuh',
-                pro: 'price_1SjCW8DqXeTbPD4Ky42FvJje',
-                business: 'price_1SjCW9DqXeTbPD4K7sf81w8R'
-            };
+            // Get the button that was clicked and show loading state
+            const buttons = document.querySelectorAll(`button[onclick="checkout('${tier}')"]`);
+            buttons.forEach(btn => btn.classList.add('btn-loading'));
 
-            // In production, create checkout session via API
-            alert('Stripe checkout coming soon! Contact support to upgrade.');
+            try {
+                const res = await fetch(`${API_URL}/billing/checkout`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': apiKey
+                    },
+                    body: JSON.stringify({
+                        tier: tier,
+                        successUrl: window.location.origin + '/dashboard.html?upgrade=success',
+                        cancelUrl: window.location.origin + '/#pricing'
+                    })
+                });
+
+                const data = await res.json();
+
+                if (data.success && data.data?.url) {
+                    showToast('Redirecting to checkout...', 'info');
+                    window.location.href = data.data.url;
+                } else {
+                    showToast(data.error || 'Failed to create checkout session', 'error');
+                }
+            } catch (err) {
+                console.error('Checkout error:', err);
+                showToast('Network error. Please try again.', 'error');
+            } finally {
+                buttons.forEach(btn => btn.classList.remove('btn-loading'));
+            }
         }
 
         // Check if already logged in
