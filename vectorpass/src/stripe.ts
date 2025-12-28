@@ -7,22 +7,18 @@
 import { Env, User, Tier } from './types';
 import { updateUserTier } from './auth';
 
-// Stripe price IDs (configure in wrangler.toml or secrets)
+// Stripe price IDs (created via scripts/setup-stripe.js)
 export const STRIPE_PRICES = {
-    starter: 'price_starter_monthly',   // $9/mo
-    pro: 'price_pro_monthly',           // $29/mo
-    business: 'price_business_monthly'  // $79/mo
+    starter: 'price_1SjCW8DqXeTbPD4KRmH9mmuh',   // $9/mo
+    pro: 'price_1SjCW8DqXeTbPD4Ky42FvJje',       // $29/mo
+    business: 'price_1SjCW9DqXeTbPD4K7sf81w8R'   // $79/mo
 };
 
 // Map Stripe price ID to tier
 const PRICE_TO_TIER: Record<string, Tier> = {
-    'price_starter_monthly': 'starter',
-    'price_pro_monthly': 'pro',
-    'price_business_monthly': 'business',
-    // Add yearly prices if needed
-    'price_starter_yearly': 'starter',
-    'price_pro_yearly': 'pro',
-    'price_business_yearly': 'business'
+    'price_1SjCW8DqXeTbPD4KRmH9mmuh': 'starter',
+    'price_1SjCW8DqXeTbPD4Ky42FvJje': 'pro',
+    'price_1SjCW9DqXeTbPD4K7sf81w8R': 'business'
 };
 
 /**

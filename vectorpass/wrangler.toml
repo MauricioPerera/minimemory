@@ -42,6 +42,9 @@ PRO_SEARCHES_PER_DAY = "100000"
 EMAIL_SERVICE = "log"
 FROM_EMAIL = "noreply@vectorpass.automators.work"
 
+# Stripe (publishable key is safe in code)
+STRIPE_PUBLISHABLE_KEY = "pk_live_0HpwPAaQwAQqDsO9iQTURF1v"
+
 # Secrets (set via wrangler secret put):
 # - STRIPE_WEBHOOK_SECRET
 # - STRIPE_SECRET_KEY
