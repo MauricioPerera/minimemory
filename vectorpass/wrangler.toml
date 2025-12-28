@@ -5,8 +5,8 @@ name = "vectorpass"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
-# Subdomain configuration (uncomment for production)
-# routes = [{ pattern = "vectorpass.automators.work/*", zone_name = "automators.work" }]
+# Subdomain configuration
+routes = [{ pattern = "vectorpass.automators.work/*", zone_name = "automators.work" }]
 
 # KV Namespaces
 [[kv_namespaces]]
@@ -39,8 +39,8 @@ PRO_SEARCHES_PER_DAY = "100000"
 
 # Email configuration
 # Options: "log" (dev), "resend", "sendgrid", "mailgun"
-EMAIL_SERVICE = "log"
-FROM_EMAIL = "noreply@vectorpass.automators.work"
+EMAIL_SERVICE = "resend"
+FROM_EMAIL = "noreply@automators.work"
 
 # Stripe (publishable key is safe in code)
 STRIPE_PUBLISHABLE_KEY = "pk_live_0HpwPAaQwAQqDsO9iQTURF1v"
