@@ -23,10 +23,8 @@ pub struct HNSWIndex {
     /// Estructura interna protegida por RwLock para thread-safety
     inner: RwLock<HNSWInner>,
     /// Número de conexiones por nodo en niveles > 0
-    #[allow(dead_code)]
     m: usize,
     /// Número máximo de conexiones en nivel 0
-    #[allow(dead_code)]
     m_max0: usize,
     /// Tamaño del beam durante construcción
     ef_construction: usize,
@@ -223,7 +221,6 @@ impl HNSWIndex {
     }
 
     /// Selecciona los mejores vecinos usando heurística simple
-    #[allow(dead_code)]
     fn select_neighbors(
         &self,
         candidates: Vec<Candidate>,
@@ -236,7 +233,6 @@ impl HNSWIndex {
     }
 
     /// Agrega conexiones bidireccionales
-    #[allow(dead_code)]
     fn connect_neighbors(
         &self,
         inner: &mut HNSWInner,
@@ -279,7 +275,13 @@ impl HNSWIndex {
 }
 
 impl Index for HNSWIndex {
-    fn add(&self, id: &str, _vector: &[f32]) -> Result<()> {
+    fn add(
+        &self,
+        id: &str,
+        vector: &[f32],
+        storage: &dyn Storage,
+        distance: Distance,
+    ) -> Result<()> {
         let mut inner = self.inner.write();
 
         // Verificar si ya existe
@@ -294,7 +296,7 @@ impl Index for HNSWIndex {
         // Seleccionar nivel para este nodo
         let node_level = self.random_level();
 
-        // Si es el primer nodo
+        // Si es el primer nodo, solo inicializar
         if inner.entry_point.is_none() {
             inner.entry_point = Some(new_idx);
             inner.max_level = node_level;
@@ -310,15 +312,6 @@ impl Index for HNSWIndex {
             return Ok(());
         }
 
-        // Necesitamos acceso al storage para calcular distancias
-        // Por ahora, almacenamos el vector temporalmente
-        // Nota: En producción, esto debería refactorizarse
-
-        // Actualizar entry point si este nodo tiene nivel más alto
-        if node_level > inner.max_level {
-            inner.max_level = node_level;
-        }
-
         // Asegurar que hay suficientes niveles
         while inner.levels.len() <= node_level {
             inner.levels.push(Level { neighbors: Vec::new() });
@@ -329,6 +322,58 @@ impl Index for HNSWIndex {
             while level.neighbors.len() <= new_idx {
                 level.neighbors.push(Vec::new());
             }
+        }
+
+        // Buscar punto de entrada y navegar hacia abajo
+        let entry_point = inner.entry_point.unwrap();
+        let mut current_nearest = vec![entry_point];
+
+        // Navegación greedy desde niveles superiores
+        for level in (node_level + 1..=inner.max_level).rev() {
+            let candidates = self.search_layer(
+                &inner,
+                vector,
+                current_nearest.clone(),
+                1, // ef=1 para niveles superiores
+                level,
+                storage,
+                distance,
+            );
+            if !candidates.is_empty() {
+                current_nearest = vec![candidates[0].idx];
+            }
+        }
+
+        // Insertar en cada nivel desde node_level hasta 0
+        for level in (0..=node_level.min(inner.max_level)).rev() {
+            // Buscar candidatos en este nivel
+            let candidates = self.search_layer(
+                &inner,
+                vector,
+                current_nearest.clone(),
+                self.ef_construction,
+                level,
+                storage,
+                distance,
+            );
+
+            // Seleccionar mejores vecinos
+            let m_limit = if level == 0 { self.m_max0 } else { self.m };
+            let neighbors = self.select_neighbors(candidates.clone(), m_limit);
+
+            // Conectar bidireccional
+            self.connect_neighbors(&mut inner, new_idx, &neighbors, level, m_limit);
+
+            // Usar los mejores candidatos como entrada para el siguiente nivel
+            if !candidates.is_empty() {
+                current_nearest = candidates.iter().map(|c| c.idx).collect();
+            }
+        }
+
+        // Actualizar entry point si este nodo tiene nivel más alto
+        if node_level > inner.max_level {
+            inner.entry_point = Some(new_idx);
+            inner.max_level = node_level;
         }
 
         Ok(())
@@ -445,11 +490,20 @@ impl Index for HNSWIndex {
         inner.entry_point = None;
         inner.max_level = 0;
 
-        // Re-insertar todos los vectores
+        // Recopilar IDs y vectores
+        let entries: Vec<(String, Vec<f32>)> = storage.ids()
+            .into_iter()
+            .filter_map(|id| {
+                storage.get(&id).ok().flatten()
+                    .and_then(|stored| stored.vector.map(|v| (id.clone(), v)))
+            })
+            .collect();
+
         drop(inner); // Liberar lock antes de llamar add
 
-        for id in storage.ids() {
-            self.add(&id, &[])?; // Vector no usado directamente aquí
+        // Re-insertar todos los vectores
+        for (id, vector) in entries {
+            self.add(&id, &vector, storage, Distance::Cosine)?;
         }
 
         Ok(())
@@ -495,7 +549,7 @@ mod tests {
 
         for (id, data) in &vectors {
             storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
-            index.add(id, data).unwrap();
+            index.add(id, data, &storage, Distance::Euclidean).unwrap();
         }
 
         assert_eq!(index.len(), 4);
@@ -515,7 +569,7 @@ mod tests {
 
         for (id, data) in &vectors {
             storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
-            index.add(id, data).unwrap();
+            index.add(id, data, &storage, Distance::Euclidean).unwrap();
         }
 
         let query = vec![1.0, 0.0, 0.0];
@@ -534,8 +588,8 @@ mod tests {
         storage.insert("a".to_string(), Some(vec![1.0, 0.0]), None).unwrap();
         storage.insert("b".to_string(), Some(vec![0.0, 1.0]), None).unwrap();
 
-        index.add("a", &[1.0, 0.0]).unwrap();
-        index.add("b", &[0.0, 1.0]).unwrap();
+        index.add("a", &[1.0, 0.0], &storage, Distance::Euclidean).unwrap();
+        index.add("b", &[0.0, 1.0], &storage, Distance::Euclidean).unwrap();
 
         assert_eq!(index.len(), 2);
 

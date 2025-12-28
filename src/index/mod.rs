@@ -51,7 +51,16 @@ impl IndexType {
 /// Trait for vector indices
 pub trait Index: Send + Sync {
     /// Add a vector to the index
-    fn add(&self, id: &str, vector: &[f32]) -> Result<()>;
+    ///
+    /// For indices that need to compute distances during insertion (like HNSW),
+    /// storage and distance parameters are provided to access other vectors.
+    fn add(
+        &self,
+        id: &str,
+        vector: &[f32],
+        storage: &dyn Storage,
+        distance: Distance,
+    ) -> Result<()>;
 
     /// Remove a vector from the index
     fn remove(&self, id: &str) -> Result<bool>;

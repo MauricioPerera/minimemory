@@ -426,16 +426,25 @@ mod persistence {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn temp_db_path() -> PathBuf {
+    fn temp_db_path(test_name: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("minimemory_test_{}.mmdb", std::process::id()));
+        path.push(format!(
+            "minimemory_{}_{}_{}_{}.mmdb",
+            test_name,
+            std::process::id(),
+            format!("{:?}", std::thread::current().id()).replace(['(', ')', ' '], ""),
+            count
+        ));
         path
     }
 
     #[test]
     fn test_save_and_open() {
-        let path = temp_db_path();
+        let path = temp_db_path("save_open");
 
         // Crear y guardar
         {
@@ -468,7 +477,7 @@ mod persistence {
 
     #[test]
     fn test_save_with_metadata() {
-        let path = temp_db_path();
+        let path = temp_db_path("save_meta");
 
         {
             let db = VectorDB::new(Config::new(2)).unwrap();
@@ -496,7 +505,7 @@ mod persistence {
 
     #[test]
     fn test_save_empty_db() {
-        let path = temp_db_path();
+        let path = temp_db_path("save_empty");
 
         {
             let db = VectorDB::new(Config::new(4)).unwrap();
@@ -514,7 +523,7 @@ mod persistence {
 
     #[test]
     fn test_save_large_db() {
-        let path = temp_db_path();
+        let path = temp_db_path("save_large");
 
         {
             let db = VectorDB::new(Config::new(128)).unwrap();
@@ -779,6 +788,548 @@ mod edge_cases {
         assert!(db.contains("key:value"));
         assert!(db.contains("with spaces"));
         assert!(db.contains("a\tb\nc"));
+    }
+}
+
+// ============================================================================
+// Memory Traits Integration Tests
+// ============================================================================
+
+mod memory_traits_integration {
+    use minimemory::memory_traits::{GenericMemory, Priority, InstanceContext};
+    use minimemory::memory_traits::presets::SoftwareDevelopment;
+
+    fn generate_embedding(seed: usize, dim: usize) -> Vec<f32> {
+        (0..dim).map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0).collect()
+    }
+
+    #[test]
+    fn test_generic_memory_full_workflow() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        memory.set_context(
+            InstanceContext::new("test-project")
+                .with_context("rust")
+                .with_domain("backend")
+        );
+
+        let emb = generate_embedding(1, 64);
+        memory.learn("task-1", &emb, "Fixed auth bug", "Authentication fix", "success").unwrap();
+
+        let query = generate_embedding(1, 64);
+        let results = memory.recall(&query, 5).unwrap();
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, "task-1");
+    }
+
+    #[test]
+    fn test_learn_auto_priority() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        // Security issue should get Critical priority
+        let emb = generate_embedding(1, 64);
+        memory.learn("sec-fix", &emb, "Fixed XSS vulnerability", "Security patch", "success").unwrap();
+
+        let query = generate_embedding(1, 64);
+        let results = memory.recall(&query, 1).unwrap();
+
+        assert_eq!(results[0].priority, Priority::Critical);
+    }
+
+    #[test]
+    fn test_learn_manual_priority() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        let emb = generate_embedding(1, 64);
+        memory.learn_with_priority(
+            "manual-task", &emb, "Some content", "Description", "success", Priority::High
+        ).unwrap();
+
+        let query = generate_embedding(1, 64);
+        let results = memory.recall(&query, 1).unwrap();
+
+        assert_eq!(results[0].priority, Priority::High);
+    }
+
+    #[test]
+    fn test_recall_critical_only() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        // Add mixed priorities
+        for i in 0..4 {
+            let emb = generate_embedding(i, 64);
+            let priority = match i % 4 {
+                0 => Priority::Low,
+                1 => Priority::Normal,
+                2 => Priority::High,
+                _ => Priority::Critical,
+            };
+            memory.learn_with_priority(
+                &format!("task-{}", i), &emb, "Content", "Desc", "success", priority
+            ).unwrap();
+        }
+
+        let query = generate_embedding(3, 64);
+        let critical = memory.recall_critical(&query, 10).unwrap();
+
+        assert!(!critical.is_empty());
+        for r in &critical {
+            assert_eq!(r.priority, Priority::Critical);
+        }
+    }
+
+    #[test]
+    fn test_recall_high_priority() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        for i in 0..8 {
+            let emb = generate_embedding(i, 64);
+            let priority = match i % 4 {
+                0 => Priority::Low,
+                1 => Priority::Normal,
+                2 => Priority::High,
+                _ => Priority::Critical,
+            };
+            memory.learn_with_priority(
+                &format!("task-{}", i), &emb, "Content", "Desc", "success", priority
+            ).unwrap();
+        }
+
+        let query = generate_embedding(0, 64);
+        let high = memory.recall_high_priority(&query, 10).unwrap();
+
+        for r in &high {
+            assert!(r.priority >= Priority::High);
+        }
+    }
+
+    #[test]
+    fn test_mark_useful_feedback() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        let emb = generate_embedding(1, 64);
+        memory.learn("useful-task", &emb, "Content", "Desc", "success").unwrap();
+
+        // Mark as useful multiple times
+        memory.mark_useful("useful-task");
+        memory.mark_useful("useful-task");
+        memory.mark_useful("useful-task");
+
+        let stats = memory.stats();
+        assert!(stats.avg_usefulness > 0.0);
+    }
+
+    #[test]
+    fn test_recall_by_keywords() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        let emb1 = generate_embedding(1, 64);
+        memory.learn("auth-task", &emb1, "JWT token authentication", "Auth system", "success").unwrap();
+
+        let emb2 = generate_embedding(2, 64);
+        memory.learn("db-task", &emb2, "Database connection pool", "DB optimization", "success").unwrap();
+
+        let results = memory.recall_by_keywords("JWT authentication", 5).unwrap();
+
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.id == "auth-task"));
+    }
+
+    #[test]
+    fn test_context_aware_recall() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        memory.set_context(
+            InstanceContext::new("project-a")
+                .with_context("rust")
+                .with_domain("backend")
+        );
+
+        let emb = generate_embedding(1, 64);
+        memory.learn("rust-task", &emb, "Rust async code", "Async implementation", "success").unwrap();
+
+        assert!(memory.current_context().is_some());
+        let ctx = memory.current_context().unwrap();
+        assert_eq!(ctx.instance_id, "project-a");
+    }
+
+    #[test]
+    fn test_memory_stats_accuracy() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        for i in 0..5 {
+            let emb = generate_embedding(i, 64);
+            memory.learn(&format!("task-{}", i), &emb, "Content", "Desc", "success").unwrap();
+        }
+
+        let stats = memory.stats();
+        assert_eq!(stats.total_memories, 5);
+        assert_eq!(stats.preset_name, "Software Development");
+    }
+}
+
+// ============================================================================
+// Agent Memory Integration Tests
+// ============================================================================
+
+mod agent_memory_integration {
+    use minimemory::agent_memory::{
+        AgentMemory, MemoryConfig, TaskOutcome, CodeSnippet,
+        ErrorSolution, Language, MemoryType,
+    };
+
+    #[test]
+    fn test_agent_memory_creation() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let stats = memory.stats().unwrap();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_learn_task_workflow() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let id = memory.learn_task(
+            "Implement login feature",
+            "fn login(user: &str) { /* ... */ }",
+            TaskOutcome::Success,
+            vec!["Use bcrypt for passwords", "Add rate limiting"],
+        ).unwrap();
+
+        assert!(id.starts_with("episode-"));
+        assert_eq!(memory.db().len(), 1);
+    }
+
+    #[test]
+    fn test_learn_code_snippet() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let id = memory.learn_code(CodeSnippet {
+            code: "fn hello() { println!(\"Hello\"); }".to_string(),
+            description: "Simple hello function".to_string(),
+            language: Language::Rust,
+            dependencies: vec![],
+            use_case: "Greeting users".to_string(),
+            quality_score: 0.9,
+            tags: vec!["example".to_string()],
+        }).unwrap();
+
+        assert!(id.starts_with("code-"));
+
+        let _results = memory.recall_code("hello function greeting", 5).unwrap();
+        // Results depend on embed_fn, but ID should be correct
+        assert_eq!(memory.db().len(), 1);
+    }
+
+    #[test]
+    fn test_learn_error_solution() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let id = memory.learn_error_solution(ErrorSolution {
+            error_message: "cannot borrow as mutable".to_string(),
+            error_type: "E0596".to_string(),
+            root_cause: "Missing mut keyword".to_string(),
+            solution: "Add mut to variable declaration".to_string(),
+            fixed_code: Some("let mut x = 5;".to_string()),
+            language: Language::Rust,
+        }).unwrap();
+
+        assert!(id.starts_with("error-"));
+
+        let _results = memory.recall_error_solutions("cannot borrow mutable", 5).unwrap();
+        // Results depend on embed_fn
+        assert_eq!(memory.db().len(), 1);
+    }
+
+    #[test]
+    fn test_recall_similar_hybrid() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        for i in 0..5 {
+            memory.learn_task(
+                &format!("Task {} about authentication and JWT tokens", i),
+                &format!("fn auth{}() {{ /* JWT logic */ }}", i),
+                TaskOutcome::Success,
+                vec!["Use JWT for auth"],
+            ).unwrap();
+        }
+
+        // recall_similar takes a text query, not an embedding
+        let _results = memory.recall_similar("authentication JWT", 3).unwrap();
+        // Results depend on embed_fn (placeholder returns zeros)
+        assert_eq!(memory.db().len(), 5);
+    }
+
+    #[test]
+    fn test_recall_experiences_filter() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        // Add a task episode
+        memory.learn_task(
+            "Fix bug in parser",
+            "fn parse() { /* fixed */ }",
+            TaskOutcome::Success,
+            vec!["Check edge cases"],
+        ).unwrap();
+
+        // Add a code snippet
+        memory.learn_code(CodeSnippet {
+            code: "let x = 1;".to_string(),
+            description: "Variable declaration".to_string(),
+            language: Language::Rust,
+            dependencies: vec![],
+            use_case: "Initialization".to_string(),
+            quality_score: 0.8,
+            tags: vec![],
+        }).unwrap();
+
+        // recall_experiences filters by Episode type
+        let episodes = memory.recall_experiences("parser bug", 5).unwrap();
+        for e in &episodes {
+            assert_eq!(e.memory_type, MemoryType::Episode);
+        }
+    }
+
+    #[test]
+    fn test_working_context_management() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        // Use with_working_context to modify
+        memory.with_working_context(|ctx| {
+            ctx.set_project("my-project");
+            ctx.set_task("Implement feature X");
+            ctx.add_open_file("src/main.rs");
+            ctx.add_goal("Write tests");
+        });
+
+        // Access via working_context()
+        let ctx = memory.working_context();
+        assert_eq!(ctx.current_project, Some("my-project".to_string()));
+        assert_eq!(ctx.current_task, Some("Implement feature X".to_string()));
+        assert!(ctx.open_files.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_recall_successful_vs_failures() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        memory.learn_task(
+            "Successful implementation",
+            "fn good() { /* works */ }",
+            TaskOutcome::Success,
+            vec!["Good approach"],
+        ).unwrap();
+
+        memory.learn_task(
+            "Failed implementation",
+            "fn bad() { /* broken */ }",
+            TaskOutcome::Failure,
+            vec!["Wrong approach"],
+        ).unwrap();
+
+        // recall_successful and recall_failures take string queries
+        let successes = memory.recall_successful("implementation", 5).unwrap();
+        let _failures = memory.recall_failures("implementation", 5).unwrap();
+
+        // At least one should have results
+        assert!(memory.db().len() == 2);
+
+        // Verify filtering works (if embed_fn was set, these would filter by outcome)
+        for s in &successes {
+            // Verify it's filtering for success
+            if let Some(ref meta) = s.metadata {
+                if let Some(outcome) = meta.get("outcome") {
+                    assert_eq!(outcome.as_str(), Some("success"));
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Replication Integration Tests
+// ============================================================================
+
+mod replication_integration {
+    use minimemory::{Config, VectorDB};
+    use minimemory::replication::{ChangeLog, ReplicationManager};
+
+    #[test]
+    fn test_change_log_tracking() {
+        let log = ChangeLog::new();
+
+        log.track_insert("doc-1", &[1.0, 2.0, 3.0], None);
+        log.track_insert("doc-2", &[4.0, 5.0, 6.0], None);
+        log.track_delete("doc-1");
+
+        let changes = log.export_since(0);
+        assert_eq!(changes.len(), 3);
+    }
+
+    #[test]
+    fn test_snapshot_and_restore() {
+        let source = VectorDB::new(Config::new(3)).unwrap();
+        source.insert("a", &[1.0, 2.0, 3.0], None).unwrap();
+        source.insert("b", &[4.0, 5.0, 6.0], None).unwrap();
+
+        let snapshot = ReplicationManager::create_snapshot(&source).unwrap();
+
+        let target = VectorDB::new(Config::new(3)).unwrap();
+        ReplicationManager::apply_snapshot(&target, &snapshot).unwrap();
+
+        assert_eq!(target.len(), 2);
+        assert!(target.contains("a"));
+        assert!(target.contains("b"));
+    }
+
+    #[test]
+    fn test_incremental_export() {
+        let log = ChangeLog::new();
+
+        log.track_insert("doc-1", &[1.0, 2.0, 3.0], None);
+        let checkpoint1 = log.checkpoint();
+
+        log.track_insert("doc-2", &[4.0, 5.0, 6.0], None);
+
+        let since_checkpoint = log.export_since(checkpoint1);
+        assert_eq!(since_checkpoint.len(), 1);
+        assert_eq!(since_checkpoint[0].document_id, "doc-2");
+    }
+
+    #[test]
+    fn test_apply_changes_to_db() {
+        let log = ChangeLog::new();
+        log.track_insert("doc-1", &[1.0, 2.0, 3.0], None);
+        log.track_insert("doc-2", &[4.0, 5.0, 6.0], None);
+
+        let changes = log.export_since(0);
+
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        let result = ReplicationManager::apply_changes(&db, &changes).unwrap();
+
+        assert_eq!(result.applied, 2);
+        assert_eq!(db.len(), 2);
+    }
+
+    #[test]
+    fn test_changelog_serialization() {
+        let log = ChangeLog::new();
+        log.track_insert("doc-1", &[1.0, 2.0, 3.0], None);
+
+        let json = serde_json::to_string(&log.export_since(0)).unwrap();
+        assert!(!json.is_empty());
+
+        let parsed: Vec<minimemory::replication::ChangeEntry> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 1);
+    }
+}
+
+// ============================================================================
+// Hybrid Search Integration Tests
+// ============================================================================
+
+mod hybrid_search_integration {
+    use minimemory::{Config, Metadata, VectorDB, HybridSearchParams, Filter};
+
+    fn generate_vector(seed: usize, dim: usize) -> Vec<f32> {
+        (0..dim).map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0).collect()
+    }
+
+    #[test]
+    fn test_hybrid_search_combined() {
+        let db = VectorDB::with_fulltext(
+            Config::new(64),
+            vec!["content".into()],
+        ).unwrap();
+
+        for i in 0..10 {
+            let mut meta = Metadata::new();
+            meta.insert("content", format!("Document about topic {} and Rust programming", i));
+            let v = generate_vector(i, 64);
+            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta)).unwrap();
+        }
+
+        let query = generate_vector(0, 64);
+        let params = HybridSearchParams::hybrid(query, "Rust programming", 5);
+        let results = db.hybrid_search(params).unwrap();
+
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_filter_only_search() {
+        let db = VectorDB::new(Config::new(64)).unwrap();
+
+        for i in 0..20 {
+            let mut meta = Metadata::new();
+            meta.insert("category", if i % 2 == 0 { "even" } else { "odd" });
+            let v = generate_vector(i, 64);
+            db.insert(&format!("doc-{}", i), &v, Some(meta)).unwrap();
+        }
+
+        let results = db.filter_search(Filter::eq("category", "even"), 10).unwrap();
+
+        assert_eq!(results.len(), 10);
+        for r in &results {
+            let cat = r.metadata.as_ref().unwrap().get("category").unwrap().as_str().unwrap();
+            assert_eq!(cat, "even");
+        }
+    }
+
+    #[test]
+    fn test_vector_with_filter() {
+        let db = VectorDB::new(Config::new(64)).unwrap();
+
+        for i in 0..50 {
+            let mut meta = Metadata::new();
+            meta.insert("score", (i % 10) as f64);
+            let v = generate_vector(i, 64);
+            db.insert(&format!("doc-{}", i), &v, Some(meta)).unwrap();
+        }
+
+        let query = generate_vector(0, 64);
+        let results = db.search_with_filter(&query, 5, Filter::gt("score", 5.0f64)).unwrap();
+
+        for r in &results {
+            let score = r.metadata.as_ref().unwrap().get("score").unwrap().as_f64().unwrap();
+            assert!(score > 5.0);
+        }
+    }
+
+    #[test]
+    fn test_keyword_search_only() {
+        let db = VectorDB::with_fulltext(
+            Config::new(64),
+            vec!["text".into()],
+        ).unwrap();
+
+        let texts = [
+            "The quick brown fox jumps",
+            "A lazy dog sleeps",
+            "Quick foxes are smart",
+            "Dogs and cats play together",
+        ];
+
+        for (i, text) in texts.iter().enumerate() {
+            let mut meta = Metadata::new();
+            meta.insert("text", *text);
+            let v = generate_vector(i, 64);
+            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta)).unwrap();
+        }
+
+        let results = db.keyword_search("quick fox", 5).unwrap();
+
+        assert!(!results.is_empty());
     }
 }
 

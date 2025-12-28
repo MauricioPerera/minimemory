@@ -1,10 +1,10 @@
 [package]
 name = "minimemory"
-version = "0.1.0"
+version = "2.4.0"
 edition = "2021"
 description = "Embedded vector database library for Rust - like SQLite for vectors"
 license = "MIT"
-repository = "https://github.com/yourusername/minimemory"
+repository = "https://github.com/MauricioPerera/minimemory"
 keywords = ["vector", "database", "embeddings", "similarity", "hnsw"]
 categories = ["database", "data-structures"]
 

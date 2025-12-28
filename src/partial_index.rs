@@ -168,7 +168,7 @@ impl PartialIndex {
 
         // Almacenar en storage local y en el índice
         self.storage.insert(id.to_string(), Some(vector.to_vec()), metadata.cloned())?;
-        self.index.add(id, vector)?;
+        self.index.add(id, vector, &self.storage, self.config.distance)?;
         self.document_ids.write().push(id.to_string());
         Ok(true)
     }

@@ -141,11 +141,12 @@ impl VectorDB {
         // Cargar documentos al storage e índice
         for stored in vectors {
             let id = stored.id.clone();
+            // Insertar en storage primero
+            storage.insert(stored.id.clone(), stored.vector.clone(), stored.metadata)?;
             // Solo indexar si tiene vector
             if let Some(ref vec) = stored.vector {
-                index.add(&id, vec)?;
+                index.add(&id, vec, &*storage, config.distance)?;
             }
-            storage.insert(stored.id, stored.vector, stored.metadata)?;
         }
 
         Ok(Self {
@@ -186,13 +187,14 @@ impl VectorDB {
         // Cargar documentos al storage, índice vectorial y BM25
         for stored in vectors {
             let id = stored.id.clone();
+            // Insertar en storage primero
+            storage.insert(stored.id.clone(), stored.vector.clone(), stored.metadata.clone())?;
             // Solo indexar en HNSW/Flat si tiene vector
             if let Some(ref vec) = stored.vector {
-                index.add(&id, vec)?;
+                index.add(&id, vec, &*storage, config.distance)?;
             }
             // Siempre indexar en BM25 si tiene metadata
             bm25_index.add(&id, stored.metadata.as_ref())?;
-            storage.insert(stored.id, stored.vector, stored.metadata)?;
         }
 
         Ok(Self {
@@ -263,7 +265,7 @@ impl VectorDB {
         }
 
         self.storage.insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        self.index.add(&id, vector)?;
+        self.index.add(&id, vector, &*self.storage, self.config.distance)?;
 
         // Indexar en BM25 si está habilitado
         if let Some(ref bm25) = self.bm25_index {
@@ -335,7 +337,7 @@ impl VectorDB {
 
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
-            self.index.add(&id, vec)?;
+            self.index.add(&id, vec, &*self.storage, self.config.distance)?;
             // Añadir a índices parciales que coincidan
             let _ = self.partial_indexes.on_insert(&id, vec, metadata.as_ref());
         }
@@ -461,7 +463,7 @@ impl VectorDB {
         self.delete(&id)?;
 
         self.storage.insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        self.index.add(&id, vector)?;
+        self.index.add(&id, vector, &*self.storage, self.config.distance)?;
 
         // Re-indexar en BM25 si está habilitado
         if let Some(ref bm25) = self.bm25_index {
@@ -756,7 +758,7 @@ impl VectorDB {
 
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
-            self.index.add(&chunk.id, vec)?;
+            self.index.add(&chunk.id, vec, &*self.storage, self.config.distance)?;
         }
 
         // Indexar en BM25 si está habilitado

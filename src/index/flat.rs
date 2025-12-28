@@ -29,7 +29,14 @@ impl Default for FlatIndex {
 }
 
 impl Index for FlatIndex {
-    fn add(&self, id: &str, _vector: &[f32]) -> Result<()> {
+    fn add(
+        &self,
+        id: &str,
+        _vector: &[f32],
+        _storage: &dyn Storage,
+        _distance: Distance,
+    ) -> Result<()> {
+        // FlatIndex doesn't build a graph, so storage/distance are unused
         self.ids.write().insert(id.to_string());
         Ok(())
     }
@@ -108,7 +115,7 @@ mod tests {
 
         for (id, data) in &vectors {
             storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
-            index.add(id, data).unwrap();
+            index.add(id, data, &storage, Distance::Euclidean).unwrap();
         }
 
         // Search for vector closest to [1, 0, 0]
@@ -134,7 +141,7 @@ mod tests {
 
         for (id, data) in &vectors {
             storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
-            index.add(id, data).unwrap();
+            index.add(id, data, &storage, Distance::Cosine).unwrap();
         }
 
         let query = vec![1.0, 0.0];

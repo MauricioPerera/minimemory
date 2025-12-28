@@ -404,7 +404,7 @@ mod tests {
         meta1.insert("content", "Learn Rust systems programming");
         meta1.insert("category", "tech");
         storage.insert("doc-1".into(), Some(vec![1.0, 0.0, 0.0]), Some(meta1.clone())).unwrap();
-        vector_index.add("doc-1", &[1.0, 0.0, 0.0]).unwrap();
+        vector_index.add("doc-1", &[1.0, 0.0, 0.0], &*storage, Distance::Cosine).unwrap();
         bm25_index.add("doc-1", Some(&meta1)).unwrap();
 
         // Doc 2: About Python
@@ -413,7 +413,7 @@ mod tests {
         meta2.insert("content", "Python for beginners programming");
         meta2.insert("category", "tech");
         storage.insert("doc-2".into(), Some(vec![0.0, 1.0, 0.0]), Some(meta2.clone())).unwrap();
-        vector_index.add("doc-2", &[0.0, 1.0, 0.0]).unwrap();
+        vector_index.add("doc-2", &[0.0, 1.0, 0.0], &*storage, Distance::Cosine).unwrap();
         bm25_index.add("doc-2", Some(&meta2)).unwrap();
 
         // Doc 3: About Cooking (different category)
@@ -422,7 +422,7 @@ mod tests {
         meta3.insert("content", "Delicious food recipes");
         meta3.insert("category", "food");
         storage.insert("doc-3".into(), Some(vec![0.0, 0.0, 1.0]), Some(meta3.clone())).unwrap();
-        vector_index.add("doc-3", &[0.0, 0.0, 1.0]).unwrap();
+        vector_index.add("doc-3", &[0.0, 0.0, 1.0], &*storage, Distance::Cosine).unwrap();
         bm25_index.add("doc-3", Some(&meta3)).unwrap();
 
         (storage, vector_index, bm25_index)

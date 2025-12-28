@@ -110,7 +110,14 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // ============================================================================
-// Implementaciones AVX2 (reservadas para futuro uso con feature flags)
+// Implementaciones AVX2
+//
+// Estas funciones se usan cuando:
+// 1. Se compila con: RUSTFLAGS="-C target-feature=+avx2,+fma" cargo build
+// 2. El CPU soporta AVX2 (verificado con is_x86_feature_detected! en runtime)
+//
+// Sin el flag de compilación, las llamadas están detrás de cfg(target_feature)
+// por lo que el compilador marca las funciones como "dead_code" aunque se usan.
 // ============================================================================
 
 #[allow(dead_code)]
