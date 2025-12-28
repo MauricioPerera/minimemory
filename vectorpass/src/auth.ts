@@ -2,7 +2,7 @@
  * VectorPass Authentication & User Management
  */
 
-import { Env, User, Tier, generateApiKey, generateReferralCode, REFERRAL_CONFIG, ADMIN_EMAILS } from './types';
+import { Env, User, Tier, generateApiKey, generateReferralCode, REFERRAL_CONFIG, ADMIN_EMAILS, TIER_LIMITS } from './types';
 
 /**
  * Extracts API key from request headers
@@ -304,6 +304,144 @@ export async function listAllUsers(env: Env): Promise<User[]> {
     } while (cursor);
 
     return users;
+}
+
+/**
+ * Get user by ID (admin only)
+ */
+export async function getUserById(userId: string, env: Env): Promise<User | null> {
+    const userData = await env.USERS.get(`user:${userId}`);
+    if (!userData) return null;
+    return JSON.parse(userData) as User;
+}
+
+/**
+ * Update user data (admin only)
+ */
+export async function adminUpdateUser(
+    userId: string,
+    updates: Partial<Pick<User, 'tier' | 'email' | 'referralDiscount' | 'paymentFailedAt' | 'previousTier'>>,
+    env: Env
+): Promise<User | null> {
+    const userData = await env.USERS.get(`user:${userId}`);
+    if (!userData) return null;
+
+    const user = JSON.parse(userData) as User;
+    const oldEmail = user.email;
+
+    // Apply updates
+    if (updates.tier !== undefined) user.tier = updates.tier;
+    if (updates.email !== undefined) user.email = updates.email;
+    if (updates.referralDiscount !== undefined) user.referralDiscount = updates.referralDiscount;
+    if (updates.paymentFailedAt !== undefined) user.paymentFailedAt = updates.paymentFailedAt;
+    if (updates.previousTier !== undefined) user.previousTier = updates.previousTier;
+
+    // Save updated user
+    await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+
+    // Update email lookup if email changed
+    if (updates.email && updates.email !== oldEmail) {
+        await env.USERS.delete(`email:${oldEmail}`);
+        await env.USERS.put(`email:${updates.email}`, userId);
+    }
+
+    return user;
+}
+
+/**
+ * Delete user and all associated data (admin only)
+ */
+export async function adminDeleteUser(userId: string, env: Env): Promise<boolean> {
+    const userData = await env.USERS.get(`user:${userId}`);
+    if (!userData) return false;
+
+    const user = JSON.parse(userData) as User;
+
+    // Delete user data
+    await env.USERS.delete(`user:${userId}`);
+
+    // Delete API key lookup
+    await env.USERS.delete(`apikey:${user.apiKey}`);
+
+    // Delete email lookup
+    await env.USERS.delete(`email:${user.email}`);
+
+    // Delete referral code lookup
+    if (user.referralCode) {
+        await env.USERS.delete(`referral:${user.referralCode}`);
+    }
+
+    // Delete Stripe customer mapping
+    if (user.stripeCustomerId) {
+        await env.USERS.delete(`stripe:${user.stripeCustomerId}`);
+    }
+
+    // Delete verification status
+    await env.USERS.delete(`verified:${userId}`);
+
+    // Delete vector database
+    await env.VECTORS.delete(`db:${userId}:default`);
+
+    // Delete rate limit data
+    await env.RATE_LIMITS.delete(`search:${userId}`);
+
+    console.log(`Admin deleted user ${user.email} (${userId})`);
+    return true;
+}
+
+/**
+ * Trim excess vectors for a user who exceeded their tier limit
+ * Called after 15-day grace period expires
+ */
+export async function trimExcessVectors(userId: string, env: Env): Promise<{ deleted: number; remaining: number }> {
+    const userData = await env.USERS.get(`user:${userId}`);
+    if (!userData) return { deleted: 0, remaining: 0 };
+
+    const user = JSON.parse(userData) as User;
+    const limits = TIER_LIMITS[user.tier];
+    const maxVectors = limits.maxVectors;
+
+    // Get user's vector database
+    const dbData = await env.VECTORS.get(`db:${userId}:default`);
+    if (!dbData) return { deleted: 0, remaining: 0 };
+
+    try {
+        const db = JSON.parse(dbData);
+        const currentCount = db.ids?.length || 0;
+
+        if (currentCount <= maxVectors) {
+            return { deleted: 0, remaining: currentCount };
+        }
+
+        // Need to trim vectors - delete oldest ones first
+        const toDelete = currentCount - maxVectors;
+        const idsToKeep = db.ids.slice(-maxVectors);  // Keep newest
+
+        // Rebuild database with only kept vectors
+        const keptIndices = new Set(idsToKeep.map((id: string) => db.ids.indexOf(id)));
+
+        db.ids = idsToKeep;
+        if (db.vectors) {
+            db.vectors = db.vectors.filter((_: any, i: number) => keptIndices.has(i));
+        }
+        if (db.metadata) {
+            const newMetadata: Record<string, any> = {};
+            for (const id of idsToKeep) {
+                if (db.metadata[id]) {
+                    newMetadata[id] = db.metadata[id];
+                }
+            }
+            db.metadata = newMetadata;
+        }
+
+        await env.VECTORS.put(`db:${userId}:default`, JSON.stringify(db));
+
+        console.log(`Trimmed ${toDelete} excess vectors for user ${user.email}. Remaining: ${maxVectors}`);
+        return { deleted: toDelete, remaining: maxVectors };
+    } catch (err) {
+        console.error('Error trimming vectors:', err);
+        return { deleted: 0, remaining: 0 };
+    }
 }
 
 /**

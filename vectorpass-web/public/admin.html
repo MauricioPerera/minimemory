@@ -168,16 +168,15 @@
                         <tr class="border-b">
                             <th class="text-left py-3 font-medium text-gray-500">Email</th>
                             <th class="text-left py-3 font-medium text-gray-500">Tier</th>
-                            <th class="text-left py-3 font-medium text-gray-500">Verified</th>
+                            <th class="text-left py-3 font-medium text-gray-500">Status</th>
                             <th class="text-left py-3 font-medium text-gray-500">Referrals</th>
-                            <th class="text-left py-3 font-medium text-gray-500">Discount</th>
                             <th class="text-left py-3 font-medium text-gray-500">Created</th>
-                            <th class="text-left py-3 font-medium text-gray-500">API Key</th>
+                            <th class="text-left py-3 font-medium text-gray-500">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="usersTable">
                         <tr>
-                            <td colspan="7" class="py-8 text-center text-gray-500">Loading users...</td>
+                            <td colspan="6" class="py-8 text-center text-gray-500">Loading users...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -185,6 +184,68 @@
             <div class="mt-4 text-sm text-gray-500" id="userCount">-</div>
         </div>
     </main>
+
+    <!-- Edit User Modal -->
+    <div id="editModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-2xl p-8 max-w-md w-full mx-4 relative">
+            <button onclick="hideEditModal()" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+
+            <h2 class="text-xl font-bold mb-6">Edit User</h2>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <input type="email" id="editEmail" class="w-full px-3 py-2 border rounded-lg text-sm" readonly>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Tier</label>
+                    <select id="editTier" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        <option value="free">Free</option>
+                        <option value="starter">Starter ($9/mo)</option>
+                        <option value="pro">Pro ($29/mo)</option>
+                        <option value="business">Business ($79/mo)</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Referral Discount (%)</label>
+                    <input type="number" id="editDiscount" min="0" max="50" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+
+                <div id="graceInfo" class="hidden bg-orange-50 border border-orange-200 rounded-lg p-3">
+                    <div class="flex items-center text-orange-700 text-sm">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                        </svg>
+                        <span id="graceText">Payment failed. Grace period active.</span>
+                    </div>
+                    <button onclick="clearGracePeriod()" class="mt-2 text-xs text-orange-600 hover:text-orange-800 underline">
+                        Clear grace period
+                    </button>
+                </div>
+
+                <div class="flex space-x-3 pt-4">
+                    <button onclick="saveUser()" class="flex-1 py-2 bg-primary text-white rounded-lg hover:bg-secondary transition">
+                        Save Changes
+                    </button>
+                    <button onclick="trimVectors()" class="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 transition" title="Delete excess vectors">
+                        Trim Vectors
+                    </button>
+                </div>
+
+                <div class="pt-4 border-t">
+                    <button onclick="deleteUser()" class="w-full py-2 text-red-600 hover:bg-red-50 rounded-lg transition text-sm">
+                        Delete User
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Toast -->
     <div id="toast" class="fixed bottom-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg transform translate-y-20 transition-transform">
@@ -195,6 +256,7 @@
         const API_URL = 'https://vectorpass-api.automators.work';
         let apiKey = localStorage.getItem('vp_api_key');
         let allUsers = [];
+        let editingUserId = null;
 
         // Check auth on load
         if (!apiKey) {
@@ -254,7 +316,7 @@
             const tbody = document.getElementById('usersTable');
 
             if (users.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-gray-500">No users found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-gray-500">No users found</td></tr>';
                 document.getElementById('userCount').textContent = '0 users';
                 return;
             }
@@ -276,6 +338,18 @@
                     day: 'numeric'
                 });
 
+                // Status badges
+                let statusBadges = [];
+                if (user.verified) {
+                    statusBadges.push('<span class="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-700">Verified</span>');
+                } else {
+                    statusBadges.push('<span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-500">Unverified</span>');
+                }
+                if (user.paymentFailedAt) {
+                    const daysAgo = Math.floor((Date.now() - new Date(user.paymentFailedAt).getTime()) / (1000 * 60 * 60 * 24));
+                    statusBadges.push(`<span class="px-2 py-0.5 text-xs rounded-full bg-orange-100 text-orange-700">Grace: ${15 - daysAgo}d</span>`);
+                }
+
                 return `
                     <tr class="border-b hover:bg-gray-50">
                         <td class="py-3">
@@ -286,16 +360,17 @@
                             <span class="px-2 py-1 text-xs rounded-full ${tierColors[user.tier] || tierColors.free}">${user.tier}</span>
                         </td>
                         <td class="py-3">
-                            ${user.verified
-                                ? '<span class="text-green-500"><svg class="w-5 h-5 inline" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg></span>'
-                                : '<span class="text-gray-300"><svg class="w-5 h-5 inline" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg></span>'
-                            }
+                            <div class="flex flex-wrap gap-1">${statusBadges.join('')}</div>
                         </td>
-                        <td class="py-3">${user.referralCount || 0}</td>
-                        <td class="py-3">${user.referralDiscount ? user.referralDiscount + '%' : '-'}</td>
+                        <td class="py-3">
+                            ${user.referralCount || 0}
+                            ${user.referralDiscount ? `<span class="text-green-600 text-xs">(${user.referralDiscount}% off)</span>` : ''}
+                        </td>
                         <td class="py-3 text-gray-500">${createdDate}</td>
                         <td class="py-3">
-                            <code class="text-xs bg-gray-100 px-2 py-1 rounded">${user.apiKey}</code>
+                            <button onclick="openEditModal('${user.id}')" class="text-primary hover:text-secondary text-sm">
+                                Edit
+                            </button>
                         </td>
                     </tr>
                 `;
@@ -319,6 +394,144 @@
             }
 
             renderUsers(filtered);
+        }
+
+        function openEditModal(userId) {
+            const user = allUsers.find(u => u.id === userId);
+            if (!user) return;
+
+            editingUserId = userId;
+            document.getElementById('editEmail').value = user.email;
+            document.getElementById('editTier').value = user.tier;
+            document.getElementById('editDiscount').value = user.referralDiscount || 0;
+
+            // Show grace period info if applicable
+            const graceInfo = document.getElementById('graceInfo');
+            if (user.paymentFailedAt) {
+                const daysAgo = Math.floor((Date.now() - new Date(user.paymentFailedAt).getTime()) / (1000 * 60 * 60 * 24));
+                const daysLeft = 15 - daysAgo;
+                document.getElementById('graceText').textContent =
+                    `Payment failed ${daysAgo} day${daysAgo === 1 ? '' : 's'} ago. ${daysLeft > 0 ? `${daysLeft} days until vectors are trimmed.` : 'Vectors will be trimmed on next API call.'}`;
+                graceInfo.classList.remove('hidden');
+            } else {
+                graceInfo.classList.add('hidden');
+            }
+
+            document.getElementById('editModal').classList.remove('hidden');
+            document.getElementById('editModal').classList.add('flex');
+        }
+
+        function hideEditModal() {
+            document.getElementById('editModal').classList.add('hidden');
+            document.getElementById('editModal').classList.remove('flex');
+            editingUserId = null;
+        }
+
+        async function saveUser() {
+            if (!editingUserId) return;
+
+            const tier = document.getElementById('editTier').value;
+            const referralDiscount = parseInt(document.getElementById('editDiscount').value) || 0;
+
+            try {
+                const res = await fetch(`${API_URL}/admin/users/${editingUserId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'X-API-Key': apiKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ tier, referralDiscount })
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast('User updated successfully');
+                    hideEditModal();
+                    loadAdminData();
+                } else {
+                    showToast(data.error || 'Failed to update user');
+                }
+            } catch (err) {
+                showToast('Network error');
+            }
+        }
+
+        async function deleteUser() {
+            if (!editingUserId) return;
+
+            const user = allUsers.find(u => u.id === editingUserId);
+            if (!confirm(`Are you sure you want to delete ${user?.email}? This cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const res = await fetch(`${API_URL}/admin/users/${editingUserId}`, {
+                    method: 'DELETE',
+                    headers: { 'X-API-Key': apiKey }
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast('User deleted');
+                    hideEditModal();
+                    loadAdminData();
+                } else {
+                    showToast(data.error || 'Failed to delete user');
+                }
+            } catch (err) {
+                showToast('Network error');
+            }
+        }
+
+        async function trimVectors() {
+            if (!editingUserId) return;
+
+            if (!confirm('This will delete excess vectors beyond the user\'s tier limit. Continue?')) {
+                return;
+            }
+
+            try {
+                const res = await fetch(`${API_URL}/admin/users/${editingUserId}/trim`, {
+                    method: 'POST',
+                    headers: { 'X-API-Key': apiKey }
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast(`Trimmed ${data.data.deleted} vectors. ${data.data.remaining} remaining.`);
+                    loadAdminData();
+                } else {
+                    showToast(data.error || 'Failed to trim vectors');
+                }
+            } catch (err) {
+                showToast('Network error');
+            }
+        }
+
+        async function clearGracePeriod() {
+            if (!editingUserId) return;
+
+            try {
+                const res = await fetch(`${API_URL}/admin/users/${editingUserId}/clear-grace`, {
+                    method: 'POST',
+                    headers: { 'X-API-Key': apiKey }
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    showToast('Grace period cleared');
+                    document.getElementById('graceInfo').classList.add('hidden');
+                    loadAdminData();
+                } else {
+                    showToast(data.error || 'Failed to clear grace period');
+                }
+            } catch (err) {
+                showToast('Network error');
+            }
         }
 
         function logout() {

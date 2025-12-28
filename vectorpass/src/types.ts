@@ -34,6 +34,9 @@ export interface User {
     referralCount: number;
     // Referral rewards: 10% discount per verified referral, max 50%
     referralDiscount: number;  // 0-50 percentage
+    // Payment failure tracking
+    paymentFailedAt?: string;  // ISO timestamp when payment first failed
+    previousTier?: Tier;       // Tier before downgrade (for potential restoration)
 }
 
 // Referral reward config

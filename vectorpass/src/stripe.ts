@@ -4,8 +4,11 @@
  * Handles subscription webhooks and payment processing
  */
 
-import { Env, User, Tier, REFERRAL_CONFIG } from './types';
-import { updateUserTier, grantReferralReward, revokeReferralReward } from './auth';
+import { Env, User, Tier, REFERRAL_CONFIG, TIER_LIMITS } from './types';
+import { updateUserTier, grantReferralReward, revokeReferralReward, getUserById, adminUpdateUser, trimExcessVectors } from './auth';
+
+// Grace period for payment failures (15 days in ms)
+const PAYMENT_GRACE_PERIOD_MS = 15 * 24 * 60 * 60 * 1000;
 
 // Stripe price IDs (created via scripts/setup-stripe.js)
 export const STRIPE_PRICES = {
@@ -214,6 +217,7 @@ async function handleSubscriptionCanceled(subscription: any, env: Env): Promise<
 
 /**
  * Handle failed payment
+ * Tracks failure date and downgrades user to free tier
  */
 async function handlePaymentFailed(invoice: any, env: Env): Promise<void> {
     const { customer, subscription } = invoice;
@@ -224,11 +228,59 @@ async function handlePaymentFailed(invoice: any, env: Env): Promise<void> {
         return;
     }
 
-    // Log the failure - in production, send email notification
-    console.log(`Payment failed for user ${userId}, subscription ${subscription}`);
+    const user = await getUserById(userId, env);
+    if (!user) {
+        return;
+    }
 
-    // Optionally downgrade after multiple failures
-    // For now, Stripe handles dunning automatically
+    // If already on free tier, nothing to do
+    if (user.tier === 'free') {
+        return;
+    }
+
+    // Record the payment failure timestamp (if not already set)
+    if (!user.paymentFailedAt) {
+        await adminUpdateUser(userId, {
+            paymentFailedAt: new Date().toISOString(),
+            previousTier: user.tier
+        }, env);
+        console.log(`Payment failed for user ${user.email}. Grace period started.`);
+    }
+
+    // Downgrade to free tier immediately
+    await updateUserTier(userId, 'free', customer, undefined, env);
+    console.log(`Downgraded user ${user.email} to free tier due to payment failure`);
+}
+
+/**
+ * Check if a user's grace period has expired and trim vectors if needed
+ * Should be called on user API requests
+ */
+export async function checkGracePeriodAndTrim(userId: string, env: Env): Promise<{ trimmed: boolean; deleted: number }> {
+    const user = await getUserById(userId, env);
+    if (!user || !user.paymentFailedAt) {
+        return { trimmed: false, deleted: 0 };
+    }
+
+    const failedAt = new Date(user.paymentFailedAt).getTime();
+    const now = Date.now();
+    const gracePeriodExpired = (now - failedAt) > PAYMENT_GRACE_PERIOD_MS;
+
+    if (!gracePeriodExpired) {
+        return { trimmed: false, deleted: 0 };
+    }
+
+    // Grace period expired - trim excess vectors
+    const result = await trimExcessVectors(userId, env);
+
+    // Clear the payment failed marker after trimming
+    await adminUpdateUser(userId, {
+        paymentFailedAt: undefined,
+        previousTier: undefined
+    }, env);
+
+    console.log(`Grace period expired for user ${user.email}. Trimmed ${result.deleted} vectors.`);
+    return { trimmed: true, deleted: result.deleted };
 }
 
 /**

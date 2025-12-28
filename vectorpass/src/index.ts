@@ -18,10 +18,10 @@
  */
 
 import { Env, User, TIER_LIMITS, IndexRequest, BatchIndexRequest, SearchRequest } from './types';
-import { requireAuth, createUser, getUserByEmail, regenerateApiKey, isAdmin, listAllUsers, getPlatformStats } from './auth';
+import { requireAuth, createUser, getUserByEmail, regenerateApiKey, isAdmin, listAllUsers, getPlatformStats, getUserById, adminUpdateUser, adminDeleteUser, trimExcessVectors } from './auth';
 import { checkSearchLimit, checkVectorLimit, recordSearch, getUsageStats, rateLimitExceeded, rateLimitHeaders } from './ratelimit';
 import { VectorDB, initWasm } from './vectordb';
-import { handleStripeWebhook, createCheckoutSession } from './stripe';
+import { handleStripeWebhook, createCheckoutSession, checkGracePeriodAndTrim } from './stripe';
 import { sendVerificationEmail, verifyEmailCode, isEmailVerified } from './email';
 
 // CORS headers
@@ -322,6 +322,122 @@ export default {
                     });
                 }
 
+                // GET /admin/users/:id - Get single user
+                if (request.method === 'GET' && path.match(/^\/admin\/users\/[^/]+$/)) {
+                    const userId = path.split('/')[3];
+                    const targetUser = await getUserById(userId, env);
+
+                    if (!targetUser) {
+                        return error('User not found', 404);
+                    }
+
+                    // Get vector count
+                    const dbData = await env.VECTORS.get(`db:${userId}:default`);
+                    let vectorCount = 0;
+                    if (dbData) {
+                        try {
+                            const db = JSON.parse(dbData);
+                            vectorCount = db.ids?.length || 0;
+                        } catch {}
+                    }
+
+                    return json({
+                        success: true,
+                        data: {
+                            ...targetUser,
+                            apiKey: targetUser.apiKey.substring(0, 12) + '...',
+                            verified: await isEmailVerified(userId, env),
+                            vectorCount,
+                            vectorLimit: TIER_LIMITS[targetUser.tier].maxVectors
+                        }
+                    });
+                }
+
+                // PUT /admin/users/:id - Update user
+                if (request.method === 'PUT' && path.match(/^\/admin\/users\/[^/]+$/)) {
+                    const userId = path.split('/')[3];
+                    const body = await request.json() as {
+                        tier?: string;
+                        email?: string;
+                        referralDiscount?: number;
+                    };
+
+                    const updates: any = {};
+                    if (body.tier && ['free', 'starter', 'pro', 'business'].includes(body.tier)) {
+                        updates.tier = body.tier;
+                    }
+                    if (body.email) {
+                        updates.email = body.email.toLowerCase().trim();
+                    }
+                    if (typeof body.referralDiscount === 'number') {
+                        updates.referralDiscount = Math.max(0, Math.min(50, body.referralDiscount));
+                    }
+
+                    const updatedUser = await adminUpdateUser(userId, updates, env);
+                    if (!updatedUser) {
+                        return error('User not found', 404);
+                    }
+
+                    return json({
+                        success: true,
+                        data: {
+                            ...updatedUser,
+                            apiKey: updatedUser.apiKey.substring(0, 12) + '...'
+                        }
+                    });
+                }
+
+                // DELETE /admin/users/:id - Delete user
+                if (request.method === 'DELETE' && path.match(/^\/admin\/users\/[^/]+$/)) {
+                    const userId = path.split('/')[3];
+
+                    // Prevent self-deletion
+                    if (userId === user.id) {
+                        return error('Cannot delete your own account', 400);
+                    }
+
+                    const deleted = await adminDeleteUser(userId, env);
+                    if (!deleted) {
+                        return error('User not found', 404);
+                    }
+
+                    return json({
+                        success: true,
+                        data: { deleted: true, userId }
+                    });
+                }
+
+                // POST /admin/users/:id/trim - Force trim excess vectors
+                if (request.method === 'POST' && path.match(/^\/admin\/users\/[^/]+\/trim$/)) {
+                    const userId = path.split('/')[3];
+
+                    const result = await trimExcessVectors(userId, env);
+
+                    return json({
+                        success: true,
+                        data: result
+                    });
+                }
+
+                // POST /admin/users/:id/clear-grace - Clear payment failure grace period
+                if (request.method === 'POST' && path.match(/^\/admin\/users\/[^/]+\/clear-grace$/)) {
+                    const userId = path.split('/')[3];
+
+                    const updated = await adminUpdateUser(userId, {
+                        paymentFailedAt: undefined,
+                        previousTier: undefined
+                    }, env);
+
+                    if (!updated) {
+                        return error('User not found', 404);
+                    }
+
+                    return json({
+                        success: true,
+                        data: { cleared: true }
+                    });
+                }
+
                 return error('Admin endpoint not found', 404);
             }
 
@@ -338,6 +454,11 @@ export default {
                 }
 
                 const { user } = authResult;
+
+                // Check grace period and trim vectors if expired (runs in background)
+                if (user.paymentFailedAt) {
+                    await checkGracePeriodAndTrim(user.id, env);
+                }
 
                 // Check if email is verified (for write operations)
                 const verified = await isEmailVerified(user.id, env);
