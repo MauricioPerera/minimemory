@@ -261,6 +261,61 @@ export async function linkStripeCustomer(
 }
 
 /**
+ * Create Stripe Checkout session via API
+ */
+export async function createCheckoutSession(
+    user: User,
+    tier: 'starter' | 'pro' | 'business',
+    successUrl: string,
+    cancelUrl: string,
+    env: Env
+): Promise<string> {
+    const stripeSecretKey = (env as any).STRIPE_SECRET_KEY;
+
+    if (!stripeSecretKey) {
+        throw new Error('Stripe not configured');
+    }
+
+    const priceId = STRIPE_PRICES[tier];
+
+    // Build form data for Stripe API
+    const params = new URLSearchParams();
+    params.append('mode', 'subscription');
+    params.append('success_url', successUrl);
+    params.append('cancel_url', cancelUrl);
+    params.append('client_reference_id', user.id);
+    params.append('customer_email', user.email);
+    params.append('line_items[0][price]', priceId);
+    params.append('line_items[0][quantity]', '1');
+    params.append('allow_promotion_codes', 'true');
+    params.append('billing_address_collection', 'auto');
+
+    // If user already has a Stripe customer ID, use it
+    if (user.stripeCustomerId) {
+        params.delete('customer_email');
+        params.append('customer', user.stripeCustomerId);
+    }
+
+    const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${stripeSecretKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+    });
+
+    if (!response.ok) {
+        const error = await response.json() as any;
+        console.error('Stripe error:', error);
+        throw new Error(error.error?.message || 'Failed to create checkout session');
+    }
+
+    const session = await response.json() as { url: string };
+    return session.url;
+}
+
+/**
  * Create a billing portal session URL
  */
 export function getBillingPortalUrl(customerId: string, returnUrl: string): string {

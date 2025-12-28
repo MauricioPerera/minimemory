@@ -21,7 +21,7 @@ import { Env, User, TIER_LIMITS, IndexRequest, BatchIndexRequest, SearchRequest 
 import { requireAuth, createUser, getUserByEmail, regenerateApiKey } from './auth';
 import { checkSearchLimit, checkVectorLimit, recordSearch, getUsageStats, rateLimitExceeded, rateLimitHeaders } from './ratelimit';
 import { VectorDB, initWasm } from './vectordb';
-import { handleStripeWebhook } from './stripe';
+import { handleStripeWebhook, createCheckoutSession } from './stripe';
 import { sendVerificationEmail, verifyEmailCode, isEmailVerified } from './email';
 
 // CORS headers
@@ -82,6 +82,42 @@ export default {
             // POST /webhooks/stripe - Stripe subscription webhooks
             if (request.method === 'POST' && path === '/webhooks/stripe') {
                 return handleStripeWebhook(request, env);
+            }
+
+            // POST /billing/checkout - Create Stripe checkout session
+            if (request.method === 'POST' && path === '/billing/checkout') {
+                const authResult = await requireAuth(request, env);
+                if (authResult instanceof Response) {
+                    return authResult;
+                }
+                const { user } = authResult;
+
+                const body = await request.json() as { tier: string; successUrl: string; cancelUrl: string };
+
+                if (!body.tier || !body.successUrl || !body.cancelUrl) {
+                    return error('tier, successUrl, and cancelUrl required');
+                }
+
+                if (!['starter', 'pro', 'business'].includes(body.tier)) {
+                    return error('Invalid tier. Must be starter, pro, or business');
+                }
+
+                try {
+                    const checkoutUrl = await createCheckoutSession(
+                        user,
+                        body.tier as 'starter' | 'pro' | 'business',
+                        body.successUrl,
+                        body.cancelUrl,
+                        env
+                    );
+
+                    return json({
+                        success: true,
+                        data: { url: checkoutUrl }
+                    });
+                } catch (err: any) {
+                    return error(err.message || 'Failed to create checkout session', 500);
+                }
             }
 
             // ============================================================

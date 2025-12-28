@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - VectorPass</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#2563eb',
+                        secondary: '#1e40af'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .code-block {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 12px 16px;
+            overflow-x: auto;
+        }
+        .code-block code {
+            color: #e2e8f0;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-white border-b border-gray-200">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16 items-center">
+                <a href="/" class="flex items-center space-x-2">
+                    <svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+                    </svg>
+                    <span class="text-xl font-bold text-gray-900">VectorPass</span>
+                </a>
+                <div class="flex items-center space-x-4">
+                    <a href="/#docs" class="text-gray-600 hover:text-gray-900">Docs</a>
+                    <button onclick="logout()" class="text-gray-600 hover:text-gray-900">Logout</button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Header -->
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-900">Dashboard</h1>
+            <p class="text-gray-600" id="userEmail">Loading...</p>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <!-- Tier Card -->
+            <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-gray-500 text-sm">Current Plan</span>
+                    <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold capitalize" id="tierDisplay">-</div>
+                <button onclick="showUpgrade()" id="upgradeBtn" class="text-primary text-sm hover:underline mt-2 hidden">Upgrade</button>
+            </div>
+
+            <!-- Vectors Card -->
+            <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-gray-500 text-sm">Vectors</span>
+                    <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold" id="vectorsCount">-</div>
+                <div class="text-xs text-gray-400" id="vectorsLimit">of - limit</div>
+                <div class="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div class="h-full bg-green-500 rounded-full transition-all" id="vectorsBar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Searches Today Card -->
+            <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-gray-500 text-sm">Searches Today</span>
+                    <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold" id="searchesCount">-</div>
+                <div class="text-xs text-gray-400" id="searchesLimit">of - limit</div>
+                <div class="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div class="h-full bg-blue-500 rounded-full transition-all" id="searchesBar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- API Calls Card -->
+            <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-gray-500 text-sm">Total API Calls</span>
+                    <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold" id="totalCalls">-</div>
+                <div class="text-xs text-gray-400">All time</div>
+            </div>
+        </div>
+
+        <!-- Two Column Layout -->
+        <div class="grid md:grid-cols-2 gap-8">
+            <!-- API Key Section -->
+            <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <h2 class="text-lg font-semibold mb-4">API Key</h2>
+                <div class="flex items-center space-x-2">
+                    <div class="code-block flex-1">
+                        <code id="apiKeyDisplay">vp_live_•••••••••••••••</code>
+                    </div>
+                    <button onclick="toggleApiKey()" class="p-2 text-gray-400 hover:text-gray-600" title="Show/Hide">
+                        <svg id="eyeIcon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                        </svg>
+                    </button>
+                    <button onclick="copyApiKey()" class="p-2 text-gray-400 hover:text-gray-600" title="Copy">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                        </svg>
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mt-2">Use this key in your X-API-Key header</p>
+
+                <!-- Regenerate Key -->
+                <div class="mt-4 pt-4 border-t border-gray-100">
+                    <button onclick="regenerateKey()" class="text-sm text-red-500 hover:text-red-600">
+                        Regenerate API Key
+                    </button>
+                    <p class="text-xs text-gray-400 mt-1">This will invalidate your current key</p>
+                </div>
+            </div>
+
+            <!-- Quick Start -->
+            <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <h2 class="text-lg font-semibold mb-4">Quick Start</h2>
+                <div class="space-y-4">
+                    <div>
+                        <p class="text-sm text-gray-600 mb-2">Index a document:</p>
+                        <div class="code-block text-xs">
+                            <code>curl -X POST https://vectorpass-api.automators.work/v1/index \
+  -H "X-API-Key: <span class="text-green-400">YOUR_KEY</span>" \
+  -d '{"id":"doc1","text":"Hello world"}'</code>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-600 mb-2">Search:</p>
+                        <div class="code-block text-xs">
+                            <code>curl -X POST https://vectorpass-api.automators.work/v1/search \
+  -H "X-API-Key: <span class="text-green-400">YOUR_KEY</span>" \
+  -d '{"query":"greeting","k":5}'</code>
+                        </div>
+                    </div>
+                </div>
+                <a href="/#docs" class="inline-block mt-4 text-primary text-sm hover:underline">View full documentation</a>
+            </div>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="mt-8 bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+            <h2 class="text-lg font-semibold mb-4">Plan Limits</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b">
+                            <th class="text-left py-2 font-medium text-gray-500">Feature</th>
+                            <th class="text-left py-2 font-medium text-gray-500">Your Limit</th>
+                            <th class="text-left py-2 font-medium text-gray-500">Current Usage</th>
+                            <th class="text-left py-2 font-medium text-gray-500">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="limitsTable">
+                        <tr class="border-b">
+                            <td class="py-3">Max Vectors</td>
+                            <td id="limitVectors">-</td>
+                            <td id="usageVectors">-</td>
+                            <td><span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-700" id="statusVectors">-</span></td>
+                        </tr>
+                        <tr class="border-b">
+                            <td class="py-3">Searches per Day</td>
+                            <td id="limitSearches">-</td>
+                            <td id="usageSearches">-</td>
+                            <td><span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-700" id="statusSearches">-</span></td>
+                        </tr>
+                        <tr>
+                            <td class="py-3">Batch Size</td>
+                            <td id="limitBatch">-</td>
+                            <td>-</td>
+                            <td><span class="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-600">N/A</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <!-- Upgrade Modal -->
+    <div id="upgradeModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-2xl p-8 max-w-3xl w-full mx-4 relative max-h-[90vh] overflow-y-auto">
+            <button onclick="hideUpgrade()" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+
+            <h2 class="text-2xl font-bold mb-6">Upgrade Your Plan</h2>
+
+            <div class="grid md:grid-cols-3 gap-4">
+                <!-- Starter -->
+                <div class="border rounded-xl p-6 hover:border-primary transition cursor-pointer" onclick="checkout('starter')">
+                    <h3 class="text-lg font-semibold mb-2">Starter</h3>
+                    <div class="text-3xl font-bold mb-4">$9<span class="text-sm text-gray-500 font-normal">/mo</span></div>
+                    <ul class="space-y-2 text-sm text-gray-600">
+                        <li>50,000 vectors</li>
+                        <li>10K searches/day</li>
+                        <li>Batch size: 100</li>
+                        <li>Email support</li>
+                    </ul>
+                    <button class="w-full mt-4 py-2 bg-primary text-white rounded-lg hover:bg-secondary transition">
+                        Upgrade
+                    </button>
+                </div>
+
+                <!-- Pro -->
+                <div class="border-2 border-primary rounded-xl p-6 relative">
+                    <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs px-3 py-1 rounded-full">Popular</span>
+                    <h3 class="text-lg font-semibold mb-2">Pro</h3>
+                    <div class="text-3xl font-bold mb-4">$29<span class="text-sm text-gray-500 font-normal">/mo</span></div>
+                    <ul class="space-y-2 text-sm text-gray-600">
+                        <li>500,000 vectors</li>
+                        <li>100K searches/day</li>
+                        <li>Batch size: 500</li>
+                        <li>Priority support</li>
+                    </ul>
+                    <button onclick="checkout('pro')" class="w-full mt-4 py-2 bg-primary text-white rounded-lg hover:bg-secondary transition">
+                        Upgrade
+                    </button>
+                </div>
+
+                <!-- Business -->
+                <div class="border rounded-xl p-6 hover:border-primary transition cursor-pointer" onclick="checkout('business')">
+                    <h3 class="text-lg font-semibold mb-2">Business</h3>
+                    <div class="text-3xl font-bold mb-4">$79<span class="text-sm text-gray-500 font-normal">/mo</span></div>
+                    <ul class="space-y-2 text-sm text-gray-600">
+                        <li>5M vectors</li>
+                        <li>1M searches/day</li>
+                        <li>Batch size: 1,000</li>
+                        <li>Dedicated support</li>
+                    </ul>
+                    <button class="w-full mt-4 py-2 bg-primary text-white rounded-lg hover:bg-secondary transition">
+                        Upgrade
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="fixed bottom-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg transform translate-y-20 transition-transform">
+        <span id="toastMessage">Copied!</span>
+    </div>
+
+    <script>
+        const API_URL = 'https://vectorpass-api.automators.work';
+        let apiKey = localStorage.getItem('vp_api_key');
+        let apiKeyVisible = false;
+
+        // Check auth on load
+        if (!apiKey) {
+            window.location.href = '/';
+        }
+
+        // Tier limits mapping
+        const TIER_LIMITS = {
+            free: { vectors: 1000, searches: 100, batch: 10 },
+            starter: { vectors: 50000, searches: 10000, batch: 100 },
+            pro: { vectors: 500000, searches: 100000, batch: 500 },
+            business: { vectors: 5000000, searches: 1000000, batch: 1000 }
+        };
+
+        // Load dashboard data
+        async function loadStats() {
+            try {
+                const res = await fetch(`${API_URL}/v1/stats`, {
+                    headers: { 'X-API-Key': apiKey }
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    const stats = data.data;
+                    const tier = stats.tier || 'free';
+                    const limits = TIER_LIMITS[tier];
+
+                    // Update display
+                    document.getElementById('userEmail').textContent = localStorage.getItem('vp_email') || 'User';
+                    document.getElementById('tierDisplay').textContent = tier;
+
+                    // Show upgrade button for non-business tiers
+                    if (tier !== 'business') {
+                        document.getElementById('upgradeBtn').classList.remove('hidden');
+                    }
+
+                    // Vectors
+                    const vectors = stats.vectorCount || 0;
+                    const vectorPct = Math.min((vectors / limits.vectors) * 100, 100);
+                    document.getElementById('vectorsCount').textContent = vectors.toLocaleString();
+                    document.getElementById('vectorsLimit').textContent = `of ${limits.vectors.toLocaleString()} limit`;
+                    document.getElementById('vectorsBar').style.width = `${vectorPct}%`;
+                    document.getElementById('vectorsBar').className = `h-full rounded-full transition-all ${vectorPct > 90 ? 'bg-red-500' : vectorPct > 70 ? 'bg-yellow-500' : 'bg-green-500'}`;
+
+                    // Searches
+                    const searches = stats.searchesToday || 0;
+                    const searchPct = Math.min((searches / limits.searches) * 100, 100);
+                    document.getElementById('searchesCount').textContent = searches.toLocaleString();
+                    document.getElementById('searchesLimit').textContent = `of ${limits.searches.toLocaleString()} limit`;
+                    document.getElementById('searchesBar').style.width = `${searchPct}%`;
+                    document.getElementById('searchesBar').className = `h-full rounded-full transition-all ${searchPct > 90 ? 'bg-red-500' : searchPct > 70 ? 'bg-yellow-500' : 'bg-blue-500'}`;
+
+                    // Total calls
+                    document.getElementById('totalCalls').textContent = (stats.totalCalls || 0).toLocaleString();
+
+                    // Limits table
+                    document.getElementById('limitVectors').textContent = limits.vectors.toLocaleString();
+                    document.getElementById('usageVectors').textContent = vectors.toLocaleString();
+                    document.getElementById('statusVectors').textContent = vectorPct > 90 ? 'Near Limit' : 'OK';
+                    document.getElementById('statusVectors').className = `px-2 py-1 text-xs rounded-full ${vectorPct > 90 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`;
+
+                    document.getElementById('limitSearches').textContent = limits.searches.toLocaleString();
+                    document.getElementById('usageSearches').textContent = searches.toLocaleString();
+                    document.getElementById('statusSearches').textContent = searchPct > 90 ? 'Near Limit' : 'OK';
+                    document.getElementById('statusSearches').className = `px-2 py-1 text-xs rounded-full ${searchPct > 90 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`;
+
+                    document.getElementById('limitBatch').textContent = limits.batch.toLocaleString();
+                }
+            } catch (err) {
+                console.error('Failed to load stats:', err);
+            }
+        }
+
+        function toggleApiKey() {
+            apiKeyVisible = !apiKeyVisible;
+            const display = document.getElementById('apiKeyDisplay');
+            if (apiKeyVisible) {
+                display.textContent = apiKey;
+            } else {
+                display.textContent = apiKey.substring(0, 8) + '•'.repeat(20);
+            }
+        }
+
+        function copyApiKey() {
+            navigator.clipboard.writeText(apiKey);
+            showToast('API key copied!');
+        }
+
+        async function regenerateKey() {
+            if (!confirm('Are you sure? Your current API key will stop working immediately.')) {
+                return;
+            }
+
+            try {
+                const res = await fetch(`${API_URL}/auth/regenerate`, {
+                    method: 'POST',
+                    headers: { 'X-API-Key': apiKey }
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    apiKey = data.data.apiKey;
+                    localStorage.setItem('vp_api_key', apiKey);
+                    toggleApiKey();
+                    toggleApiKey();
+                    showToast('New API key generated!');
+                } else {
+                    showToast(data.error || 'Failed to regenerate key');
+                }
+            } catch (err) {
+                showToast('Network error');
+            }
+        }
+
+        function showUpgrade() {
+            document.getElementById('upgradeModal').classList.remove('hidden');
+            document.getElementById('upgradeModal').classList.add('flex');
+        }
+
+        function hideUpgrade() {
+            document.getElementById('upgradeModal').classList.add('hidden');
+            document.getElementById('upgradeModal').classList.remove('flex');
+        }
+
+        async function checkout(tier) {
+            try {
+                const res = await fetch(`${API_URL}/billing/checkout`, {
+                    method: 'POST',
+                    headers: {
+                        'X-API-Key': apiKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        tier,
+                        successUrl: window.location.origin + '/dashboard.html?upgraded=1',
+                        cancelUrl: window.location.origin + '/dashboard.html'
+                    })
+                });
+                const data = await res.json();
+
+                if (data.success && data.data.url) {
+                    window.location.href = data.data.url;
+                } else {
+                    showToast(data.error || 'Failed to create checkout session');
+                }
+            } catch (err) {
+                showToast('Network error');
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('vp_api_key');
+            localStorage.removeItem('vp_email');
+            localStorage.removeItem('vp_tier');
+            window.location.href = '/';
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toastMessage').textContent = message;
+            toast.classList.remove('translate-y-20');
+            setTimeout(() => {
+                toast.classList.add('translate-y-20');
+            }, 2000);
+        }
+
+        // Check for upgrade success
+        if (window.location.search.includes('upgraded=1')) {
+            showToast('Plan upgraded successfully!');
+            history.replaceState({}, '', '/dashboard.html');
+        }
+
+        // Initialize
+        loadStats();
+
+        // Refresh stats every 30 seconds
+        setInterval(loadStats, 30000);
+    </script>
+</body>
+</html>

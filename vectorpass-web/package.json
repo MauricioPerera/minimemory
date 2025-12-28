@@ -1,0 +1,13 @@
+{
+  "name": "vectorpass-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npx serve public -l 3000",
+    "build": "cp -r public dist",
+    "deploy": "npx wrangler pages deploy public --project-name=vectorpass"
+  },
+  "devDependencies": {
+    "wrangler": "^3.91.0"
+  }
+}
