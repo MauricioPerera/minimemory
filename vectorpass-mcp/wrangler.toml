@@ -1,0 +1,37 @@
+name = "vectorpass-mcp"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Enable workers.dev subdomain
+workers_dev = true
+
+# Custom domain
+routes = [{ pattern = "vectorpass-mcp.automators.work/*", zone_name = "automators.work" }]
+
+[vars]
+VECTORPASS_API_URL = "https://vectorpass-api.automators.work"
+MCP_SERVER_NAME = "vectorpass"
+MCP_SERVER_VERSION = "1.0.0"
+# Allowed redirect URIs for OAuth (comma-separated)
+ALLOWED_REDIRECT_URIS = "http://localhost:3000/callback,http://127.0.0.1:3000/callback,https://modelcontextprotocol.io/callback,https://inspector.mcp.garden/callback"
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "OAUTH_CODES"
+id = "e6d79abeb3f543e38c55da82ddad8471"
+
+[[kv_namespaces]]
+binding = "OAUTH_TOKENS"
+id = "2280791333ab4846b1c0bc2aaed6f6b7"
+
+[[kv_namespaces]]
+binding = "OAUTH_SESSIONS"
+id = "09f041bcac454370b47b2dba5505d928"
+
+# Reuse existing VectorPass USERS KV namespace
+[[kv_namespaces]]
+binding = "USERS"
+id = "6e8c4591923b41fdb569a341138ca01a"
+
+# Secrets to configure:
+# wrangler secret put EMAIL_API_KEY
