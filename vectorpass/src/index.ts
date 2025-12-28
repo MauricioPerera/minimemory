@@ -17,12 +17,13 @@
  * - POST /webhooks/stripe     - Stripe subscription webhooks
  */
 
-import { Env, User, TIER_LIMITS, IndexRequest, BatchIndexRequest, SearchRequest } from './types';
+import { Env, User, TIER_LIMITS, IndexRequest, BatchIndexRequest, SearchRequest, KeywordSearchRequest, CreateDatabaseRequest } from './types';
 import { requireAuth, createUser, getUserByEmail, regenerateApiKey, isAdmin, listAllUsers, getPlatformStats, getUserById, adminUpdateUser, adminDeleteUser, trimExcessVectors } from './auth';
 import { checkSearchLimit, checkVectorLimit, recordSearch, getUsageStats, rateLimitExceeded, rateLimitHeaders } from './ratelimit';
 import { VectorDB, initWasm } from './vectordb';
 import { handleStripeWebhook, createCheckoutSession, checkGracePeriodAndTrim } from './stripe';
 import { sendVerificationEmail, verifyEmailCode, isEmailVerified } from './email';
+import { validateDatabaseName, listUserDatabases, getTotalVectorCount, checkDatabaseLimit, databaseExists, deleteDatabase, deleteAllUserDatabases, getDatabaseInfo } from './database';
 
 // CORS headers
 const CORS_HEADERS = {
@@ -137,13 +138,18 @@ export default {
                             'POST /auth/verify': 'Verify email {email, code}',
                             'POST /auth/login': 'Request login code {email}',
                         },
+                        databases: {
+                            'GET /v1/databases': 'List all databases',
+                            'POST /v1/databases': 'Create database {name}',
+                            'DELETE /v1/databases/:name': 'Delete database',
+                        },
                         vectors: {
-                            'POST /v1/index': 'Index document {id, text, metadata?}',
-                            'POST /v1/batch': 'Batch index {items: [{id, text, metadata?}]}',
-                            'POST /v1/search': 'Semantic search {query, k?}',
-                            'POST /v1/keyword': 'Keyword search {query, k?}',
-                            'DELETE /v1/vectors/:id': 'Delete document',
-                            'GET /v1/stats': 'Usage statistics',
+                            'POST /v1/index': 'Index document {id, text, metadata?, db?}',
+                            'POST /v1/batch': 'Batch index {items, db?}',
+                            'POST /v1/search': 'Semantic search {query, k?, db?}',
+                            'POST /v1/keyword': 'Keyword search {query, k?, db?}',
+                            'DELETE /v1/vectors/:id': 'Delete document (?db=name)',
+                            'GET /v1/stats': 'Usage statistics (?db=name)',
                         }
                     },
                     pricing: {
@@ -331,15 +337,9 @@ export default {
                         return error('User not found', 404);
                     }
 
-                    // Get vector count
-                    const dbData = await env.VECTORS.get(`db:${userId}:default`);
-                    let vectorCount = 0;
-                    if (dbData) {
-                        try {
-                            const db = JSON.parse(dbData);
-                            vectorCount = db.ids?.length || 0;
-                        } catch {}
-                    }
+                    // Get total vector count across all databases
+                    const vectorCount = await getTotalVectorCount(userId, env);
+                    const databases = await listUserDatabases(userId, env);
 
                     return json({
                         success: true,
@@ -348,7 +348,10 @@ export default {
                             apiKey: targetUser.apiKey.substring(0, 12) + '...',
                             verified: await isEmailVerified(userId, env),
                             vectorCount,
-                            vectorLimit: TIER_LIMITS[targetUser.tier].maxVectors
+                            vectorLimit: TIER_LIMITS[targetUser.tier].maxVectors,
+                            databaseCount: databases.length,
+                            databaseLimit: TIER_LIMITS[targetUser.tier].maxDatabases,
+                            databases
                         }
                     });
                 }
@@ -476,8 +479,133 @@ export default {
                     return json({ success: true, data: { apiKey: newKey } });
                 }
 
-                // Get or create default database for user
-                const db = await VectorDB.create(user, 'default', env);
+                // ============================================================
+                // Database management endpoints
+                // ============================================================
+
+                // GET /v1/databases - List all databases
+                if (request.method === 'GET' && path === '/v1/databases') {
+                    const databases = await listUserDatabases(user.id, env);
+                    const dbLimit = TIER_LIMITS[user.tier].maxDatabases;
+
+                    return json({
+                        success: true,
+                        data: {
+                            databases,
+                            count: databases.length,
+                            limit: dbLimit
+                        }
+                    });
+                }
+
+                // POST /v1/databases - Create new database
+                if (request.method === 'POST' && path === '/v1/databases') {
+                    if (!verified) {
+                        return error('Email verification required', 403);
+                    }
+
+                    const body = await request.json() as CreateDatabaseRequest;
+
+                    if (!body.name) {
+                        return error('Database name required');
+                    }
+
+                    // Validate database name
+                    const validation = validateDatabaseName(body.name);
+                    if (!validation.valid) {
+                        return error(validation.error || 'Invalid database name');
+                    }
+
+                    // Check if database already exists
+                    if (await databaseExists(user.id, body.name, env)) {
+                        return error('Database already exists', 409);
+                    }
+
+                    // Check database limit
+                    const limitCheck = await checkDatabaseLimit(user, env);
+                    if (!limitCheck.allowed) {
+                        return error(`Database limit reached (${limitCheck.max}). Upgrade to create more.`, 403);
+                    }
+
+                    // Create empty database
+                    const db = await VectorDB.create(user, body.name, env);
+                    await db.save();
+
+                    return json({
+                        success: true,
+                        data: {
+                            name: body.name,
+                            created: true,
+                            databaseCount: limitCheck.current + 1,
+                            databaseLimit: limitCheck.max
+                        }
+                    }, 201);
+                }
+
+                // DELETE /v1/databases/:name - Delete database
+                if (request.method === 'DELETE' && path.match(/^\/v1\/databases\/[^/]+$/)) {
+                    if (!verified) {
+                        return error('Email verification required', 403);
+                    }
+
+                    const dbName = decodeURIComponent(path.split('/')[3]);
+
+                    if (dbName === 'default') {
+                        return error('Cannot delete the default database', 400);
+                    }
+
+                    const validation = validateDatabaseName(dbName);
+                    if (!validation.valid) {
+                        return error(validation.error || 'Invalid database name');
+                    }
+
+                    const deleted = await deleteDatabase(user.id, dbName, env);
+                    if (!deleted) {
+                        return error('Database not found', 404);
+                    }
+
+                    return json({
+                        success: true,
+                        data: { deleted: true, name: dbName }
+                    });
+                }
+
+                // GET /v1/databases/:name - Get database info
+                if (request.method === 'GET' && path.match(/^\/v1\/databases\/[^/]+$/)) {
+                    const dbName = decodeURIComponent(path.split('/')[3]);
+
+                    const validation = validateDatabaseName(dbName);
+                    if (!validation.valid) {
+                        return error(validation.error || 'Invalid database name');
+                    }
+
+                    const info = await getDatabaseInfo(user.id, dbName, env);
+                    if (!info) {
+                        return error('Database not found', 404);
+                    }
+
+                    return json({
+                        success: true,
+                        data: info
+                    });
+                }
+
+                // ============================================================
+                // Vector operations (with optional db parameter)
+                // ============================================================
+
+                // Helper to get database name from body or query params
+                const getDbName = async (body: any): Promise<string> => {
+                    const dbName = body?.db || url.searchParams.get('db') || 'default';
+                    const validation = validateDatabaseName(dbName);
+                    if (!validation.valid) {
+                        throw new Error(validation.error || 'Invalid database name');
+                    }
+                    return dbName;
+                };
+
+                // Get total vector count across all databases (for limit checking)
+                const totalVectorCount = await getTotalVectorCount(user.id, env);
 
                 // POST /v1/index - Index single document
                 if (request.method === 'POST' && path === '/v1/index') {
@@ -491,8 +619,12 @@ export default {
                         return error('id and text required');
                     }
 
-                    // Check vector limit
-                    const vectorCheck = await checkVectorLimit(user, db.len(), 1);
+                    // Get target database
+                    const dbName = await getDbName(body);
+                    const db = await VectorDB.create(user, dbName, env);
+
+                    // Check vector limit (using total across all DBs)
+                    const vectorCheck = await checkVectorLimit(user, totalVectorCount, 1);
                     if (!vectorCheck.allowed) {
                         return error(`Vector limit reached (${vectorCheck.max}). Upgrade to add more.`, 403);
                     }
@@ -504,7 +636,9 @@ export default {
                         success: true,
                         data: {
                             id: body.id,
-                            vectorCount: db.len()
+                            db: dbName,
+                            vectorCount: db.len(),
+                            totalVectorCount: totalVectorCount + 1
                         }
                     });
                 }
@@ -526,8 +660,12 @@ export default {
                         return error(`Batch size exceeds limit (${limits.batchSize})`);
                     }
 
-                    // Check vector limit
-                    const vectorCheck = await checkVectorLimit(user, db.len(), body.items.length);
+                    // Get target database
+                    const dbName = await getDbName(body);
+                    const db = await VectorDB.create(user, dbName, env);
+
+                    // Check vector limit (using total across all DBs)
+                    const vectorCheck = await checkVectorLimit(user, totalVectorCount, body.items.length);
                     if (!vectorCheck.allowed) {
                         return error(`Would exceed vector limit (${vectorCheck.max}). Can add ${vectorCheck.remaining} more.`, 403);
                     }
@@ -539,7 +677,9 @@ export default {
                         success: true,
                         data: {
                             indexed,
-                            vectorCount: db.len()
+                            db: dbName,
+                            vectorCount: db.len(),
+                            totalVectorCount: totalVectorCount + indexed
                         }
                     });
                 }
@@ -558,6 +698,10 @@ export default {
                         return rateLimitExceeded(rateCheck.resetAt);
                     }
 
+                    // Get target database
+                    const dbName = await getDbName(body);
+                    const db = await VectorDB.create(user, dbName, env);
+
                     const k = Math.min(body.k || 10, 100);
                     const results = await db.search(body.query, k);
 
@@ -569,7 +713,8 @@ export default {
                         data: {
                             results,
                             query: body.query,
-                            k
+                            k,
+                            db: dbName
                         }
                     }, 200, rateLimitHeaders(rateCheck.remaining - 1, rateCheck.resetAt));
                 }
@@ -588,6 +733,10 @@ export default {
                         return rateLimitExceeded(rateCheck.resetAt);
                     }
 
+                    // Get target database
+                    const dbName = await getDbName(body);
+                    const db = await VectorDB.create(user, dbName, env);
+
                     const k = Math.min(body.k || 10, 100);
                     const results = db.keywordSearch(body.query, k);
 
@@ -598,7 +747,8 @@ export default {
                         data: {
                             results,
                             query: body.query,
-                            k
+                            k,
+                            db: dbName
                         }
                     }, 200, rateLimitHeaders(rateCheck.remaining - 1, rateCheck.resetAt));
                 }
@@ -615,12 +765,16 @@ export default {
                         return error('Vector ID required');
                     }
 
+                    // Get target database from query params
+                    const dbName = await getDbName({});
+                    const db = await VectorDB.create(user, dbName, env);
+
                     const deleted = db.delete(id);
                     await db.save();
 
                     return json({
                         success: true,
-                        data: { deleted, id }
+                        data: { deleted, id, db: dbName }
                     });
                 }
 
@@ -628,20 +782,35 @@ export default {
                 if (request.method === 'GET' && path === '/v1/stats') {
                     const usage = await getUsageStats(user, env);
                     const limits = TIER_LIMITS[user.tier];
+                    const databases = await listUserDatabases(user.id, env);
+
+                    // If db param specified, get info for that specific database
+                    const dbName = url.searchParams.get('db');
+                    let dbInfo = null;
+                    if (dbName) {
+                        const validation = validateDatabaseName(dbName);
+                        if (validation.valid) {
+                            const db = await VectorDB.create(user, dbName, env);
+                            dbInfo = db.info();
+                        }
+                    }
 
                     return json({
                         success: true,
                         data: {
                             tier: user.tier,
                             verified: await isEmailVerified(user.id, env),
-                            vectorCount: db.len(),
+                            totalVectorCount,
                             vectorLimit: limits.maxVectors,
-                            vectorsRemaining: limits.maxVectors - db.len(),
+                            vectorsRemaining: limits.maxVectors - totalVectorCount,
+                            databaseCount: databases.length,
+                            databaseLimit: limits.maxDatabases,
+                            databases,
                             ...usage,
                             referralCode: user.referralCode,
                             referralCount: user.referralCount,
                             referralDiscount: user.referralDiscount || 0,
-                            dbInfo: db.info()
+                            ...(dbInfo && { dbInfo })
                         }
                     });
                 }

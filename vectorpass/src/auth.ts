@@ -3,6 +3,7 @@
  */
 
 import { Env, User, Tier, generateApiKey, generateReferralCode, REFERRAL_CONFIG, ADMIN_EMAILS, TIER_LIMITS } from './types';
+import { deleteAllUserDatabases, getTotalVectorCount, listUserDatabases } from './database';
 
 /**
  * Extracts API key from request headers
@@ -379,19 +380,20 @@ export async function adminDeleteUser(userId: string, env: Env): Promise<boolean
     // Delete verification status
     await env.USERS.delete(`verified:${userId}`);
 
-    // Delete vector database
-    await env.VECTORS.delete(`db:${userId}:default`);
+    // Delete ALL vector databases (not just default)
+    const deletedDbs = await deleteAllUserDatabases(userId, env);
 
     // Delete rate limit data
     await env.RATE_LIMITS.delete(`search:${userId}`);
 
-    console.log(`Admin deleted user ${user.email} (${userId})`);
+    console.log(`Admin deleted user ${user.email} (${userId}). Deleted ${deletedDbs} databases.`);
     return true;
 }
 
 /**
  * Trim excess vectors for a user who exceeded their tier limit
  * Called after 15-day grace period expires
+ * Trims from all databases, starting with oldest vectors
  */
 export async function trimExcessVectors(userId: string, env: Env): Promise<{ deleted: number; remaining: number }> {
     const userData = await env.USERS.get(`user:${userId}`);
@@ -401,47 +403,75 @@ export async function trimExcessVectors(userId: string, env: Env): Promise<{ del
     const limits = TIER_LIMITS[user.tier];
     const maxVectors = limits.maxVectors;
 
-    // Get user's vector database
-    const dbData = await env.VECTORS.get(`db:${userId}:default`);
-    if (!dbData) return { deleted: 0, remaining: 0 };
+    // Get total vectors across all databases
+    const totalVectors = await getTotalVectorCount(userId, env);
 
-    try {
-        const db = JSON.parse(dbData);
-        const currentCount = db.ids?.length || 0;
+    if (totalVectors <= maxVectors) {
+        return { deleted: 0, remaining: totalVectors };
+    }
 
-        if (currentCount <= maxVectors) {
-            return { deleted: 0, remaining: currentCount };
-        }
+    // Need to trim vectors
+    let vectorsToDelete = totalVectors - maxVectors;
+    let totalDeleted = 0;
 
-        // Need to trim vectors - delete oldest ones first
-        const toDelete = currentCount - maxVectors;
-        const idsToKeep = db.ids.slice(-maxVectors);  // Keep newest
+    // Get all user databases
+    const databases = await listUserDatabases(userId, env);
 
-        // Rebuild database with only kept vectors
-        const keptIndices = new Set(idsToKeep.map((id: string) => db.ids.indexOf(id)));
+    // Trim from each database, starting with the first ones
+    for (const dbInfo of databases) {
+        if (vectorsToDelete <= 0) break;
 
-        db.ids = idsToKeep;
-        if (db.vectors) {
-            db.vectors = db.vectors.filter((_: any, i: number) => keptIndices.has(i));
-        }
-        if (db.metadata) {
-            const newMetadata: Record<string, any> = {};
-            for (const id of idsToKeep) {
-                if (db.metadata[id]) {
-                    newMetadata[id] = db.metadata[id];
+        const dbKey = `db:${userId}:${dbInfo.name}`;
+        const dbData = await env.VECTORS.get(dbKey);
+        if (!dbData) continue;
+
+        try {
+            const db = JSON.parse(dbData);
+            const currentCount = db.ids?.length || 0;
+
+            if (currentCount === 0) continue;
+
+            // How many to delete from this database
+            const deleteFromThisDb = Math.min(vectorsToDelete, currentCount);
+            const keepCount = currentCount - deleteFromThisDb;
+
+            if (keepCount === 0) {
+                // Delete entire database content but keep structure
+                db.ids = [];
+                db.vectors = [];
+                db.metadata = {};
+            } else {
+                // Keep newest vectors
+                const idsToKeep = db.ids.slice(-keepCount);
+                const keptIndices = new Set(idsToKeep.map((id: string) => db.ids.indexOf(id)));
+
+                db.ids = idsToKeep;
+                if (db.vectors) {
+                    db.vectors = db.vectors.filter((_: any, i: number) => keptIndices.has(i));
+                }
+                if (db.metadata) {
+                    const newMetadata: Record<string, any> = {};
+                    for (const id of idsToKeep) {
+                        if (db.metadata[id]) {
+                            newMetadata[id] = db.metadata[id];
+                        }
+                    }
+                    db.metadata = newMetadata;
                 }
             }
-            db.metadata = newMetadata;
+
+            await env.VECTORS.put(dbKey, JSON.stringify(db));
+
+            totalDeleted += deleteFromThisDb;
+            vectorsToDelete -= deleteFromThisDb;
+        } catch (err) {
+            console.error(`Error trimming vectors from ${dbInfo.name}:`, err);
         }
-
-        await env.VECTORS.put(`db:${userId}:default`, JSON.stringify(db));
-
-        console.log(`Trimmed ${toDelete} excess vectors for user ${user.email}. Remaining: ${maxVectors}`);
-        return { deleted: toDelete, remaining: maxVectors };
-    } catch (err) {
-        console.error('Error trimming vectors:', err);
-        return { deleted: 0, remaining: 0 };
     }
+
+    const remaining = totalVectors - totalDeleted;
+    console.log(`Trimmed ${totalDeleted} excess vectors for user ${user.email}. Remaining: ${remaining}`);
+    return { deleted: totalDeleted, remaining };
 }
 
 /**
@@ -451,6 +481,7 @@ export async function getPlatformStats(env: Env): Promise<{
     totalUsers: number;
     usersByTier: Record<string, number>;
     totalVectors: number;
+    totalDatabases: number;
     recentSignups: number;
     verifiedUsers: number;
 }> {
@@ -464,6 +495,7 @@ export async function getPlatformStats(env: Env): Promise<{
     };
 
     let totalVectors = 0;
+    let totalDatabases = 0;
     let recentSignups = 0;
     let verifiedUsers = 0;
 
@@ -482,20 +514,20 @@ export async function getPlatformStats(env: Env): Promise<{
             verifiedUsers++;
         }
 
-        // Get vector count from user's database
-        const dbData = await env.VECTORS.get(`db:${user.id}:default`);
-        if (dbData) {
-            try {
-                const db = JSON.parse(dbData);
-                totalVectors += db.ids?.length || 0;
-            } catch {}
-        }
+        // Get total vector count across ALL user databases
+        const userVectors = await getTotalVectorCount(user.id, env);
+        totalVectors += userVectors;
+
+        // Count databases
+        const userDbs = await listUserDatabases(user.id, env);
+        totalDatabases += userDbs.length;
     }
 
     return {
         totalUsers: users.length,
         usersByTier,
         totalVectors,
+        totalDatabases,
         recentSignups,
         verifiedUsers
     };

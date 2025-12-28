@@ -107,16 +107,23 @@ export interface IndexRequest {
     id: string;
     text: string;
     metadata?: Record<string, any>;
+    db?: string;  // Optional database name (defaults to 'default')
 }
 
 export interface BatchIndexRequest {
-    items: IndexRequest[];
+    items: Array<{
+        id: string;
+        text: string;
+        metadata?: Record<string, any>;
+    }>;
+    db?: string;  // Optional database name (defaults to 'default')
 }
 
 export interface SearchRequest {
     query: string;
     k?: number;
     filter?: Record<string, any>;
+    db?: string;  // Optional database name (defaults to 'default')
 }
 
 export interface SearchResult {
@@ -128,6 +135,11 @@ export interface SearchResult {
 export interface KeywordSearchRequest {
     query: string;
     k?: number;
+    db?: string;  // Optional database name (defaults to 'default')
+}
+
+export interface CreateDatabaseRequest {
+    name: string;
 }
 
 export interface KeywordResult {
