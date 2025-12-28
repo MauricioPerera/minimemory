@@ -4,8 +4,8 @@
  * Handles subscription webhooks and payment processing
  */
 
-import { Env, User, Tier } from './types';
-import { updateUserTier } from './auth';
+import { Env, User, Tier, REFERRAL_CONFIG } from './types';
+import { updateUserTier, grantReferralReward, revokeReferralReward } from './auth';
 
 // Stripe price IDs (created via scripts/setup-stripe.js)
 export const STRIPE_PRICES = {
@@ -185,6 +185,11 @@ async function handleSubscriptionUpdate(subscription: any, env: Env): Promise<vo
     // Update user tier
     await updateUserTier(userId, tier, customer, subscription.id, env);
     console.log(`Updated user ${userId} to tier ${tier}`);
+
+    // Grant referral reward to the referrer (if this is a new paid subscription)
+    if (tier !== 'free') {
+        await grantReferralReward(userId, env);
+    }
 }
 
 /**
@@ -198,6 +203,9 @@ async function handleSubscriptionCanceled(subscription: any, env: Env): Promise<
     if (!userId) {
         return;
     }
+
+    // Revoke referral reward from the referrer (if this user was referred)
+    await revokeReferralReward(userId, env);
 
     // Downgrade to free tier
     await updateUserTier(userId, 'free', customer, undefined, env);
@@ -261,6 +269,49 @@ export async function linkStripeCustomer(
 }
 
 /**
+ * Create or get a Stripe coupon for referral discount
+ */
+async function getOrCreateReferralCoupon(
+    discountPercent: number,
+    stripeSecretKey: string
+): Promise<string> {
+    const couponId = `referral_${discountPercent}pct`;
+
+    // Try to get existing coupon
+    const getRes = await fetch(`https://api.stripe.com/v1/coupons/${couponId}`, {
+        headers: { 'Authorization': `Bearer ${stripeSecretKey}` }
+    });
+
+    if (getRes.ok) {
+        return couponId;
+    }
+
+    // Create new coupon
+    const params = new URLSearchParams();
+    params.append('id', couponId);
+    params.append('percent_off', discountPercent.toString());
+    params.append('duration', 'forever');
+    params.append('name', `Referral Discount ${discountPercent}%`);
+
+    const createRes = await fetch('https://api.stripe.com/v1/coupons', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${stripeSecretKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+    });
+
+    if (!createRes.ok) {
+        const error = await createRes.json() as any;
+        console.error('Failed to create coupon:', error);
+        throw new Error('Failed to create referral coupon');
+    }
+
+    return couponId;
+}
+
+/**
  * Create Stripe Checkout session via API
  */
 export async function createCheckoutSession(
@@ -287,13 +338,22 @@ export async function createCheckoutSession(
     params.append('customer_email', user.email);
     params.append('line_items[0][price]', priceId);
     params.append('line_items[0][quantity]', '1');
-    params.append('allow_promotion_codes', 'true');
     params.append('billing_address_collection', 'auto');
 
     // If user already has a Stripe customer ID, use it
     if (user.stripeCustomerId) {
         params.delete('customer_email');
         params.append('customer', user.stripeCustomerId);
+    }
+
+    // Apply referral discount if user has one
+    const discount = user.referralDiscount || 0;
+    if (discount > 0) {
+        const couponId = await getOrCreateReferralCoupon(discount, stripeSecretKey);
+        params.append('discounts[0][coupon]', couponId);
+    } else {
+        // Only allow promo codes if no referral discount
+        params.append('allow_promotion_codes', 'true');
     }
 
     const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {

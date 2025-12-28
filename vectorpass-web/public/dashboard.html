@@ -172,7 +172,49 @@
             </div>
         </div>
 
-        <!-- Recent Activity -->
+        <!-- Referral Program -->
+        <div class="mt-8 bg-gradient-to-r from-purple-50 to-blue-50 rounded-xl p-6 border border-purple-200">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold">Referral Program</h2>
+                <span class="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded-full">Earn discounts!</span>
+            </div>
+            <p class="text-sm text-gray-600 mb-4">
+                Share your referral code and get <strong>10% off</strong> for each friend with an <strong>active subscription</strong> (up to 50% off).
+            </p>
+
+            <div class="grid md:grid-cols-3 gap-4">
+                <!-- Referral Code -->
+                <div class="bg-white rounded-lg p-4 border border-purple-100">
+                    <p class="text-xs text-gray-500 mb-1">Your Referral Code</p>
+                    <div class="flex items-center space-x-2">
+                        <code class="text-lg font-bold text-purple-600" id="referralCode">-</code>
+                        <button onclick="copyReferralCode()" class="p-1 text-gray-400 hover:text-purple-600" title="Copy">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Referral Count -->
+                <div class="bg-white rounded-lg p-4 border border-purple-100">
+                    <p class="text-xs text-gray-500 mb-1">Active Referrals</p>
+                    <p class="text-lg font-bold" id="referralCount">0</p>
+                </div>
+
+                <!-- Your Discount -->
+                <div class="bg-white rounded-lg p-4 border border-purple-100">
+                    <p class="text-xs text-gray-500 mb-1">Your Discount</p>
+                    <p class="text-lg font-bold text-green-600" id="referralDiscount">0%</p>
+                </div>
+            </div>
+
+            <div class="mt-4 text-xs text-gray-500">
+                You earn 10% off for each friend with an active paid subscription (up to 50% max). If a referral cancels, your discount adjusts accordingly.
+            </div>
+        </div>
+
+        <!-- Plan Limits -->
         <div class="mt-8 bg-white rounded-xl p-6 shadow-sm border border-gray-100">
             <h2 class="text-lg font-semibold mb-4">Plan Limits</h2>
             <div class="overflow-x-auto">
@@ -347,9 +389,22 @@
                     document.getElementById('statusSearches').className = `px-2 py-1 text-xs rounded-full ${searchPct > 90 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`;
 
                     document.getElementById('limitBatch').textContent = limits.batch.toLocaleString();
+
+                    // Referral data
+                    document.getElementById('referralCode').textContent = stats.referralCode || '-';
+                    document.getElementById('referralCount').textContent = stats.referralCount || 0;
+                    document.getElementById('referralDiscount').textContent = (stats.referralDiscount || 0) + '%';
                 }
             } catch (err) {
                 console.error('Failed to load stats:', err);
+            }
+        }
+
+        function copyReferralCode() {
+            const code = document.getElementById('referralCode').textContent;
+            if (code && code !== '-') {
+                navigator.clipboard.writeText(code);
+                showToast('Referral code copied!');
             }
         }
 

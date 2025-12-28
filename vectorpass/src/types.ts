@@ -32,7 +32,20 @@ export interface User {
     referralCode?: string;
     referredBy?: string;
     referralCount: number;
+    // Referral rewards: 10% discount per verified referral, max 50%
+    referralDiscount: number;  // 0-50 percentage
 }
+
+// Referral reward config
+export const REFERRAL_CONFIG = {
+    discountPerReferral: 10,  // 10% per referral
+    maxDiscount: 50,          // Cap at 50%
+};
+
+// Admin emails (can access admin dashboard)
+export const ADMIN_EMAILS = [
+    'mauricio.perera@gmail.com'
+];
 
 // Tier limits
 export interface TierLimits {

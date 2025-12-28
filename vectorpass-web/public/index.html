@@ -108,7 +108,7 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
                         </svg>
                     </div>
                     <h3 class="text-xl font-semibold mb-2">Lightning Fast</h3>
-                    <p class="text-gray-600">HNSW index with Int8 quantization. Sub-millisecond search on millions of vectors.</p>
+                    <p class="text-gray-600">Sub-millisecond search latency. Scales to millions of vectors effortlessly.</p>
                 </div>
                 <div class="p-6 rounded-xl border border-gray-100 hover:shadow-lg transition">
                     <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center mb-4">
@@ -117,7 +117,7 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
                         </svg>
                     </div>
                     <h3 class="text-xl font-semibold mb-2">Multilingual</h3>
-                    <p class="text-gray-600">EmbeddingGemma-300m supports 100+ languages out of the box.</p>
+                    <p class="text-gray-600">Search in 100+ languages out of the box. No configuration needed.</p>
                 </div>
                 <div class="p-6 rounded-xl border border-gray-100 hover:shadow-lg transition">
                     <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center mb-4">
@@ -236,6 +236,34 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
                     <button onclick="checkout('business')" class="w-full py-2 bg-primary text-white rounded-lg hover:bg-secondary transition">
                         Subscribe
                     </button>
+                </div>
+            </div>
+
+            <!-- Referral Program -->
+            <div class="mt-12 bg-gradient-to-r from-purple-100 to-blue-100 rounded-2xl p-8 text-center">
+                <div class="inline-flex items-center bg-purple-200 text-purple-800 text-sm px-3 py-1 rounded-full mb-4">
+                    <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    Referral Program
+                </div>
+                <h3 class="text-2xl font-bold mb-2">Earn up to 50% off your subscription</h3>
+                <p class="text-gray-600 mb-4 max-w-xl mx-auto">
+                    Share your referral code with friends. For each friend with an <strong>active subscription</strong>, you get <strong>10% off</strong>. Stack up to 5 active referrals for <strong>50% off</strong>.
+                </p>
+                <div class="flex justify-center gap-8 text-sm">
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-purple-600">10%</div>
+                        <div class="text-gray-500">per active referral</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-purple-600">50%</div>
+                        <div class="text-gray-500">max discount</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-purple-600">Ongoing</div>
+                        <div class="text-gray-500">while they pay</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -374,12 +402,12 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
                         </ul>
                     </div>
                     <div class="bg-gray-50 rounded-xl p-6">
-                        <h4 class="font-semibold mb-3">Embedding Model</h4>
+                        <h4 class="font-semibold mb-3">Semantic Search</h4>
                         <ul class="text-sm text-gray-600 space-y-2">
-                            <li>EmbeddingGemma-300m (100+ languages)</li>
-                            <li>Matryoshka: 768d truncated to 256d</li>
-                            <li>Int8 quantization (4x compression)</li>
-                            <li>HNSW index for fast search</li>
+                            <li>100+ languages supported</li>
+                            <li>Understands meaning, not just keywords</li>
+                            <li>Sub-100ms search latency</li>
+                            <li>BM25 keyword search included</li>
                         </ul>
                     </div>
                     <div class="bg-gray-50 rounded-xl p-6">

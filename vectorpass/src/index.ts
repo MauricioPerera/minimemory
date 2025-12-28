@@ -18,7 +18,7 @@
  */
 
 import { Env, User, TIER_LIMITS, IndexRequest, BatchIndexRequest, SearchRequest } from './types';
-import { requireAuth, createUser, getUserByEmail, regenerateApiKey } from './auth';
+import { requireAuth, createUser, getUserByEmail, regenerateApiKey, isAdmin, listAllUsers, getPlatformStats } from './auth';
 import { checkSearchLimit, checkVectorLimit, recordSearch, getUsageStats, rateLimitExceeded, rateLimitHeaders } from './ratelimit';
 import { VectorDB, initWasm } from './vectordb';
 import { handleStripeWebhook, createCheckoutSession } from './stripe';
@@ -269,6 +269,63 @@ export default {
             }
 
             // ============================================================
+            // Admin endpoints (require admin API key)
+            // ============================================================
+
+            if (path.startsWith('/admin/')) {
+                const authResult = await requireAuth(request, env);
+                if (authResult instanceof Response) {
+                    return authResult;
+                }
+                const { user } = authResult;
+
+                if (!isAdmin(user)) {
+                    return error('Admin access required', 403);
+                }
+
+                // GET /admin/users - List all users
+                if (request.method === 'GET' && path === '/admin/users') {
+                    const users = await listAllUsers(env);
+
+                    // Add verified status to each user
+                    const usersWithStatus = await Promise.all(users.map(async (u) => ({
+                        ...u,
+                        verified: await isEmailVerified(u.id, env)
+                    })));
+
+                    return json({
+                        success: true,
+                        data: {
+                            users: usersWithStatus,
+                            total: users.length
+                        }
+                    });
+                }
+
+                // GET /admin/stats - Platform statistics
+                if (request.method === 'GET' && path === '/admin/stats') {
+                    const stats = await getPlatformStats(env);
+
+                    // Calculate revenue (estimated from tier counts)
+                    const monthlyRevenue =
+                        stats.usersByTier.starter * 9 +
+                        stats.usersByTier.pro * 29 +
+                        stats.usersByTier.business * 79;
+
+                    return json({
+                        success: true,
+                        data: {
+                            ...stats,
+                            estimatedMRR: monthlyRevenue,
+                            paidUsers: stats.usersByTier.starter + stats.usersByTier.pro + stats.usersByTier.business
+                        }
+                    });
+                }
+
+                return error('Admin endpoint not found', 404);
+            }
+
+            // ============================================================
             // Protected endpoints (require API key)
             // ============================================================
 
@@ -462,6 +519,7 @@ export default {
                             ...usage,
                             referralCode: user.referralCode,
                             referralCount: user.referralCount,
+                            referralDiscount: user.referralDiscount || 0,
                             dbInfo: db.info()
                         }
                     });

@@ -2,7 +2,7 @@
  * VectorPass Authentication & User Management
  */
 
-import { Env, User, Tier, generateApiKey, generateReferralCode } from './types';
+import { Env, User, Tier, generateApiKey, generateReferralCode, REFERRAL_CONFIG, ADMIN_EMAILS } from './types';
 
 /**
  * Extracts API key from request headers
@@ -81,7 +81,8 @@ export async function createUser(
         createdAt: new Date().toISOString(),
         referralCode,
         referredBy,
-        referralCount: 0
+        referralCount: 0,
+        referralDiscount: 0
     };
 
     // Store user data
@@ -162,6 +163,79 @@ export async function regenerateApiKey(userId: string, env: Env): Promise<string
 }
 
 /**
+ * Grant referral discount to the referrer when their referral subscribes
+ * Called when a referred user upgrades to a paid plan
+ */
+export async function grantReferralReward(
+    referredUserId: string,
+    env: Env
+): Promise<void> {
+    // Get the referred user
+    const referredData = await env.USERS.get(`user:${referredUserId}`);
+    if (!referredData) return;
+
+    const referredUser = JSON.parse(referredData) as User;
+
+    // Check if they were referred by someone
+    if (!referredUser.referredBy) return;
+
+    // Get the referrer
+    const referrerData = await env.USERS.get(`user:${referredUser.referredBy}`);
+    if (!referrerData) return;
+
+    const referrer = JSON.parse(referrerData) as User;
+
+    // Calculate new discount (cap at max)
+    const newDiscount = Math.min(
+        (referrer.referralDiscount || 0) + REFERRAL_CONFIG.discountPerReferral,
+        REFERRAL_CONFIG.maxDiscount
+    );
+
+    // Only update if discount would increase
+    if (newDiscount > (referrer.referralDiscount || 0)) {
+        referrer.referralDiscount = newDiscount;
+        referrer.referralCount = (referrer.referralCount || 0) + 1;
+        await env.USERS.put(`user:${referrer.id}`, JSON.stringify(referrer));
+        console.log(`Granted ${REFERRAL_CONFIG.discountPerReferral}% referral discount to ${referrer.email}. Total: ${newDiscount}%`);
+    }
+}
+
+/**
+ * Revoke referral discount when a referred user cancels their subscription
+ * Called when a referred user downgrades to free
+ */
+export async function revokeReferralReward(
+    referredUserId: string,
+    env: Env
+): Promise<void> {
+    // Get the referred user
+    const referredData = await env.USERS.get(`user:${referredUserId}`);
+    if (!referredData) return;
+
+    const referredUser = JSON.parse(referredData) as User;
+
+    // Check if they were referred by someone
+    if (!referredUser.referredBy) return;
+
+    // Get the referrer
+    const referrerData = await env.USERS.get(`user:${referredUser.referredBy}`);
+    if (!referrerData) return;
+
+    const referrer = JSON.parse(referrerData) as User;
+
+    // Only decrement if there's a discount to revoke
+    if ((referrer.referralDiscount || 0) > 0) {
+        referrer.referralDiscount = Math.max(
+            0,
+            (referrer.referralDiscount || 0) - REFERRAL_CONFIG.discountPerReferral
+        );
+        referrer.referralCount = Math.max(0, (referrer.referralCount || 1) - 1);
+        await env.USERS.put(`user:${referrer.id}`, JSON.stringify(referrer));
+        console.log(`Revoked ${REFERRAL_CONFIG.discountPerReferral}% referral discount from ${referrer.email}. Remaining: ${referrer.referralDiscount}%`);
+    }
+}
+
+/**
  * Middleware that requires authentication
  */
 export async function requireAuth(
@@ -193,4 +267,98 @@ export async function requireAuth(
     }
 
     return { user };
+}
+
+/**
+ * Check if user is an admin
+ */
+export function isAdmin(user: User): boolean {
+    return ADMIN_EMAILS.includes(user.email.toLowerCase());
+}
+
+/**
+ * List all users (admin only)
+ */
+export async function listAllUsers(env: Env): Promise<User[]> {
+    const users: User[] = [];
+
+    // List all keys with user: prefix
+    let cursor: string | undefined;
+
+    do {
+        const result = await env.USERS.list({ prefix: 'user:', cursor });
+
+        for (const key of result.keys) {
+            const userData = await env.USERS.get(key.name);
+            if (userData) {
+                const user = JSON.parse(userData) as User;
+                // Remove sensitive data
+                users.push({
+                    ...user,
+                    apiKey: user.apiKey.substring(0, 12) + '...'  // Mask API key
+                });
+            }
+        }
+
+        cursor = result.list_complete ? undefined : result.cursor;
+    } while (cursor);
+
+    return users;
+}
+
+/**
+ * Get platform-wide statistics (admin only)
+ */
+export async function getPlatformStats(env: Env): Promise<{
+    totalUsers: number;
+    usersByTier: Record<string, number>;
+    totalVectors: number;
+    recentSignups: number;
+    verifiedUsers: number;
+}> {
+    const users = await listAllUsers(env);
+
+    const usersByTier: Record<string, number> = {
+        free: 0,
+        starter: 0,
+        pro: 0,
+        business: 0
+    };
+
+    let totalVectors = 0;
+    let recentSignups = 0;
+    let verifiedUsers = 0;
+
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    for (const user of users) {
+        usersByTier[user.tier] = (usersByTier[user.tier] || 0) + 1;
+
+        if (user.createdAt > oneDayAgo) {
+            recentSignups++;
+        }
+
+        // Check if verified
+        const verified = await env.USERS.get(`verified:${user.id}`);
+        if (verified === 'true') {
+            verifiedUsers++;
+        }
+
+        // Get vector count from user's database
+        const dbData = await env.VECTORS.get(`db:${user.id}:default`);
+        if (dbData) {
+            try {
+                const db = JSON.parse(dbData);
+                totalVectors += db.ids?.length || 0;
+            } catch {}
+        }
+    }
+
+    return {
+        totalUsers: users.length,
+        usersByTier,
+        totalVectors,
+        recentSignups,
+        verifiedUsers
+    };
 }
