@@ -1,0 +1,17 @@
+{
+  "name": "vectorpass",
+  "version": "0.1.0",
+  "description": "VectorPass - RAG as a Service on Cloudflare Workers",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "kv:create": "wrangler kv:namespace create USERS && wrangler kv:namespace create VECTORS && wrangler kv:namespace create RATE_LIMITS"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.91.0"
+  }
+}

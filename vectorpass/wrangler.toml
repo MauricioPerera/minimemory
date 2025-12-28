@@ -1,0 +1,41 @@
+# VectorPass - RAG as a Service
+# https://vectorpass.automators.work
+
+name = "vectorpass"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# Subdomain configuration
+# routes = [{ pattern = "vectorpass.automators.work/*", zone_name = "automators.work" }]
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "USERS"        # User data and API keys
+id = "REPLACE_WITH_USERS_KV_ID"
+
+[[kv_namespaces]]
+binding = "VECTORS"      # Vector databases per user
+id = "REPLACE_WITH_VECTORS_KV_ID"
+
+[[kv_namespaces]]
+binding = "RATE_LIMITS"  # Rate limiting counters
+id = "REPLACE_WITH_RATE_LIMITS_KV_ID"
+
+# Workers AI binding
+[ai]
+binding = "AI"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "development"
+FREE_TIER_MAX_VECTORS = "1000"
+FREE_TIER_SEARCHES_PER_DAY = "100"
+STARTER_MAX_VECTORS = "50000"
+STARTER_SEARCHES_PER_DAY = "10000"
+PRO_MAX_VECTORS = "500000"
+PRO_SEARCHES_PER_DAY = "100000"
+
+# Production overrides
+[env.production]
+vars = { ENVIRONMENT = "production" }
+# routes = [{ pattern = "vectorpass.automators.work/*", zone_name = "automators.work" }]
