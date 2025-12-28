@@ -43,10 +43,18 @@ export async function handleMCPRequest(
     return jsonRpcError(message.id, -32600, 'Invalid Request: method is required');
   }
 
+  console.log(`MCP Request: method=${message.method}, id=${message.id}`);
+
   // Handle MCP methods
   switch (message.method) {
     case 'initialize':
       return handleInitialize(message);
+
+    // Handle initialized notification (no response needed for notifications)
+    case 'initialized':
+    case 'notifications/initialized':
+      // Notifications don't require a response, but we send an empty success
+      return jsonRpcSuccess(message.id, {});
 
     case 'tools/list':
       return handleToolsList(message);
@@ -57,6 +65,13 @@ export async function handleMCPRequest(
     case 'ping':
       return jsonRpcSuccess(message.id, {});
 
+    // Resource methods (not implemented but respond gracefully)
+    case 'resources/list':
+      return jsonRpcSuccess(message.id, { resources: [] });
+
+    case 'prompts/list':
+      return jsonRpcSuccess(message.id, { prompts: [] });
+
     default:
       return jsonRpcError(message.id, -32601, `Method not found: ${message.method}`);
   }
@@ -66,10 +81,16 @@ export async function handleMCPRequest(
  * Handle MCP initialize
  */
 function handleInitialize(message: MCPMessage): Response {
+  console.log('MCP Initialize called with params:', JSON.stringify(message.params));
+
   return jsonRpcSuccess(message.id, {
     protocolVersion: '2024-11-05',
     capabilities: {
-      tools: {},
+      tools: {
+        listChanged: true,
+      },
+      resources: {},
+      prompts: {},
     },
     serverInfo: {
       name: 'vectorpass',
@@ -82,6 +103,8 @@ function handleInitialize(message: MCPMessage): Response {
  * Handle tools/list
  */
 function handleToolsList(message: MCPMessage): Response {
+  console.log('MCP tools/list called, returning', TOOLS.length, 'tools');
+
   return jsonRpcSuccess(message.id, {
     tools: TOOLS,
   });
