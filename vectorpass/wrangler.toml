@@ -6,7 +6,7 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
 # Subdomain configuration
-routes = [{ pattern = "vectorpass.automators.work/*", zone_name = "automators.work" }]
+routes = [{ pattern = "vectorpass-api.automators.work/*", zone_name = "automators.work" }]
 
 # KV Namespaces
 [[kv_namespaces]]
