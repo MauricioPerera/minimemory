@@ -34,9 +34,14 @@ export default {
 
       // Route requests
       switch (true) {
-        // Root - Server info
+        // Root - Server info (GET) or MCP endpoint (POST with JSON-RPC)
         case path === '/' || path === '':
-          response = handleRoot(url);
+          if (method === 'POST') {
+            // Claude and some clients send MCP requests to root instead of /mcp
+            response = await handleProtectedMCP(request, env);
+          } else {
+            response = handleRoot(url);
+          }
           break;
 
         // Health check
