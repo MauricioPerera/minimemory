@@ -7,6 +7,7 @@ import { Env, OAuthToken } from './types';
 import { AuthorizationServerMetadata } from './oauth/types';
 import { handleAuthorizeGet, handleAuthorizePost } from './oauth/authorize';
 import { handleToken } from './oauth/token';
+import { handleRegister } from './oauth/register';
 import { handleMCPRequest, handleSSE } from './mcp/server';
 import { TOOLS } from './mcp/tools';
 
@@ -64,6 +65,11 @@ export default {
           response = await handleToken(request, env);
           break;
 
+        // OAuth Dynamic Client Registration (RFC 7591)
+        case path === '/register' && method === 'POST':
+          response = await handleRegister(request, env);
+          break;
+
         // MCP Endpoint (Streamable HTTP)
         case path === '/mcp' && method === 'POST':
           response = await handleProtectedMCP(request, env);
@@ -115,14 +121,15 @@ export default {
 function handleMetadata(url: URL): Response {
   const issuer = `${url.protocol}//${url.host}`;
 
-  const metadata: AuthorizationServerMetadata = {
+  const metadata: AuthorizationServerMetadata & { registration_endpoint?: string } = {
     issuer,
     authorization_endpoint: `${issuer}/authorize`,
     token_endpoint: `${issuer}/token`,
+    registration_endpoint: `${issuer}/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256', 'plain'],
-    token_endpoint_auth_methods_supported: ['none'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
   };
 
   return new Response(JSON.stringify(metadata, null, 2), {
