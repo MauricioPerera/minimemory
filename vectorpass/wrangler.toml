@@ -5,7 +5,10 @@ name = "vectorpass"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
-# Subdomain configuration
+# Enable workers.dev subdomain
+workers_dev = true
+
+# Custom domain
 routes = [{ pattern = "vectorpass-api.automators.work/*", zone_name = "automators.work" }]
 
 # KV Namespaces

@@ -9,7 +9,7 @@ workers_dev = true
 routes = [{ pattern = "vectorpass-mcp.automators.work/*", zone_name = "automators.work" }]
 
 [vars]
-VECTORPASS_API_URL = "https://vectorpass-api.automators.work"
+VECTORPASS_API_URL = "https://vectorpass.rckflr.workers.dev"
 MCP_SERVER_NAME = "vectorpass"
 MCP_SERVER_VERSION = "1.0.0"
 # Allowed redirect URIs for OAuth (comma-separated)
