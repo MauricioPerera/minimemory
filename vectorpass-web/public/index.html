@@ -33,7 +33,7 @@
             font-family: 'Monaco', 'Consolas', monospace;
             font-size: 14px;
         }
-        .hidden { display: none !important; }
+        /* .hidden class provided by Tailwind - no override needed */
 
         /* Toast notifications */
         #toast-container {
@@ -430,6 +430,93 @@ curl -X POST https://vectorpass-api.automators.work/v1/search \
 }
                         </code>
                     </div>
+                </div>
+
+                <!-- MCP Server Section -->
+                <div class="bg-gradient-to-r from-purple-50 to-indigo-50 rounded-2xl p-8 border border-purple-100">
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+                            <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                            </svg>
+                        </div>
+                        <div>
+                            <h3 class="text-2xl font-semibold text-purple-900">MCP Server</h3>
+                            <p class="text-purple-600 text-sm">Model Context Protocol for AI Assistants</p>
+                        </div>
+                    </div>
+
+                    <p class="text-gray-700 mb-6">
+                        Connect VectorPass directly to Claude Desktop, Cursor, or any MCP-compatible AI client.
+                        Use natural language to index documents and search your knowledge base.
+                    </p>
+
+                    <div class="grid md:grid-cols-2 gap-6 mb-6">
+                        <div>
+                            <h4 class="font-semibold text-purple-800 mb-3">MCP Server URL</h4>
+                            <div class="code-block text-sm">
+                                <code class="text-purple-300">https://vectorpass-mcp.automators.work</code>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-purple-800 mb-3">Authentication</h4>
+                            <p class="text-sm text-gray-600">OAuth 2.1 with your VectorPass email. No API key needed - just login with your email and verify with a code.</p>
+                        </div>
+                    </div>
+
+                    <h4 class="font-semibold text-purple-800 mb-3">Available Tools</h4>
+                    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_index</code>
+                            <p class="text-xs text-gray-500 mt-1">Index a document</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_search</code>
+                            <p class="text-xs text-gray-500 mt-1">Semantic search</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_keyword_search</code>
+                            <p class="text-xs text-gray-500 mt-1">BM25 keyword search</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_delete</code>
+                            <p class="text-xs text-gray-500 mt-1">Delete document</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_batch_index</code>
+                            <p class="text-xs text-gray-500 mt-1">Index multiple docs</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_list_databases</code>
+                            <p class="text-xs text-gray-500 mt-1">List all databases</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_create_database</code>
+                            <p class="text-xs text-gray-500 mt-1">Create new database</p>
+                        </div>
+                        <div class="bg-white rounded-lg p-3 border border-purple-100">
+                            <code class="text-xs text-purple-600 font-semibold">vectorpass_stats</code>
+                            <p class="text-xs text-gray-500 mt-1">Usage statistics</p>
+                        </div>
+                    </div>
+
+                    <h4 class="font-semibold text-purple-800 mb-3">Connect from Claude Desktop</h4>
+                    <p class="text-sm text-gray-600 mb-3">Add this to your Claude Desktop MCP settings:</p>
+                    <div class="code-block text-sm">
+                        <code>
+{
+  "mcpServers": {
+    "vectorpass": {
+      "url": "https://vectorpass-mcp.automators.work/mcp",
+      "transport": "http"
+    }
+  }
+}
+                        </code>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-3">
+                        On first use, you'll be prompted to login with your VectorPass email. A verification code will be sent to authorize the connection.
+                    </p>
                 </div>
 
                 <!-- API Reference -->
