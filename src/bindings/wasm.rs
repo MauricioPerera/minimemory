@@ -350,6 +350,92 @@ impl WasmVectorDB {
         serde_json::to_string(&json_results)
             .map_err(|e| JsError::new(&e.to_string()))
     }
+
+    // =========================================================================
+    // Metodos con truncado automatico para Matryoshka embeddings
+    // =========================================================================
+
+    /// Inserta un vector truncandolo automaticamente a las dimensiones de la DB.
+    /// Ideal para embeddings Matryoshka (ej: Gemma 768d -> 256d).
+    #[wasm_bindgen]
+    pub fn insert_auto(&self, id: &str, full_vector: &[f32]) -> Result<(), JsError> {
+        let truncated = truncate_and_normalize(full_vector, self.inner.dimensions());
+        self.inner
+            .insert(id, &truncated, None)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Inserta con metadata, truncando automaticamente.
+    #[wasm_bindgen]
+    pub fn insert_auto_with_metadata(&self, id: &str, full_vector: &[f32], metadata_json: &str) -> Result<(), JsError> {
+        let truncated = truncate_and_normalize(full_vector, self.inner.dimensions());
+        let meta = parse_metadata_json(metadata_json)?;
+        self.inner
+            .insert(id, &truncated, Some(meta))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Busca truncando automaticamente el vector query.
+    #[wasm_bindgen]
+    pub fn search_auto(&self, full_query: &[f32], k: usize) -> Result<String, JsError> {
+        let truncated = truncate_and_normalize(full_query, self.inner.dimensions());
+        let results = self.inner
+            .search(&truncated, k)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let json_results: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|r| {
+                let mut obj = serde_json::json!({
+                    "id": r.id,
+                    "distance": r.distance,
+                });
+                if let Some(meta) = r.metadata {
+                    obj["metadata"] = metadata_to_json(&meta);
+                }
+                obj
+            })
+            .collect();
+
+        serde_json::to_string(&json_results)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Actualiza truncando automaticamente.
+    #[wasm_bindgen]
+    pub fn update_auto(&self, id: &str, full_vector: &[f32]) -> Result<(), JsError> {
+        let truncated = truncate_and_normalize(full_vector, self.inner.dimensions());
+        self.inner
+            .update(id, &truncated, None)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Actualiza con metadata, truncando automaticamente.
+    #[wasm_bindgen]
+    pub fn update_auto_with_metadata(&self, id: &str, full_vector: &[f32], metadata_json: &str) -> Result<(), JsError> {
+        let truncated = truncate_and_normalize(full_vector, self.inner.dimensions());
+        let meta = parse_metadata_json(metadata_json)?;
+        self.inner
+            .update(id, &truncated, Some(meta))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+/// Trunca un vector a las dimensiones especificadas y lo normaliza.
+/// Requerido para Matryoshka embeddings (ej: Gemma 768d -> 256d).
+fn truncate_and_normalize(vector: &[f32], target_dims: usize) -> Vec<f32> {
+    // Truncar a las dimensiones objetivo
+    let truncated: Vec<f32> = vector.iter().take(target_dims).copied().collect();
+
+    // Calcular norma L2
+    let norm: f32 = truncated.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    // Normalizar (evitar division por cero)
+    if norm > 1e-10 {
+        truncated.iter().map(|x| x / norm).collect()
+    } else {
+        truncated
+    }
 }
 
 /// Parsea string de distancia a enum
