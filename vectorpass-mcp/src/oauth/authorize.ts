@@ -8,6 +8,7 @@ import { AuthorizeRequest } from './types';
 import { generateRandomString, generateVerificationCode } from './pkce';
 import { renderLoginPage } from '../pages/login';
 import { renderVerifyPage } from '../pages/verify';
+import { getRegisteredClient } from './register';
 
 const SESSION_TTL = 900; // 15 minutes
 const CODE_TTL = 600; // 10 minutes
@@ -41,7 +42,7 @@ export async function handleAuthorizeGet(
   };
 
   // Validate required parameters
-  const validationError = validateAuthorizeParams(params, env);
+  const validationError = await validateAuthorizeParams(params, env);
   if (validationError) {
     return new Response(renderLoginPage('', validationError), {
       status: 400,
@@ -315,7 +316,7 @@ async function handleResendStep(
 /**
  * Validate OAuth authorize parameters
  */
-function validateAuthorizeParams(params: AuthorizeRequest, env: Env): string | null {
+async function validateAuthorizeParams(params: AuthorizeRequest, env: Env): Promise<string | null> {
   if (params.response_type !== 'code') {
     return 'Invalid response_type. Must be "code".';
   }
@@ -328,18 +329,28 @@ function validateAuthorizeParams(params: AuthorizeRequest, env: Env): string | n
     return 'Missing redirect_uri parameter.';
   }
 
-  // Validate redirect_uri against whitelist
-  const allowedUris = env.ALLOWED_REDIRECT_URIS.split(',').map(u => u.trim());
-  const isAllowed = allowedUris.some(uri => {
-    // Allow exact match or localhost with any port
-    if (params.redirect_uri === uri) return true;
-    if (params.redirect_uri.startsWith('http://localhost:')) return true;
-    if (params.redirect_uri.startsWith('http://127.0.0.1:')) return true;
-    return false;
-  });
+  // Check if client is registered via RFC 7591 Dynamic Client Registration
+  const registeredClient = await getRegisteredClient(params.client_id, env);
 
-  if (!isAllowed) {
-    return 'Invalid redirect_uri.';
+  if (registeredClient) {
+    // Validate against registered client's redirect URIs
+    if (!registeredClient.redirectUris.includes(params.redirect_uri)) {
+      return 'Invalid redirect_uri for this client.';
+    }
+  } else {
+    // Fall back to static whitelist for unregistered clients
+    const allowedUris = env.ALLOWED_REDIRECT_URIS.split(',').map(u => u.trim());
+    const isAllowed = allowedUris.some(uri => {
+      // Allow exact match or localhost with any port
+      if (params.redirect_uri === uri) return true;
+      if (params.redirect_uri.startsWith('http://localhost:')) return true;
+      if (params.redirect_uri.startsWith('http://127.0.0.1:')) return true;
+      return false;
+    });
+
+    if (!isAllowed) {
+      return 'Invalid redirect_uri.';
+    }
   }
 
   if (!params.code_challenge) {
