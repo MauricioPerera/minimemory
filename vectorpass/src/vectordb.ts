@@ -4,9 +4,9 @@
  * Wraps minimemory WASM bindings with EmbeddingGemma integration
  */
 
-import { Env, User, DatabaseInfo, SearchResult, KeywordResult, TIER_LIMITS } from './types';
+import { Env, User, SearchResult, KeywordResult, TIER_LIMITS } from './types';
 
-// Import WASM module (will be built from minimemory)
+// WASM module will be imported after build
 // import init, { WasmVectorDB } from '../pkg/minimemory.js';
 
 // Configuration
@@ -15,19 +15,45 @@ const CONFIG = {
     distance: "cosine",
     index: "hnsw",
     quantization: "int8",   // 4x compression
-    model: "@cf/google/embeddinggemma-300m"
+    model: "@cf/google/embeddinggemma-300m",
+    hnswM: 16,
+    hnswEf: 200
 };
+
+// Flag to track if we're using real WASM or fallback
+let useWasm = false;
+let WasmVectorDB: any = null;
+
+/**
+ * Initialize WASM module (call once at startup)
+ */
+export async function initWasm(): Promise<boolean> {
+    try {
+        // Dynamic import of WASM module
+        const wasm = await import('../pkg/minimemory.js');
+        await wasm.default();  // Initialize WASM
+        WasmVectorDB = wasm.WasmVectorDB;
+        useWasm = true;
+        console.log('WASM initialized successfully');
+        return true;
+    } catch (e) {
+        console.warn('WASM not available, using JS fallback:', e);
+        useWasm = false;
+        return false;
+    }
+}
 
 /**
  * VectorDB wrapper with embedding generation
  */
 export class VectorDB {
-    private db: any;  // WasmVectorDB
+    private db: any;
     private ai: any;
     private kv: KVNamespace;
     private userId: string;
     private dbId: string;
     private vectorCount: number = 0;
+    private isWasm: boolean;
 
     private constructor(
         db: any,
@@ -35,7 +61,8 @@ export class VectorDB {
         kv: KVNamespace,
         userId: string,
         dbId: string,
-        vectorCount: number
+        vectorCount: number,
+        isWasm: boolean
     ) {
         this.db = db;
         this.ai = ai;
@@ -43,6 +70,7 @@ export class VectorDB {
         this.userId = userId;
         this.dbId = dbId;
         this.vectorCount = vectorCount;
+        this.isWasm = isWasm;
     }
 
     /**
@@ -53,23 +81,46 @@ export class VectorDB {
         dbId: string,
         env: Env
     ): Promise<VectorDB> {
-        // TODO: Initialize WASM
-        // await init();
+        let db: any;
+        let isWasm = false;
 
-        // For now, use a simple in-memory structure
-        // In production, this will use WasmVectorDB
-        const db = new InMemoryVectorDB(CONFIG.dimensions);
+        // Try to use WASM if available
+        if (useWasm && WasmVectorDB) {
+            try {
+                db = WasmVectorDB.new_int8(
+                    CONFIG.dimensions,
+                    CONFIG.distance,
+                    CONFIG.index
+                );
+                isWasm = true;
+            } catch (e) {
+                console.warn('Failed to create WASM DB:', e);
+            }
+        }
+
+        // Fallback to JS implementation
+        if (!db) {
+            db = new InMemoryVectorDB(CONFIG.dimensions);
+        }
 
         const kvKey = `db:${user.id}:${dbId}`;
 
         // Try to restore from KV
         const saved = await env.VECTORS.get(kvKey);
         if (saved) {
-            const data = JSON.parse(saved);
-            db.import(data);
+            try {
+                if (isWasm) {
+                    db.import_json(saved);
+                } else {
+                    db.import(JSON.parse(saved));
+                }
+            } catch (e) {
+                console.warn('Failed to restore DB from KV:', e);
+            }
         }
 
-        return new VectorDB(db, env.AI, env.VECTORS, user.id, dbId, db.len());
+        const count = isWasm ? db.len() : db.len();
+        return new VectorDB(db, env.AI, env.VECTORS, user.id, dbId, count, isWasm);
     }
 
     /**
@@ -77,10 +128,7 @@ export class VectorDB {
      */
     private async embed(text: string): Promise<Float32Array> {
         const result = await this.ai.run(CONFIG.model, { text });
-        const fullEmbedding = new Float32Array(result.data);
-
-        // Truncate to target dimensions and normalize
-        return this.truncateAndNormalize(fullEmbedding);
+        return new Float32Array(result.data);
     }
 
     /**
@@ -91,9 +139,7 @@ export class VectorDB {
 
         // Handle different response formats
         if (Array.isArray(result.data[0])) {
-            return result.data.map((arr: number[]) =>
-                this.truncateAndNormalize(new Float32Array(arr))
-            );
+            return result.data.map((arr: number[]) => new Float32Array(arr));
         }
 
         // Flat array - split by dimensions
@@ -101,32 +147,9 @@ export class VectorDB {
         const fullDims = 768;
         for (let i = 0; i < texts.length; i++) {
             const start = i * fullDims;
-            const full = new Float32Array(result.data.slice(start, start + fullDims));
-            embeddings.push(this.truncateAndNormalize(full));
+            embeddings.push(new Float32Array(result.data.slice(start, start + fullDims)));
         }
         return embeddings;
-    }
-
-    /**
-     * Truncates vector to target dimensions and L2 normalizes
-     */
-    private truncateAndNormalize(vector: Float32Array): Float32Array {
-        const truncated = vector.slice(0, CONFIG.dimensions);
-
-        // L2 normalize
-        let norm = 0;
-        for (let i = 0; i < truncated.length; i++) {
-            norm += truncated[i] * truncated[i];
-        }
-        norm = Math.sqrt(norm);
-
-        if (norm > 1e-10) {
-            for (let i = 0; i < truncated.length; i++) {
-                truncated[i] /= norm;
-            }
-        }
-
-        return truncated;
     }
 
     /**
@@ -134,9 +157,17 @@ export class VectorDB {
      */
     async index(id: string, text: string, metadata?: Record<string, any>): Promise<void> {
         const embedding = await this.embed(text);
-        const meta = metadata ? { ...metadata, _snippet: text.slice(0, 500) } : undefined;
+        const meta = metadata ? { ...metadata, _snippet: text.slice(0, 500) } : { _snippet: text.slice(0, 500) };
 
-        this.db.insert(id, embedding, meta);
+        if (this.isWasm) {
+            // WASM: uses auto-truncate methods
+            this.db.insert_auto_with_metadata(id, embedding, JSON.stringify(meta));
+        } else {
+            // JS fallback: manual truncate
+            const truncated = this.truncateAndNormalize(embedding);
+            this.db.insert(id, truncated, meta);
+        }
+
         this.vectorCount = this.db.len();
     }
 
@@ -149,11 +180,14 @@ export class VectorDB {
 
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
-            const meta = item.metadata
-                ? { ...item.metadata, _snippet: item.text.slice(0, 500) }
-                : undefined;
+            const meta = { ...(item.metadata || {}), _snippet: item.text.slice(0, 500) };
 
-            this.db.insert(item.id, embeddings[i], meta);
+            if (this.isWasm) {
+                this.db.insert_auto_with_metadata(item.id, embeddings[i], JSON.stringify(meta));
+            } else {
+                const truncated = this.truncateAndNormalize(embeddings[i]);
+                this.db.insert(item.id, truncated, meta);
+            }
         }
 
         this.vectorCount = this.db.len();
@@ -165,30 +199,54 @@ export class VectorDB {
      */
     async search(query: string, k: number = 10): Promise<SearchResult[]> {
         const embedding = await this.embed(query);
-        return this.db.search(embedding, k);
+
+        if (this.isWasm) {
+            const resultsJson = this.db.search_auto(embedding, k);
+            return JSON.parse(resultsJson);
+        } else {
+            const truncated = this.truncateAndNormalize(embedding);
+            return this.db.search(truncated, k);
+        }
     }
 
     /**
      * Keyword search (BM25)
      */
     keywordSearch(query: string, k: number = 10): KeywordResult[] {
-        return this.db.keywordSearch(query, k);
+        if (this.isWasm) {
+            const resultsJson = this.db.keyword_search(query, k);
+            return JSON.parse(resultsJson);
+        } else {
+            return this.db.keywordSearch(query, k);
+        }
     }
 
     /**
      * Update a document
      */
     async update(id: string, text: string, metadata?: Record<string, any>): Promise<boolean> {
+        if (!this.contains(id)) {
+            return false;
+        }
+
         const embedding = await this.embed(text);
-        const meta = metadata ? { ...metadata, _snippet: text.slice(0, 500) } : undefined;
-        return this.db.update(id, embedding, meta);
+        const meta = { ...(metadata || {}), _snippet: text.slice(0, 500) };
+
+        if (this.isWasm) {
+            this.db.update_auto_with_metadata(id, embedding, JSON.stringify(meta));
+        } else {
+            const truncated = this.truncateAndNormalize(embedding);
+            this.db.update(id, truncated, meta);
+        }
+
+        return true;
     }
 
     /**
      * Delete a document
      */
     delete(id: string): boolean {
-        const result = this.db.delete(id);
+        const result = this.isWasm ? this.db.delete(id) : this.db.delete(id);
         if (result) {
             this.vectorCount = this.db.len();
         }
@@ -214,8 +272,14 @@ export class VectorDB {
      */
     async save(): Promise<void> {
         const kvKey = `db:${this.userId}:${this.dbId}`;
-        const data = this.db.export();
-        await this.kv.put(kvKey, JSON.stringify(data));
+
+        if (this.isWasm) {
+            const json = this.db.export_json();
+            await this.kv.put(kvKey, json);
+        } else {
+            const data = this.db.export();
+            await this.kv.put(kvKey, JSON.stringify(data));
+        }
     }
 
     /**
@@ -225,11 +289,44 @@ export class VectorDB {
         this.db.clear();
         this.vectorCount = 0;
     }
+
+    /**
+     * Get database info
+     */
+    info(): { isWasm: boolean; dimensions: number; config: typeof CONFIG } {
+        return {
+            isWasm: this.isWasm,
+            dimensions: CONFIG.dimensions,
+            config: CONFIG
+        };
+    }
+
+    /**
+     * Truncates vector to target dimensions and L2 normalizes (for JS fallback)
+     */
+    private truncateAndNormalize(vector: Float32Array): Float32Array {
+        const truncated = vector.slice(0, CONFIG.dimensions);
+
+        // L2 normalize
+        let norm = 0;
+        for (let i = 0; i < truncated.length; i++) {
+            norm += truncated[i] * truncated[i];
+        }
+        norm = Math.sqrt(norm);
+
+        if (norm > 1e-10) {
+            for (let i = 0; i < truncated.length; i++) {
+                truncated[i] /= norm;
+            }
+        }
+
+        return truncated;
+    }
 }
 
 /**
- * Simple in-memory vector database (placeholder until WASM is integrated)
- * This will be replaced with WasmVectorDB in production
+ * Simple in-memory vector database (JavaScript fallback)
+ * Used when WASM module is not available
  */
 class InMemoryVectorDB {
     private dimensions: number;
@@ -248,7 +345,7 @@ class InMemoryVectorDB {
     }
 
     search(query: Float32Array, k: number): SearchResult[] {
-        const results: Array<{ id: string; distance: number; metadata?: any }> = [];
+        const results: SearchResult[] = [];
 
         for (const [id, data] of this.vectors) {
             const distance = this.cosineDistance(query, data.vector);
@@ -260,17 +357,22 @@ class InMemoryVectorDB {
     }
 
     keywordSearch(query: string, k: number): KeywordResult[] {
-        const terms = query.toLowerCase().split(/\s+/);
+        const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
         const results: KeywordResult[] = [];
 
         for (const [id, text] of this.texts) {
             const lowerText = text.toLowerCase();
             let score = 0;
+
             for (const term of terms) {
-                if (lowerText.includes(term)) {
-                    score += 1;
+                // Simple term frequency
+                const regex = new RegExp(term, 'gi');
+                const matches = lowerText.match(regex);
+                if (matches) {
+                    score += matches.length;
                 }
             }
+
             if (score > 0) {
                 results.push({ id, score });
             }
@@ -316,6 +418,7 @@ class InMemoryVectorDB {
     }
 
     import(data: any): void {
+        this.clear();
         if (data.vectors) {
             for (const [id, { vector, metadata }] of Object.entries(data.vectors) as any) {
                 this.vectors.set(id, { vector: new Float32Array(vector), metadata });
@@ -335,7 +438,9 @@ class InMemoryVectorDB {
             normA += a[i] * a[i];
             normB += b[i] * b[i];
         }
-        const similarity = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+        const denom = Math.sqrt(normA) * Math.sqrt(normB);
+        if (denom < 1e-10) return 1;
+        const similarity = dot / denom;
         return 1 - similarity;  // Convert to distance
     }
 }

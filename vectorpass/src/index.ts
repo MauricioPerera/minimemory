@@ -2,24 +2,27 @@
  * VectorPass - RAG as a Service
  *
  * API Endpoints:
- * - POST /auth/register     - Create account
- * - POST /auth/login        - Get API key by email
- * - POST /auth/regenerate   - Regenerate API key
+ * - POST /auth/register       - Create account
+ * - POST /auth/login          - Get API key by email
+ * - POST /auth/verify         - Verify email with code
+ * - POST /auth/regenerate     - Regenerate API key
  *
- * - POST /v1/index          - Index document
- * - POST /v1/batch          - Batch index
- * - POST /v1/search         - Semantic search
- * - POST /v1/keyword        - Keyword search (BM25)
- * - DELETE /v1/vectors/:id  - Delete document
- * - GET /v1/stats           - Get usage stats
+ * - POST /v1/index            - Index document
+ * - POST /v1/batch            - Batch index
+ * - POST /v1/search           - Semantic search
+ * - POST /v1/keyword          - Keyword search (BM25)
+ * - DELETE /v1/vectors/:id    - Delete document
+ * - GET /v1/stats             - Get usage stats
  *
- * - POST /webhooks/stripe   - Stripe subscription webhooks
+ * - POST /webhooks/stripe     - Stripe subscription webhooks
  */
 
 import { Env, User, TIER_LIMITS, IndexRequest, BatchIndexRequest, SearchRequest } from './types';
 import { requireAuth, createUser, getUserByEmail, regenerateApiKey } from './auth';
 import { checkSearchLimit, checkVectorLimit, recordSearch, getUsageStats, rateLimitExceeded, rateLimitHeaders } from './ratelimit';
-import { VectorDB } from './vectordb';
+import { VectorDB, initWasm } from './vectordb';
+import { handleStripeWebhook } from './stripe';
+import { sendVerificationEmail, verifyEmailCode, isEmailVerified } from './email';
 
 // CORS headers
 const CORS_HEADERS = {
@@ -49,6 +52,9 @@ function error(message: string, status: number = 400): Response {
     return json({ success: false, error: message }, status);
 }
 
+// Initialize WASM on first request
+let wasmInitialized = false;
+
 /**
  * Main worker handler
  */
@@ -62,7 +68,22 @@ export default {
             return new Response(null, { headers: CORS_HEADERS });
         }
 
+        // Initialize WASM on first request
+        if (!wasmInitialized) {
+            await initWasm();
+            wasmInitialized = true;
+        }
+
         try {
+            // ============================================================
+            // Webhooks (no auth, verified by signature)
+            // ============================================================
+
+            // POST /webhooks/stripe - Stripe subscription webhooks
+            if (request.method === 'POST' && path === '/webhooks/stripe') {
+                return handleStripeWebhook(request, env);
+            }
+
             // ============================================================
             // Public endpoints (no auth required)
             // ============================================================
@@ -77,7 +98,8 @@ export default {
                     endpoints: {
                         auth: {
                             'POST /auth/register': 'Create account {email, referralCode?}',
-                            'POST /auth/login': 'Get API key {email}',
+                            'POST /auth/verify': 'Verify email {email, code}',
+                            'POST /auth/login': 'Request login code {email}',
                         },
                         vectors: {
                             'POST /v1/index': 'Index document {id, text, metadata?}',
@@ -87,6 +109,12 @@ export default {
                             'DELETE /v1/vectors/:id': 'Delete document',
                             'GET /v1/stats': 'Usage statistics',
                         }
+                    },
+                    pricing: {
+                        free: { vectors: 1000, searches: '100/day', price: '$0' },
+                        starter: { vectors: 50000, searches: '10K/day', price: '$9/mo' },
+                        pro: { vectors: 500000, searches: '100K/day', price: '$29/mo' },
+                        business: { vectors: 5000000, searches: '1M/day', price: '$79/mo' }
                     }
                 });
             }
@@ -99,28 +127,65 @@ export default {
                     return error('Valid email required');
                 }
 
+                // Normalize email
+                const email = body.email.toLowerCase().trim();
+
                 // Check if email exists
-                const existing = await getUserByEmail(body.email, env);
+                const existing = await getUserByEmail(email, env);
                 if (existing) {
                     return error('Email already registered', 409);
                 }
 
-                const user = await createUser(body.email, env, body.referralCode);
+                // Create user (unverified)
+                const user = await createUser(email, env, body.referralCode);
+
+                // Send verification email
+                await sendVerificationEmail(user.id, email, env);
+
+                return json({
+                    success: true,
+                    message: 'Verification code sent to your email',
+                    data: {
+                        id: user.id,
+                        email: user.email,
+                        verified: false
+                    }
+                }, 201);
+            }
+
+            // POST /auth/verify - Verify email with code
+            if (request.method === 'POST' && path === '/auth/verify') {
+                const body = await request.json() as { email: string; code: string };
+
+                if (!body.email || !body.code) {
+                    return error('Email and code required');
+                }
+
+                const email = body.email.toLowerCase().trim();
+                const user = await getUserByEmail(email, env);
+
+                if (!user) {
+                    return error('User not found', 404);
+                }
+
+                const verified = await verifyEmailCode(user.id, body.code, env);
+
+                if (!verified) {
+                    return error('Invalid or expired code', 401);
+                }
 
                 return json({
                     success: true,
                     data: {
-                        id: user.id,
-                        email: user.email,
                         apiKey: user.apiKey,
                         tier: user.tier,
                         referralCode: user.referralCode,
                         limits: TIER_LIMITS[user.tier]
                     }
-                }, 201);
+                });
             }
 
-            // POST /auth/login - Get API key by email (simple auth for MVP)
+            // POST /auth/login - Request login code (passwordless)
             if (request.method === 'POST' && path === '/auth/login') {
                 const body = await request.json() as { email: string };
 
@@ -128,19 +193,42 @@ export default {
                     return error('Email required');
                 }
 
-                const user = await getUserByEmail(body.email, env);
+                const email = body.email.toLowerCase().trim();
+                const user = await getUserByEmail(email, env);
+
                 if (!user) {
                     return error('User not found', 404);
                 }
 
-                // In production, implement proper email verification
+                // Send verification code for login
+                await sendVerificationEmail(user.id, email, env);
+
                 return json({
                     success: true,
-                    data: {
-                        apiKey: user.apiKey,
-                        tier: user.tier,
-                        limits: TIER_LIMITS[user.tier]
-                    }
+                    message: 'Login code sent to your email'
+                });
+            }
+
+            // POST /auth/resend - Resend verification code
+            if (request.method === 'POST' && path === '/auth/resend') {
+                const body = await request.json() as { email: string };
+
+                if (!body.email) {
+                    return error('Email required');
+                }
+
+                const email = body.email.toLowerCase().trim();
+                const user = await getUserByEmail(email, env);
+
+                if (!user) {
+                    return error('User not found', 404);
+                }
+
+                await sendVerificationEmail(user.id, email, env);
+
+                return json({
+                    success: true,
+                    message: 'Verification code sent'
                 });
             }
 
@@ -158,8 +246,15 @@ export default {
 
                 const { user } = authResult;
 
+                // Check if email is verified (for write operations)
+                const verified = await isEmailVerified(user.id, env);
+
                 // POST /auth/regenerate - Generate new API key
                 if (path === '/auth/regenerate') {
+                    if (!verified) {
+                        return error('Email verification required', 403);
+                    }
+
                     const newKey = await regenerateApiKey(user.id, env);
                     if (!newKey) {
                         return error('Failed to regenerate key', 500);
@@ -172,6 +267,10 @@ export default {
 
                 // POST /v1/index - Index single document
                 if (request.method === 'POST' && path === '/v1/index') {
+                    if (!verified) {
+                        return error('Email verification required to index documents', 403);
+                    }
+
                     const body = await request.json() as IndexRequest;
 
                     if (!body.id || !body.text) {
@@ -198,6 +297,10 @@ export default {
 
                 // POST /v1/batch - Batch index
                 if (request.method === 'POST' && path === '/v1/batch') {
+                    if (!verified) {
+                        return error('Email verification required to index documents', 403);
+                    }
+
                     const body = await request.json() as BatchIndexRequest;
 
                     if (!body.items || !Array.isArray(body.items)) {
@@ -227,7 +330,7 @@ export default {
                     });
                 }
 
-                // POST /v1/search - Semantic search
+                // POST /v1/search - Semantic search (allowed without verification)
                 if (request.method === 'POST' && path === '/v1/search') {
                     const body = await request.json() as SearchRequest;
 
@@ -288,6 +391,10 @@ export default {
 
                 // DELETE /v1/vectors/:id
                 if (request.method === 'DELETE' && path.startsWith('/v1/vectors/')) {
+                    if (!verified) {
+                        return error('Email verification required', 403);
+                    }
+
                     const id = path.split('/')[3];
 
                     if (!id) {
@@ -312,12 +419,14 @@ export default {
                         success: true,
                         data: {
                             tier: user.tier,
+                            verified: await isEmailVerified(user.id, env),
                             vectorCount: db.len(),
                             vectorLimit: limits.maxVectors,
                             vectorsRemaining: limits.maxVectors - db.len(),
                             ...usage,
                             referralCode: user.referralCode,
-                            referralCount: user.referralCount
+                            referralCount: user.referralCount,
+                            dbInfo: db.info()
                         }
                     });
                 }
