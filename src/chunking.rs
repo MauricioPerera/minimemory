@@ -234,7 +234,10 @@ impl ChunkMetadata {
         };
         meta.insert("chunk_type", type_str);
 
-        if let ChunkType::Code { language: Some(ref lang) } = self.chunk_type {
+        if let ChunkType::Code {
+            language: Some(ref lang),
+        } = self.chunk_type
+        {
             meta.insert("language", lang.as_str());
         }
 
@@ -265,7 +268,11 @@ pub struct Chunk {
 impl Chunk {
     /// Crea un nuevo chunk.
     pub fn new(id: String, content: String, metadata: ChunkMetadata) -> Self {
-        Self { id, content, metadata }
+        Self {
+            id,
+            content,
+            metadata,
+        }
     }
 
     /// Retorna el número de caracteres.
@@ -332,18 +339,19 @@ impl BasicMarkdownParser {
             ChunkStrategy::ByHeading { max_level } => {
                 Self::chunk_by_heading(content, *max_level, config)
             }
-            ChunkStrategy::BySize { target_size, overlap } => {
-                Self::chunk_by_size(content, *target_size, *overlap, config)
-            }
-            ChunkStrategy::ByParagraph { min_paragraphs, max_paragraphs } => {
-                Self::chunk_by_paragraph(content, *min_paragraphs, *max_paragraphs, config)
-            }
-            ChunkStrategy::ByCodeBlocks => {
-                Self::chunk_by_code_blocks(content, config)
-            }
-            ChunkStrategy::Hybrid { max_heading_level, max_chunk_size } => {
-                Self::chunk_hybrid(content, *max_heading_level, *max_chunk_size, config)
-            }
+            ChunkStrategy::BySize {
+                target_size,
+                overlap,
+            } => Self::chunk_by_size(content, *target_size, *overlap, config),
+            ChunkStrategy::ByParagraph {
+                min_paragraphs,
+                max_paragraphs,
+            } => Self::chunk_by_paragraph(content, *min_paragraphs, *max_paragraphs, config),
+            ChunkStrategy::ByCodeBlocks => Self::chunk_by_code_blocks(content, config),
+            ChunkStrategy::Hybrid {
+                max_heading_level,
+                max_chunk_size,
+            } => Self::chunk_hybrid(content, *max_heading_level, *max_chunk_size, config),
         }?;
 
         Ok(ChunkingResult::new(chunks))
@@ -379,7 +387,7 @@ impl BasicMarkdownParser {
                     chunks.push(chunk);
                     chunk_index += 1;
                     current_content.clear();
-                    start_pos = start_pos + current_content.len();
+                    start_pos += current_content.len();
                 }
 
                 if level <= max_level {
@@ -416,7 +424,12 @@ impl BasicMarkdownParser {
         Ok(chunks)
     }
 
-    fn chunk_by_size(content: &str, target_size: usize, overlap: usize, config: &ChunkConfig) -> Result<Vec<Chunk>> {
+    fn chunk_by_size(
+        content: &str,
+        target_size: usize,
+        overlap: usize,
+        config: &ChunkConfig,
+    ) -> Result<Vec<Chunk>> {
         let mut chunks = Vec::new();
         let mut start = 0;
         let mut chunk_index = 0;
@@ -471,8 +484,14 @@ impl BasicMarkdownParser {
         Ok(chunks)
     }
 
-    fn chunk_by_paragraph(content: &str, min_paragraphs: usize, max_paragraphs: usize, config: &ChunkConfig) -> Result<Vec<Chunk>> {
-        let paragraphs: Vec<&str> = content.split("\n\n")
+    fn chunk_by_paragraph(
+        content: &str,
+        min_paragraphs: usize,
+        max_paragraphs: usize,
+        config: &ChunkConfig,
+    ) -> Result<Vec<Chunk>> {
+        let paragraphs: Vec<&str> = content
+            .split("\n\n")
             .map(|p| p.trim())
             .filter(|p| !p.is_empty())
             .collect();
@@ -566,7 +585,9 @@ impl BasicMarkdownParser {
                         code_content.clone(),
                         None,
                         None,
-                        ChunkType::Code { language: code_language.clone() },
+                        ChunkType::Code {
+                            language: code_language.clone(),
+                        },
                         code_start,
                         pos + line_len,
                     );
@@ -638,7 +659,12 @@ impl BasicMarkdownParser {
         Ok(chunks)
     }
 
-    fn chunk_hybrid(content: &str, max_heading_level: u8, max_chunk_size: usize, config: &ChunkConfig) -> Result<Vec<Chunk>> {
+    fn chunk_hybrid(
+        content: &str,
+        max_heading_level: u8,
+        max_chunk_size: usize,
+        config: &ChunkConfig,
+    ) -> Result<Vec<Chunk>> {
         // First, chunk by headings
         let heading_chunks = Self::chunk_by_heading(content, max_heading_level, config)?;
 
@@ -655,7 +681,12 @@ impl BasicMarkdownParser {
                     },
                     ..config.clone()
                 };
-                let sub_result = Self::chunk_by_size(&chunk.content, max_chunk_size, config.overlap, &sub_config)?;
+                let sub_result = Self::chunk_by_size(
+                    &chunk.content,
+                    max_chunk_size,
+                    config.overlap,
+                    &sub_config,
+                )?;
 
                 for mut sub_chunk in sub_result {
                     sub_chunk.id = format!("{}-{}", config.id_prefix, new_index);
@@ -741,13 +772,13 @@ pub fn chunk_markdown(content: &str, config: &ChunkConfig) -> Result<ChunkingRes
 /// Similar a `chunk_markdown` pero lee desde archivo y agrega
 /// el nombre del archivo a la metadata.
 pub fn chunk_markdown_file(path: &std::path::Path, config: &ChunkConfig) -> Result<ChunkingResult> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| Error::Io(e))?;
+    let content = std::fs::read_to_string(path).map_err(Error::Io)?;
 
     let mut result = chunk_markdown(&content, config)?;
 
     // Agregar nombre de archivo a metadata
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
@@ -795,8 +826,10 @@ Subsection content.
         let result = chunk_markdown(content, &config).unwrap();
 
         assert!(result.total_chunks >= 2);
-        assert!(result.chunks[0].content.contains("Main Title") ||
-                result.chunks[0].content.contains("Introduction"));
+        assert!(
+            result.chunks[0].content.contains("Main Title")
+                || result.chunks[0].content.contains("Introduction")
+        );
     }
 
     #[test]
@@ -836,7 +869,9 @@ Final text.
         let result = chunk_markdown(content, &config).unwrap();
 
         // Should have text chunks and code chunks
-        let code_chunks: Vec<_> = result.chunks.iter()
+        let code_chunks: Vec<_> = result
+            .chunks
+            .iter()
             .filter(|c| matches!(c.metadata.chunk_type, ChunkType::Code { .. }))
             .collect();
 
@@ -853,7 +888,9 @@ Final text.
         let metadata = ChunkMetadata {
             heading: Some("Test Section".to_string()),
             heading_level: Some(2),
-            chunk_type: ChunkType::Code { language: Some("rust".to_string()) },
+            chunk_type: ChunkType::Code {
+                language: Some("rust".to_string()),
+            },
             start_position: 0,
             end_position: 100,
             chunk_index: 0,
@@ -877,7 +914,10 @@ Short intro.
 
 ## Long Section
 
-"#.to_owned() + &"Long content. ".repeat(500) + r#"
+"#
+        .to_owned()
+            + &"Long content. ".repeat(500)
+            + r#"
 
 ## Short Section
 

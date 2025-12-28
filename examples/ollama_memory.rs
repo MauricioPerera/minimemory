@@ -15,9 +15,9 @@
 //! cargo run --example ollama_memory
 //! ```
 
-use std::io::{self, Write};
-use minimemory::memory_traits::{GenericMemory, Priority, InstanceContext};
 use minimemory::memory_traits::presets::SoftwareDevelopment;
+use minimemory::memory_traits::{GenericMemory, InstanceContext, Priority};
+use std::io::{self, Write};
 
 /// Cliente simple para Ollama embeddings.
 struct OllamaClient {
@@ -38,9 +38,12 @@ impl OllamaClient {
         let client = std::process::Command::new("curl")
             .args([
                 "-s",
-                "-X", "POST",
+                "-X",
+                "POST",
                 &format!("{}/api/embed", self.base_url),
-                "-d", &format!(r#"{{"model": "{}", "input": "{}"}}"#,
+                "-d",
+                &format!(
+                    r#"{{"model": "{}", "input": "{}"}}"#,
                     self.model,
                     text.replace('"', "\\\"").replace('\n', " ")
                 ),
@@ -91,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     memory.set_context(
         InstanceContext::new("demo-project")
             .with_context("rust")
-            .with_domain("backend")
+            .with_domain("backend"),
     );
 
     println!("Memoria inicializada con preset: SoftwareDevelopment\n");
@@ -103,28 +106,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let experiences = vec![
         // Experiencias críticas (seguridad)
-        ("security-fix-1", "Fixed SQL injection vulnerability in user login",
-         "Sanitized user input using parameterized queries", "success", Priority::Critical),
-
+        (
+            "security-fix-1",
+            "Fixed SQL injection vulnerability in user login",
+            "Sanitized user input using parameterized queries",
+            "success",
+            Priority::Critical,
+        ),
         // Experiencias de alta prioridad (bugs)
-        ("bug-fix-1", "Fixed null pointer exception in payment processing",
-         "Added null check before accessing payment object", "success", Priority::High),
-        ("bug-fix-2", "Fixed race condition in concurrent user sessions",
-         "Implemented mutex lock for session access", "success", Priority::High),
-
+        (
+            "bug-fix-1",
+            "Fixed null pointer exception in payment processing",
+            "Added null check before accessing payment object",
+            "success",
+            Priority::High,
+        ),
+        (
+            "bug-fix-2",
+            "Fixed race condition in concurrent user sessions",
+            "Implemented mutex lock for session access",
+            "success",
+            Priority::High,
+        ),
         // Experiencias normales
-        ("feature-1", "Implemented user authentication with JWT tokens",
-         "Created auth middleware and token validation", "success", Priority::Normal),
-        ("feature-2", "Added pagination to API endpoints",
-         "Implemented cursor-based pagination for large datasets", "success", Priority::Normal),
-        ("refactor-1", "Refactored database connection pooling",
-         "Migrated from single connection to connection pool", "success", Priority::Normal),
-
+        (
+            "feature-1",
+            "Implemented user authentication with JWT tokens",
+            "Created auth middleware and token validation",
+            "success",
+            Priority::Normal,
+        ),
+        (
+            "feature-2",
+            "Added pagination to API endpoints",
+            "Implemented cursor-based pagination for large datasets",
+            "success",
+            Priority::Normal,
+        ),
+        (
+            "refactor-1",
+            "Refactored database connection pooling",
+            "Migrated from single connection to connection pool",
+            "success",
+            Priority::Normal,
+        ),
         // Experiencias de baja prioridad
-        ("style-1", "Fixed code formatting in utils module",
-         "Applied rustfmt to all files", "success", Priority::Low),
-        ("docs-1", "Updated API documentation",
-         "Added examples to README", "success", Priority::Low),
+        (
+            "style-1",
+            "Fixed code formatting in utils module",
+            "Applied rustfmt to all files",
+            "success",
+            Priority::Low,
+        ),
+        (
+            "docs-1",
+            "Updated API documentation",
+            "Added examples to README",
+            "success",
+            Priority::Low,
+        ),
     ];
 
     for (id, description, content, outcome, priority) in &experiences {
@@ -151,8 +191,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Top 3 resultados:");
     for (i, r) in results.iter().enumerate() {
-        println!("  {}. {} (relevance: {:.3}, priority: {:?}, transfer: {:?})",
-            i + 1, r.id, r.relevance, r.priority, r.transfer_level);
+        println!(
+            "  {}. {} (relevance: {:.3}, priority: {:?}, transfer: {:?})",
+            i + 1,
+            r.id,
+            r.relevance,
+            r.priority,
+            r.transfer_level
+        );
     }
     println!();
 
@@ -170,7 +216,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let high = memory.recall_high_priority(&query, 5)?;
     println!("Resultados alta prioridad: {}", high.len());
     for r in &high {
-        println!("  - {} (priority: {:?}, score: {:.3})", r.id, r.priority, r.priority_score);
+        println!(
+            "  - {} (priority: {:?}, score: {:.3})",
+            r.id, r.priority, r.priority_score
+        );
     }
     println!();
 
@@ -192,8 +241,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let results2 = memory.recall(&query2, 5)?;
 
     for r in &results2 {
-        println!("  {} - relevance: {:.3}, priority_score: {:.3}, combined: {:.3}",
-            r.id, r.relevance, r.priority_score, r.combined_score);
+        println!(
+            "  {} - relevance: {:.3}, priority_score: {:.3}, combined: {:.3}",
+            r.id, r.relevance, r.priority_score, r.combined_score
+        );
     }
     println!();
 

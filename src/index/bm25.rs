@@ -28,8 +28,8 @@ use crate::error::Result;
 use crate::types::{Metadata, MetadataValue, VectorId};
 
 /// Parámetros BM25
-const K1: f32 = 1.2;  // Saturación de frecuencia de término
-const B: f32 = 0.75;   // Factor de normalización por longitud
+const K1: f32 = 1.2; // Saturación de frecuencia de término
+const B: f32 = 0.75; // Factor de normalización por longitud
 
 /// Documento tokenizado para indexación
 #[derive(Clone, Serialize, Deserialize)]
@@ -107,11 +107,14 @@ impl BM25Index {
         if tokens.is_empty() {
             // No hay texto indexable, pero registramos el documento
             let mut inner = self.inner.write();
-            inner.documents.insert(id.to_string(), TokenizedDoc {
-                id: id.to_string(),
-                term_frequencies: HashMap::new(),
-                length: 0,
-            });
+            inner.documents.insert(
+                id.to_string(),
+                TokenizedDoc {
+                    id: id.to_string(),
+                    term_frequencies: HashMap::new(),
+                    length: 0,
+                },
+            );
             return Ok(());
         }
 
@@ -133,9 +136,10 @@ impl BM25Index {
 
         // Actualizar índice invertido y frecuencias
         for term in term_frequencies.keys() {
-            inner.inverted_index
+            inner
+                .inverted_index
                 .entry(term.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(id.to_string());
 
             // Solo incrementar doc_freq si es nuevo documento
@@ -219,8 +223,8 @@ impl BM25Index {
                         let dl = doc.length as f32;
 
                         // BM25 formula
-                        let score = idf * (tf * (K1 + 1.0)) /
-                            (tf + K1 * (1.0 - B + B * dl / avgdl));
+                        let score =
+                            idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * dl / avgdl));
 
                         *scores.entry(doc_id.clone()).or_insert(0.0) += score;
                     }
@@ -229,10 +233,15 @@ impl BM25Index {
         }
 
         // Ordenar por score descendente
-        let mut results: Vec<_> = scores.into_iter()
+        let mut results: Vec<_> = scores
+            .into_iter()
             .map(|(id, score)| BM25SearchResult { id, score })
             .collect();
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(k);
 
         results
@@ -246,11 +255,9 @@ impl BM25Index {
 
         self.indexed_fields
             .iter()
-            .filter_map(|field| {
-                match meta.get(field) {
-                    Some(MetadataValue::String(s)) => Some(s.clone()),
-                    _ => None,
-                }
+            .filter_map(|field| match meta.get(field) {
+                Some(MetadataValue::String(s)) => Some(s.clone()),
+                _ => None,
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -409,7 +416,10 @@ mod tests {
         let index = create_index();
 
         // doc-1: mentions "rust" twice
-        let meta1 = create_doc("Rust", "Rust is a systems programming language. Rust is fast.");
+        let meta1 = create_doc(
+            "Rust",
+            "Rust is a systems programming language. Rust is fast.",
+        );
         // doc-2: mentions "rust" once
         let meta2 = create_doc("Python", "Learn Rust programming");
 
@@ -452,10 +462,8 @@ mod tests {
         index.add("doc-1", Some(&meta)).unwrap();
 
         let serialized = index.serialize().unwrap();
-        let restored = BM25Index::deserialize(
-            vec!["title".into(), "content".into()],
-            &serialized
-        ).unwrap();
+        let restored =
+            BM25Index::deserialize(vec!["title".into(), "content".into()], &serialized).unwrap();
 
         assert_eq!(restored.len(), 1);
         let results = restored.search("serialization", 10);

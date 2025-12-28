@@ -139,21 +139,21 @@
 //! - [`Filter`] - Filtros de metadata
 //! - [`HybridSearchParams`] - Parámetros de búsqueda híbrida
 
+pub mod agent_memory;
+pub mod chunking;
 mod db;
 mod distance;
 mod error;
 pub mod index;
-mod storage;
-mod types;
-pub mod query;
-pub mod search;
-pub mod chunking;
-pub mod quantization;
-pub mod partial_index;
-pub mod replication;
-pub mod agent_memory;
-pub mod transfer;
 pub mod memory_traits;
+pub mod partial_index;
+pub mod quantization;
+pub mod query;
+pub mod replication;
+pub mod search;
+mod storage;
+pub mod transfer;
+mod types;
 
 // Bindings para otros lenguajes
 #[cfg(any(feature = "python", feature = "nodejs", feature = "ffi"))]
@@ -163,7 +163,10 @@ pub use db::VectorDB;
 pub use distance::Distance;
 pub use error::{Error, Result};
 pub use index::IndexType;
-pub use types::{Config, HybridSearchResult, Metadata, MetadataValue, SearchResult, StoredVector, Vector, VectorId};
+pub use quantization::{QuantizationType, QuantizedVector, Quantizer};
 pub use query::{Filter, FilterOp};
 pub use search::{HybridSearchParams, SearchMode};
-pub use quantization::{QuantizationType, Quantizer, QuantizedVector};
+pub use types::{
+    Config, HybridSearchResult, Metadata, MetadataValue, SearchResult, StoredVector, Vector,
+    VectorId,
+};

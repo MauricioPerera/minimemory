@@ -21,8 +21,8 @@
 //! let filter = Filter::eq("author.name", "Juan");
 //! ```
 
-mod operators;
 mod filter;
+mod operators;
 
-pub use operators::FilterOp;
 pub use filter::{Filter, FilterEvaluator};
+pub use operators::FilterOp;

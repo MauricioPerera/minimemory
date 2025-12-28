@@ -74,7 +74,10 @@ let pool = PgPoolOptions::new()
     .await?;
         "#,
         TaskOutcome::Success,
-        vec!["Usar sqlx con feature postgres", "Pool de conexiones recomendado: 5"],
+        vec![
+            "Usar sqlx con feature postgres",
+            "Pool de conexiones recomendado: 5",
+        ],
     )?;
     println!("✓ Aprendida tarea PostgreSQL: {}", id2);
 
@@ -149,7 +152,11 @@ pub fn create_jwt(user_id: &str, secret: &[u8]) -> Result<String, Error> {
     println!("Buscando código: 'JWT token creation'");
     let code_results = memory.recall_code("JWT token creation", 2)?;
     for r in &code_results {
-        println!("  - {} (score: {:.4})", truncate(&r.content, 60), r.relevance_score);
+        println!(
+            "  - {} (score: {:.4})",
+            truncate(&r.content, 60),
+            r.relevance_score
+        );
     }
     println!();
 

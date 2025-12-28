@@ -1,7 +1,7 @@
 //! Operadores de comparación para filtros de metadata.
 
-use serde::{Deserialize, Serialize};
 use crate::types::MetadataValue;
+use serde::{Deserialize, Serialize};
 
 /// Operadores de comparación para filtros.
 ///
@@ -47,62 +47,56 @@ impl FilterOp {
         match self {
             FilterOp::Exists(should_exist) => value.is_some() == *should_exist,
 
-            FilterOp::Eq(expected) => {
-                value.map_or(false, |v| values_equal(v, expected))
-            }
+            FilterOp::Eq(expected) => value.is_some_and(|v| values_equal(v, expected)),
 
-            FilterOp::Ne(expected) => {
-                value.map_or(true, |v| !values_equal(v, expected))
-            }
+            FilterOp::Ne(expected) => value.is_none_or(|v| !values_equal(v, expected)),
 
-            FilterOp::Gt(threshold) => {
-                value.map_or(false, |v| compare_values(v, threshold) == Some(std::cmp::Ordering::Greater))
-            }
+            FilterOp::Gt(threshold) => value
+                .is_some_and(|v| compare_values(v, threshold) == Some(std::cmp::Ordering::Greater)),
 
-            FilterOp::Gte(threshold) => {
-                value.map_or(false, |v| {
-                    matches!(compare_values(v, threshold), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal))
-                })
-            }
+            FilterOp::Gte(threshold) => value.is_some_and(|v| {
+                matches!(
+                    compare_values(v, threshold),
+                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                )
+            }),
 
-            FilterOp::Lt(threshold) => {
-                value.map_or(false, |v| compare_values(v, threshold) == Some(std::cmp::Ordering::Less))
-            }
+            FilterOp::Lt(threshold) => value
+                .is_some_and(|v| compare_values(v, threshold) == Some(std::cmp::Ordering::Less)),
 
-            FilterOp::Lte(threshold) => {
-                value.map_or(false, |v| {
-                    matches!(compare_values(v, threshold), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal))
-                })
-            }
+            FilterOp::Lte(threshold) => value.is_some_and(|v| {
+                matches!(
+                    compare_values(v, threshold),
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                )
+            }),
 
             FilterOp::In(list) => {
-                value.map_or(false, |v| list.iter().any(|item| values_equal(v, item)))
+                value.is_some_and(|v| list.iter().any(|item| values_equal(v, item)))
             }
 
             FilterOp::Nin(list) => {
-                value.map_or(true, |v| !list.iter().any(|item| values_equal(v, item)))
+                value.is_none_or(|v| !list.iter().any(|item| values_equal(v, item)))
             }
 
-            FilterOp::Contains(substr) => {
-                match value {
-                    Some(MetadataValue::String(s)) => s.to_lowercase().contains(&substr.to_lowercase()),
-                    _ => false,
-                }
-            }
+            FilterOp::Contains(substr) => match value {
+                Some(MetadataValue::String(s)) => s.to_lowercase().contains(&substr.to_lowercase()),
+                _ => false,
+            },
 
-            FilterOp::StartsWith(prefix) => {
-                match value {
-                    Some(MetadataValue::String(s)) => s.to_lowercase().starts_with(&prefix.to_lowercase()),
-                    _ => false,
+            FilterOp::StartsWith(prefix) => match value {
+                Some(MetadataValue::String(s)) => {
+                    s.to_lowercase().starts_with(&prefix.to_lowercase())
                 }
-            }
+                _ => false,
+            },
 
-            FilterOp::EndsWith(suffix) => {
-                match value {
-                    Some(MetadataValue::String(s)) => s.to_lowercase().ends_with(&suffix.to_lowercase()),
-                    _ => false,
+            FilterOp::EndsWith(suffix) => match value {
+                Some(MetadataValue::String(s)) => {
+                    s.to_lowercase().ends_with(&suffix.to_lowercase())
                 }
-            }
+                _ => false,
+            },
         }
     }
 }
@@ -198,7 +192,9 @@ mod tests {
     #[test]
     fn test_contains() {
         let op = FilterOp::Contains("rust".into());
-        assert!(op.evaluate(Some(&MetadataValue::String("Learning Rust programming".into()))));
+        assert!(op.evaluate(Some(&MetadataValue::String(
+            "Learning Rust programming".into()
+        ))));
         assert!(op.evaluate(Some(&MetadataValue::String("RUST is great".into())))); // case insensitive
         assert!(!op.evaluate(Some(&MetadataValue::String("Python is cool".into()))));
     }

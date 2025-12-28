@@ -120,7 +120,13 @@ mod errors {
 
         let result = db.insert("wrong_dim", &[1.0, 2.0], None);
 
-        assert!(matches!(result, Err(Error::DimensionMismatch { expected: 3, got: 2 })));
+        assert!(matches!(
+            result,
+            Err(Error::DimensionMismatch {
+                expected: 3,
+                got: 2
+            })
+        ));
     }
 
     #[test]
@@ -130,7 +136,13 @@ mod errors {
 
         let result = db.search(&[1.0, 2.0], 1);
 
-        assert!(matches!(result, Err(Error::DimensionMismatch { expected: 4, got: 2 })));
+        assert!(matches!(
+            result,
+            Err(Error::DimensionMismatch {
+                expected: 4,
+                got: 2
+            })
+        ));
     }
 
     #[test]
@@ -300,7 +312,8 @@ mod metadata {
         meta.insert("rating", 4.5f64);
         meta.insert("active", true);
 
-        db.insert("with_meta", &[1.0, 2.0, 3.0], Some(meta)).unwrap();
+        db.insert("with_meta", &[1.0, 2.0, 3.0], Some(meta))
+            .unwrap();
 
         let (_, retrieved_meta) = db.get("with_meta").unwrap().unwrap();
         let meta = retrieved_meta.unwrap();
@@ -310,7 +323,10 @@ mod metadata {
             Some(MetadataValue::String(s)) if s == "Test Document"
         ));
         assert!(matches!(meta.get("score"), Some(MetadataValue::Int(95))));
-        assert!(matches!(meta.get("active"), Some(MetadataValue::Bool(true))));
+        assert!(matches!(
+            meta.get("active"),
+            Some(MetadataValue::Bool(true))
+        ));
     }
 
     #[test]
@@ -403,8 +419,7 @@ mod hnsw {
 
     #[test]
     fn test_hnsw_delete() {
-        let config = Config::new(4)
-            .with_index(IndexType::hnsw());
+        let config = Config::new(4).with_index(IndexType::hnsw());
 
         let db = VectorDB::new(config).unwrap();
 
@@ -448,10 +463,7 @@ mod persistence {
 
         // Crear y guardar
         {
-            let db = VectorDB::new(
-                Config::new(3)
-                    .with_distance(Distance::Cosine)
-            ).unwrap();
+            let db = VectorDB::new(Config::new(3).with_distance(Distance::Cosine)).unwrap();
 
             db.insert("doc1", &[1.0, 2.0, 3.0], None).unwrap();
             db.insert("doc2", &[4.0, 5.0, 6.0], None).unwrap();
@@ -529,7 +541,9 @@ mod persistence {
             let db = VectorDB::new(Config::new(128)).unwrap();
 
             for i in 0..1000 {
-                let vector: Vec<f32> = (0..128).map(|j| ((i * 128 + j) % 1000) as f32 / 1000.0).collect();
+                let vector: Vec<f32> = (0..128)
+                    .map(|j| ((i * 128 + j) % 1000) as f32 / 1000.0)
+                    .collect();
                 db.insert(format!("doc_{}", i), &vector, None).unwrap();
             }
 
@@ -796,11 +810,13 @@ mod edge_cases {
 // ============================================================================
 
 mod memory_traits_integration {
-    use minimemory::memory_traits::{GenericMemory, Priority, InstanceContext};
     use minimemory::memory_traits::presets::SoftwareDevelopment;
+    use minimemory::memory_traits::{GenericMemory, InstanceContext, Priority};
 
     fn generate_embedding(seed: usize, dim: usize) -> Vec<f32> {
-        (0..dim).map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0).collect()
+        (0..dim)
+            .map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0)
+            .collect()
     }
 
     #[test]
@@ -810,11 +826,19 @@ mod memory_traits_integration {
         memory.set_context(
             InstanceContext::new("test-project")
                 .with_context("rust")
-                .with_domain("backend")
+                .with_domain("backend"),
         );
 
         let emb = generate_embedding(1, 64);
-        memory.learn("task-1", &emb, "Fixed auth bug", "Authentication fix", "success").unwrap();
+        memory
+            .learn(
+                "task-1",
+                &emb,
+                "Fixed auth bug",
+                "Authentication fix",
+                "success",
+            )
+            .unwrap();
 
         let query = generate_embedding(1, 64);
         let results = memory.recall(&query, 5).unwrap();
@@ -829,7 +853,15 @@ mod memory_traits_integration {
 
         // Security issue should get Critical priority
         let emb = generate_embedding(1, 64);
-        memory.learn("sec-fix", &emb, "Fixed XSS vulnerability", "Security patch", "success").unwrap();
+        memory
+            .learn(
+                "sec-fix",
+                &emb,
+                "Fixed XSS vulnerability",
+                "Security patch",
+                "success",
+            )
+            .unwrap();
 
         let query = generate_embedding(1, 64);
         let results = memory.recall(&query, 1).unwrap();
@@ -842,9 +874,16 @@ mod memory_traits_integration {
         let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
 
         let emb = generate_embedding(1, 64);
-        memory.learn_with_priority(
-            "manual-task", &emb, "Some content", "Description", "success", Priority::High
-        ).unwrap();
+        memory
+            .learn_with_priority(
+                "manual-task",
+                &emb,
+                "Some content",
+                "Description",
+                "success",
+                Priority::High,
+            )
+            .unwrap();
 
         let query = generate_embedding(1, 64);
         let results = memory.recall(&query, 1).unwrap();
@@ -865,9 +904,16 @@ mod memory_traits_integration {
                 2 => Priority::High,
                 _ => Priority::Critical,
             };
-            memory.learn_with_priority(
-                &format!("task-{}", i), &emb, "Content", "Desc", "success", priority
-            ).unwrap();
+            memory
+                .learn_with_priority(
+                    &format!("task-{}", i),
+                    &emb,
+                    "Content",
+                    "Desc",
+                    "success",
+                    priority,
+                )
+                .unwrap();
         }
 
         let query = generate_embedding(3, 64);
@@ -891,9 +937,16 @@ mod memory_traits_integration {
                 2 => Priority::High,
                 _ => Priority::Critical,
             };
-            memory.learn_with_priority(
-                &format!("task-{}", i), &emb, "Content", "Desc", "success", priority
-            ).unwrap();
+            memory
+                .learn_with_priority(
+                    &format!("task-{}", i),
+                    &emb,
+                    "Content",
+                    "Desc",
+                    "success",
+                    priority,
+                )
+                .unwrap();
         }
 
         let query = generate_embedding(0, 64);
@@ -909,7 +962,9 @@ mod memory_traits_integration {
         let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
 
         let emb = generate_embedding(1, 64);
-        memory.learn("useful-task", &emb, "Content", "Desc", "success").unwrap();
+        memory
+            .learn("useful-task", &emb, "Content", "Desc", "success")
+            .unwrap();
 
         // Mark as useful multiple times
         memory.mark_useful("useful-task");
@@ -925,10 +980,26 @@ mod memory_traits_integration {
         let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
 
         let emb1 = generate_embedding(1, 64);
-        memory.learn("auth-task", &emb1, "JWT token authentication", "Auth system", "success").unwrap();
+        memory
+            .learn(
+                "auth-task",
+                &emb1,
+                "JWT token authentication",
+                "Auth system",
+                "success",
+            )
+            .unwrap();
 
         let emb2 = generate_embedding(2, 64);
-        memory.learn("db-task", &emb2, "Database connection pool", "DB optimization", "success").unwrap();
+        memory
+            .learn(
+                "db-task",
+                &emb2,
+                "Database connection pool",
+                "DB optimization",
+                "success",
+            )
+            .unwrap();
 
         let results = memory.recall_by_keywords("JWT authentication", 5).unwrap();
 
@@ -943,11 +1014,19 @@ mod memory_traits_integration {
         memory.set_context(
             InstanceContext::new("project-a")
                 .with_context("rust")
-                .with_domain("backend")
+                .with_domain("backend"),
         );
 
         let emb = generate_embedding(1, 64);
-        memory.learn("rust-task", &emb, "Rust async code", "Async implementation", "success").unwrap();
+        memory
+            .learn(
+                "rust-task",
+                &emb,
+                "Rust async code",
+                "Async implementation",
+                "success",
+            )
+            .unwrap();
 
         assert!(memory.current_context().is_some());
         let ctx = memory.current_context().unwrap();
@@ -960,7 +1039,9 @@ mod memory_traits_integration {
 
         for i in 0..5 {
             let emb = generate_embedding(i, 64);
-            memory.learn(&format!("task-{}", i), &emb, "Content", "Desc", "success").unwrap();
+            memory
+                .learn(&format!("task-{}", i), &emb, "Content", "Desc", "success")
+                .unwrap();
         }
 
         let stats = memory.stats();
@@ -975,8 +1056,7 @@ mod memory_traits_integration {
 
 mod agent_memory_integration {
     use minimemory::agent_memory::{
-        AgentMemory, MemoryConfig, TaskOutcome, CodeSnippet,
-        ErrorSolution, Language, MemoryType,
+        AgentMemory, CodeSnippet, ErrorSolution, Language, MemoryConfig, MemoryType, TaskOutcome,
     };
 
     #[test]
@@ -993,12 +1073,14 @@ mod agent_memory_integration {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        let id = memory.learn_task(
-            "Implement login feature",
-            "fn login(user: &str) { /* ... */ }",
-            TaskOutcome::Success,
-            vec!["Use bcrypt for passwords", "Add rate limiting"],
-        ).unwrap();
+        let id = memory
+            .learn_task(
+                "Implement login feature",
+                "fn login(user: &str) { /* ... */ }",
+                TaskOutcome::Success,
+                vec!["Use bcrypt for passwords", "Add rate limiting"],
+            )
+            .unwrap();
 
         assert!(id.starts_with("episode-"));
         assert_eq!(memory.db().len(), 1);
@@ -1009,15 +1091,17 @@ mod agent_memory_integration {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        let id = memory.learn_code(CodeSnippet {
-            code: "fn hello() { println!(\"Hello\"); }".to_string(),
-            description: "Simple hello function".to_string(),
-            language: Language::Rust,
-            dependencies: vec![],
-            use_case: "Greeting users".to_string(),
-            quality_score: 0.9,
-            tags: vec!["example".to_string()],
-        }).unwrap();
+        let id = memory
+            .learn_code(CodeSnippet {
+                code: "fn hello() { println!(\"Hello\"); }".to_string(),
+                description: "Simple hello function".to_string(),
+                language: Language::Rust,
+                dependencies: vec![],
+                use_case: "Greeting users".to_string(),
+                quality_score: 0.9,
+                tags: vec!["example".to_string()],
+            })
+            .unwrap();
 
         assert!(id.starts_with("code-"));
 
@@ -1031,18 +1115,22 @@ mod agent_memory_integration {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        let id = memory.learn_error_solution(ErrorSolution {
-            error_message: "cannot borrow as mutable".to_string(),
-            error_type: "E0596".to_string(),
-            root_cause: "Missing mut keyword".to_string(),
-            solution: "Add mut to variable declaration".to_string(),
-            fixed_code: Some("let mut x = 5;".to_string()),
-            language: Language::Rust,
-        }).unwrap();
+        let id = memory
+            .learn_error_solution(ErrorSolution {
+                error_message: "cannot borrow as mutable".to_string(),
+                error_type: "E0596".to_string(),
+                root_cause: "Missing mut keyword".to_string(),
+                solution: "Add mut to variable declaration".to_string(),
+                fixed_code: Some("let mut x = 5;".to_string()),
+                language: Language::Rust,
+            })
+            .unwrap();
 
         assert!(id.starts_with("error-"));
 
-        let _results = memory.recall_error_solutions("cannot borrow mutable", 5).unwrap();
+        let _results = memory
+            .recall_error_solutions("cannot borrow mutable", 5)
+            .unwrap();
         // Results depend on embed_fn
         assert_eq!(memory.db().len(), 1);
     }
@@ -1053,12 +1141,14 @@ mod agent_memory_integration {
         let memory = AgentMemory::new(config).unwrap();
 
         for i in 0..5 {
-            memory.learn_task(
-                &format!("Task {} about authentication and JWT tokens", i),
-                &format!("fn auth{}() {{ /* JWT logic */ }}", i),
-                TaskOutcome::Success,
-                vec!["Use JWT for auth"],
-            ).unwrap();
+            memory
+                .learn_task(
+                    &format!("Task {} about authentication and JWT tokens", i),
+                    &format!("fn auth{}() {{ /* JWT logic */ }}", i),
+                    TaskOutcome::Success,
+                    vec!["Use JWT for auth"],
+                )
+                .unwrap();
         }
 
         // recall_similar takes a text query, not an embedding
@@ -1073,23 +1163,27 @@ mod agent_memory_integration {
         let memory = AgentMemory::new(config).unwrap();
 
         // Add a task episode
-        memory.learn_task(
-            "Fix bug in parser",
-            "fn parse() { /* fixed */ }",
-            TaskOutcome::Success,
-            vec!["Check edge cases"],
-        ).unwrap();
+        memory
+            .learn_task(
+                "Fix bug in parser",
+                "fn parse() { /* fixed */ }",
+                TaskOutcome::Success,
+                vec!["Check edge cases"],
+            )
+            .unwrap();
 
         // Add a code snippet
-        memory.learn_code(CodeSnippet {
-            code: "let x = 1;".to_string(),
-            description: "Variable declaration".to_string(),
-            language: Language::Rust,
-            dependencies: vec![],
-            use_case: "Initialization".to_string(),
-            quality_score: 0.8,
-            tags: vec![],
-        }).unwrap();
+        memory
+            .learn_code(CodeSnippet {
+                code: "let x = 1;".to_string(),
+                description: "Variable declaration".to_string(),
+                language: Language::Rust,
+                dependencies: vec![],
+                use_case: "Initialization".to_string(),
+                quality_score: 0.8,
+                tags: vec![],
+            })
+            .unwrap();
 
         // recall_experiences filters by Episode type
         let episodes = memory.recall_experiences("parser bug", 5).unwrap();
@@ -1123,19 +1217,23 @@ mod agent_memory_integration {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        memory.learn_task(
-            "Successful implementation",
-            "fn good() { /* works */ }",
-            TaskOutcome::Success,
-            vec!["Good approach"],
-        ).unwrap();
+        memory
+            .learn_task(
+                "Successful implementation",
+                "fn good() { /* works */ }",
+                TaskOutcome::Success,
+                vec!["Good approach"],
+            )
+            .unwrap();
 
-        memory.learn_task(
-            "Failed implementation",
-            "fn bad() { /* broken */ }",
-            TaskOutcome::Failure,
-            vec!["Wrong approach"],
-        ).unwrap();
+        memory
+            .learn_task(
+                "Failed implementation",
+                "fn bad() { /* broken */ }",
+                TaskOutcome::Failure,
+                vec!["Wrong approach"],
+            )
+            .unwrap();
 
         // recall_successful and recall_failures take string queries
         let successes = memory.recall_successful("implementation", 5).unwrap();
@@ -1161,8 +1259,8 @@ mod agent_memory_integration {
 // ============================================================================
 
 mod replication_integration {
-    use minimemory::{Config, VectorDB};
     use minimemory::replication::{ChangeLog, ReplicationManager};
+    use minimemory::{Config, VectorDB};
 
     #[test]
     fn test_change_log_tracking() {
@@ -1229,7 +1327,8 @@ mod replication_integration {
         let json = serde_json::to_string(&log.export_since(0)).unwrap();
         assert!(!json.is_empty());
 
-        let parsed: Vec<minimemory::replication::ChangeEntry> = serde_json::from_str(&json).unwrap();
+        let parsed: Vec<minimemory::replication::ChangeEntry> =
+            serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 1);
     }
 }
@@ -1239,24 +1338,27 @@ mod replication_integration {
 // ============================================================================
 
 mod hybrid_search_integration {
-    use minimemory::{Config, Metadata, VectorDB, HybridSearchParams, Filter};
+    use minimemory::{Config, Filter, HybridSearchParams, Metadata, VectorDB};
 
     fn generate_vector(seed: usize, dim: usize) -> Vec<f32> {
-        (0..dim).map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0).collect()
+        (0..dim)
+            .map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0)
+            .collect()
     }
 
     #[test]
     fn test_hybrid_search_combined() {
-        let db = VectorDB::with_fulltext(
-            Config::new(64),
-            vec!["content".into()],
-        ).unwrap();
+        let db = VectorDB::with_fulltext(Config::new(64), vec!["content".into()]).unwrap();
 
         for i in 0..10 {
             let mut meta = Metadata::new();
-            meta.insert("content", format!("Document about topic {} and Rust programming", i));
+            meta.insert(
+                "content",
+                format!("Document about topic {} and Rust programming", i),
+            );
             let v = generate_vector(i, 64);
-            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta)).unwrap();
+            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta))
+                .unwrap();
         }
 
         let query = generate_vector(0, 64);
@@ -1277,11 +1379,20 @@ mod hybrid_search_integration {
             db.insert(&format!("doc-{}", i), &v, Some(meta)).unwrap();
         }
 
-        let results = db.filter_search(Filter::eq("category", "even"), 10).unwrap();
+        let results = db
+            .filter_search(Filter::eq("category", "even"), 10)
+            .unwrap();
 
         assert_eq!(results.len(), 10);
         for r in &results {
-            let cat = r.metadata.as_ref().unwrap().get("category").unwrap().as_str().unwrap();
+            let cat = r
+                .metadata
+                .as_ref()
+                .unwrap()
+                .get("category")
+                .unwrap()
+                .as_str()
+                .unwrap();
             assert_eq!(cat, "even");
         }
     }
@@ -1298,20 +1409,26 @@ mod hybrid_search_integration {
         }
 
         let query = generate_vector(0, 64);
-        let results = db.search_with_filter(&query, 5, Filter::gt("score", 5.0f64)).unwrap();
+        let results = db
+            .search_with_filter(&query, 5, Filter::gt("score", 5.0f64))
+            .unwrap();
 
         for r in &results {
-            let score = r.metadata.as_ref().unwrap().get("score").unwrap().as_f64().unwrap();
+            let score = r
+                .metadata
+                .as_ref()
+                .unwrap()
+                .get("score")
+                .unwrap()
+                .as_f64()
+                .unwrap();
             assert!(score > 5.0);
         }
     }
 
     #[test]
     fn test_keyword_search_only() {
-        let db = VectorDB::with_fulltext(
-            Config::new(64),
-            vec!["text".into()],
-        ).unwrap();
+        let db = VectorDB::with_fulltext(Config::new(64), vec!["text".into()]).unwrap();
 
         let texts = [
             "The quick brown fox jumps",
@@ -1324,7 +1441,8 @@ mod hybrid_search_integration {
             let mut meta = Metadata::new();
             meta.insert("text", *text);
             let v = generate_vector(i, 64);
-            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta)).unwrap();
+            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta))
+                .unwrap();
         }
 
         let results = db.keyword_search("quick fox", 5).unwrap();

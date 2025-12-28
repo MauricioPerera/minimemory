@@ -30,12 +30,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    Config as RustConfig,
-    Distance as RustDistance,
-    IndexType as RustIndexType,
-    Metadata as RustMetadata,
-    VectorDB as RustVectorDB,
-    types::MetadataValue as RustMetadataValue,
+    types::MetadataValue as RustMetadataValue, Config as RustConfig, Distance as RustDistance,
+    IndexType as RustIndexType, Metadata as RustMetadata, VectorDB as RustVectorDB,
 };
 
 /// Opciones de configuración para VectorDB
@@ -79,10 +75,15 @@ impl VectorDB {
             "cosine" | "cos" => RustDistance::Cosine,
             "euclidean" | "l2" => RustDistance::Euclidean,
             "dot" | "dot_product" | "inner" => RustDistance::DotProduct,
-            d => return Err(Error::new(
-                Status::InvalidArg,
-                format!("Unknown distance: {}. Use 'cosine', 'euclidean', or 'dot'", d),
-            )),
+            d => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!(
+                        "Unknown distance: {}. Use 'cosine', 'euclidean', or 'dot'",
+                        d
+                    ),
+                ))
+            }
         };
 
         let index = match options.index.as_deref().unwrap_or("flat") {
@@ -91,10 +92,12 @@ impl VectorDB {
                 m: options.hnsw_m.unwrap_or(16) as usize,
                 ef_construction: options.hnsw_ef.unwrap_or(200) as usize,
             },
-            i => return Err(Error::new(
-                Status::InvalidArg,
-                format!("Unknown index: {}. Use 'flat' or 'hnsw'", i),
-            )),
+            i => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("Unknown index: {}. Use 'flat' or 'hnsw'", i),
+                ))
+            }
         };
 
         let config = RustConfig::new(options.dimensions as usize)
@@ -104,7 +107,9 @@ impl VectorDB {
         let db = RustVectorDB::new(config)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
-        Ok(Self { inner: Arc::new(db) })
+        Ok(Self {
+            inner: Arc::new(db),
+        })
     }
 
     /// Carga una base de datos desde archivo.
@@ -113,7 +118,9 @@ impl VectorDB {
         let db = RustVectorDB::open(&path)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
-        Ok(Self { inner: Arc::new(db) })
+        Ok(Self {
+            inner: Arc::new(db),
+        })
     }
 
     /// Inserta un vector en la base de datos.
@@ -137,7 +144,8 @@ impl VectorDB {
     pub fn search(&self, query: Vec<f64>, k: u32) -> Result<Vec<SearchResult>> {
         let query_f32: Vec<f32> = query.iter().map(|&x| x as f32).collect();
 
-        let results = self.inner
+        let results = self
+            .inner
             .search(&query_f32, k as usize)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
@@ -154,7 +162,11 @@ impl VectorDB {
     /// Obtiene un vector por su ID.
     #[napi]
     pub fn get(&self, id: String) -> Result<Option<Vec<f64>>> {
-        match self.inner.get(&id).map_err(|e| Error::new(Status::GenericFailure, e.to_string()))? {
+        match self
+            .inner
+            .get(&id)
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
+        {
             Some((vector, _)) => Ok(Some(vector.iter().map(|&x| x as f64).collect())),
             None => Ok(None),
         }

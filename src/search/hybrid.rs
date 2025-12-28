@@ -12,9 +12,10 @@ use crate::types::HybridSearchResult;
 use super::rrf::{weighted_reciprocal_rank_fusion, RankedResult, DEFAULT_RRF_K};
 
 /// Modo de búsqueda.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SearchMode {
     /// Solo búsqueda vectorial (similitud)
+    #[default]
     Vector,
     /// Solo búsqueda keyword (BM25)
     Keyword,
@@ -27,12 +28,6 @@ pub enum SearchMode {
     },
     /// Solo filtro de metadata (sin ranking por similitud)
     FilterOnly,
-}
-
-impl Default for SearchMode {
-    fn default() -> Self {
-        SearchMode::Vector
-    }
 }
 
 /// Parámetros de búsqueda híbrida.
@@ -74,11 +69,7 @@ impl HybridSearchParams {
     }
 
     /// Crea parámetros para búsqueda híbrida.
-    pub fn hybrid(
-        vector: Vec<f32>,
-        text: impl Into<String>,
-        k: usize,
-    ) -> Self {
+    pub fn hybrid(vector: Vec<f32>, text: impl Into<String>, k: usize) -> Self {
         Self {
             vector: Some(vector),
             text_query: Some(text.into()),
@@ -138,26 +129,21 @@ impl HybridSearch {
         distance: Distance,
     ) -> Result<Vec<HybridSearchResult>> {
         match &params.mode {
-            SearchMode::Vector => {
-                Self::vector_search(params, vector_index, storage, distance)
-            }
-            SearchMode::Keyword => {
-                Self::keyword_search(params, bm25_index, storage)
-            }
-            SearchMode::Hybrid { vector_weight, keyword_weight } => {
-                Self::hybrid_search(
-                    params,
-                    vector_index,
-                    bm25_index,
-                    storage,
-                    distance,
-                    *vector_weight,
-                    *keyword_weight,
-                )
-            }
-            SearchMode::FilterOnly => {
-                Self::filter_only_search(params, storage)
-            }
+            SearchMode::Vector => Self::vector_search(params, vector_index, storage, distance),
+            SearchMode::Keyword => Self::keyword_search(params, bm25_index, storage),
+            SearchMode::Hybrid {
+                vector_weight,
+                keyword_weight,
+            } => Self::hybrid_search(
+                params,
+                vector_index,
+                bm25_index,
+                storage,
+                distance,
+                *vector_weight,
+                *keyword_weight,
+            ),
+            SearchMode::FilterOnly => Self::filter_only_search(params, storage),
         }
     }
 
@@ -167,14 +153,13 @@ impl HybridSearch {
         storage: &dyn Storage,
         distance: Distance,
     ) -> Result<Vec<HybridSearchResult>> {
-        let query = params.vector.as_ref()
-            .ok_or_else(|| Error::InvalidConfig(
-                "Vector query required for vector search".into()
-            ))?;
+        let query = params.vector.as_ref().ok_or_else(|| {
+            Error::InvalidConfig("Vector query required for vector search".into())
+        })?;
 
         // Buscar más resultados si hay filtro (pre-filter approach)
         let search_k = if params.filter.is_some() {
-            params.k * 10  // Buscar 10x más para compensar filtrado
+            params.k * 10 // Buscar 10x más para compensar filtrado
         } else {
             params.k
         };
@@ -182,7 +167,8 @@ impl HybridSearch {
         let results = index.search(query, search_k, storage, distance)?;
 
         // Aplicar filtro
-        let filtered: Vec<_> = results.into_iter()
+        let filtered: Vec<_> = results
+            .into_iter()
             .filter(|r| {
                 if let Some(filter) = &params.filter {
                     FilterEvaluator::evaluate(filter, r.metadata.as_ref())
@@ -194,7 +180,7 @@ impl HybridSearch {
             .enumerate()
             .map(|(rank, r)| HybridSearchResult {
                 id: r.id,
-                score: r.distance,  // Menor = mejor
+                score: r.distance, // Menor = mejor
                 vector_distance: Some(r.distance),
                 bm25_score: None,
                 vector_rank: Some(rank),
@@ -211,15 +197,13 @@ impl HybridSearch {
         bm25_index: Option<&BM25Index>,
         storage: &dyn Storage,
     ) -> Result<Vec<HybridSearchResult>> {
-        let query = params.text_query.as_ref()
-            .ok_or_else(|| Error::InvalidConfig(
-                "Text query required for keyword search".into()
-            ))?;
+        let query = params
+            .text_query
+            .as_ref()
+            .ok_or_else(|| Error::InvalidConfig("Text query required for keyword search".into()))?;
 
         let index = bm25_index
-            .ok_or_else(|| Error::InvalidConfig(
-                "BM25 index required for keyword search".into()
-            ))?;
+            .ok_or_else(|| Error::InvalidConfig("BM25 index required for keyword search".into()))?;
 
         let search_k = if params.filter.is_some() {
             params.k * 10
@@ -241,7 +225,7 @@ impl HybridSearch {
 
                 hybrid_results.push(HybridSearchResult {
                     id: result.id,
-                    score: -result.score,  // Negativo para que menor = mejor (consistente con distance)
+                    score: -result.score, // Negativo para que menor = mejor (consistente con distance)
                     vector_distance: None,
                     bm25_score: Some(result.score),
                     vector_rank: None,
@@ -268,12 +252,13 @@ impl HybridSearch {
         keyword_weight: f32,
     ) -> Result<Vec<HybridSearchResult>> {
         // Obtener resultados de ambas búsquedas
-        let fetch_k = params.k * 3;  // Fetch más para RRF
+        let fetch_k = params.k * 3; // Fetch más para RRF
 
         // Vector search
         let vector_results = if let Some(query) = &params.vector {
             let results = vector_index.search(query, fetch_k, storage, distance)?;
-            results.into_iter()
+            results
+                .into_iter()
                 .enumerate()
                 .map(|(rank, r)| RankedResult {
                     id: r.id,
@@ -287,7 +272,8 @@ impl HybridSearch {
 
         // Keyword search
         let keyword_results = if let (Some(query), Some(index)) = (&params.text_query, bm25_index) {
-            index.search(query, fetch_k)
+            index
+                .search(query, fetch_k)
                 .into_iter()
                 .enumerate()
                 .map(|(rank, result)| RankedResult {
@@ -331,17 +317,19 @@ impl HybridSearch {
                     }
                 }
 
-                let (vec_rank, vec_dist) = vector_info.get(&id)
+                let (vec_rank, vec_dist) = vector_info
+                    .get(&id)
                     .map(|(r, d)| (Some(*r), Some(*d)))
                     .unwrap_or((None, None));
 
-                let (kw_rank, kw_score) = keyword_info.get(&id)
+                let (kw_rank, kw_score) = keyword_info
+                    .get(&id)
                     .map(|(r, s)| (Some(*r), Some(*s)))
                     .unwrap_or((None, None));
 
                 final_results.push(HybridSearchResult {
                     id,
-                    score: -rrf_score,  // Negativo para que menor = mejor
+                    score: -rrf_score, // Negativo para que menor = mejor
                     vector_distance: vec_dist,
                     bm25_score: kw_score,
                     vector_rank: vec_rank,
@@ -362,17 +350,18 @@ impl HybridSearch {
         params: &HybridSearchParams,
         storage: &dyn Storage,
     ) -> Result<Vec<HybridSearchResult>> {
-        let filter = params.filter.as_ref()
-            .ok_or_else(|| Error::InvalidConfig(
-                "Filter required for filter-only search".into()
-            ))?;
+        let filter = params
+            .filter
+            .as_ref()
+            .ok_or_else(|| Error::InvalidConfig("Filter required for filter-only search".into()))?;
 
-        let results: Vec<_> = storage.iter()
+        let results: Vec<_> = storage
+            .iter()
             .filter(|doc| FilterEvaluator::evaluate(filter, doc.metadata.as_ref()))
             .take(params.k)
             .map(|doc| HybridSearchResult {
                 id: doc.id,
-                score: 0.0,  // Sin ranking
+                score: 0.0, // Sin ranking
                 vector_distance: None,
                 bm25_score: None,
                 vector_rank: None,
@@ -403,8 +392,16 @@ mod tests {
         meta1.insert("title", "Rust Programming");
         meta1.insert("content", "Learn Rust systems programming");
         meta1.insert("category", "tech");
-        storage.insert("doc-1".into(), Some(vec![1.0, 0.0, 0.0]), Some(meta1.clone())).unwrap();
-        vector_index.add("doc-1", &[1.0, 0.0, 0.0], &*storage, Distance::Cosine).unwrap();
+        storage
+            .insert(
+                "doc-1".into(),
+                Some(vec![1.0, 0.0, 0.0]),
+                Some(meta1.clone()),
+            )
+            .unwrap();
+        vector_index
+            .add("doc-1", &[1.0, 0.0, 0.0], &*storage, Distance::Cosine)
+            .unwrap();
         bm25_index.add("doc-1", Some(&meta1)).unwrap();
 
         // Doc 2: About Python
@@ -412,8 +409,16 @@ mod tests {
         meta2.insert("title", "Python Guide");
         meta2.insert("content", "Python for beginners programming");
         meta2.insert("category", "tech");
-        storage.insert("doc-2".into(), Some(vec![0.0, 1.0, 0.0]), Some(meta2.clone())).unwrap();
-        vector_index.add("doc-2", &[0.0, 1.0, 0.0], &*storage, Distance::Cosine).unwrap();
+        storage
+            .insert(
+                "doc-2".into(),
+                Some(vec![0.0, 1.0, 0.0]),
+                Some(meta2.clone()),
+            )
+            .unwrap();
+        vector_index
+            .add("doc-2", &[0.0, 1.0, 0.0], &*storage, Distance::Cosine)
+            .unwrap();
         bm25_index.add("doc-2", Some(&meta2)).unwrap();
 
         // Doc 3: About Cooking (different category)
@@ -421,8 +426,16 @@ mod tests {
         meta3.insert("title", "Cooking Recipes");
         meta3.insert("content", "Delicious food recipes");
         meta3.insert("category", "food");
-        storage.insert("doc-3".into(), Some(vec![0.0, 0.0, 1.0]), Some(meta3.clone())).unwrap();
-        vector_index.add("doc-3", &[0.0, 0.0, 1.0], &*storage, Distance::Cosine).unwrap();
+        storage
+            .insert(
+                "doc-3".into(),
+                Some(vec![0.0, 0.0, 1.0]),
+                Some(meta3.clone()),
+            )
+            .unwrap();
+        vector_index
+            .add("doc-3", &[0.0, 0.0, 1.0], &*storage, Distance::Cosine)
+            .unwrap();
         bm25_index.add("doc-3", Some(&meta3)).unwrap();
 
         (storage, vector_index, bm25_index)
@@ -439,7 +452,8 @@ mod tests {
             None,
             storage.as_ref(),
             Distance::Euclidean,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "doc-1"); // Closest to query
@@ -457,7 +471,8 @@ mod tests {
             Some(bm25_index.as_ref()),
             storage.as_ref(),
             Distance::Euclidean,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "doc-1"); // Has "rust" and "programming"
@@ -479,7 +494,8 @@ mod tests {
             Some(bm25_index.as_ref()),
             storage.as_ref(),
             Distance::Euclidean,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(!results.is_empty());
         // Both doc-1 (rust keyword) and doc-2 (vector) should be in results
@@ -490,8 +506,7 @@ mod tests {
         let (storage, vector_index, _) = setup_test_data();
 
         let filter = Filter::eq("category", "tech");
-        let params = HybridSearchParams::vector(vec![0.5, 0.5, 0.0], 10)
-            .with_filter(filter);
+        let params = HybridSearchParams::vector(vec![0.5, 0.5, 0.0], 10).with_filter(filter);
 
         let results = HybridSearch::search(
             &params,
@@ -499,7 +514,8 @@ mod tests {
             None,
             storage.as_ref(),
             Distance::Euclidean,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should only return tech category (doc-1 and doc-2)
         assert_eq!(results.len(), 2);
@@ -521,7 +537,8 @@ mod tests {
             None,
             storage.as_ref(),
             Distance::Euclidean,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-3");

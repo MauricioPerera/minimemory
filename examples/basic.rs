@@ -36,10 +36,7 @@ fn main() -> minimemory::Result<()> {
 
     println!("Search results for query {:?}:", query);
     for result in &results {
-        println!(
-            "  - ID: {}, Distance: {:.4}",
-            result.id, result.distance
-        );
+        println!("  - ID: {}, Distance: {:.4}", result.id, result.distance);
         if let Some(ref meta) = result.metadata {
             if let Some(title) = meta.get("title") {
                 println!("    Title: {:?}", title);

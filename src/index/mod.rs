@@ -1,10 +1,10 @@
+mod bm25;
 mod flat;
 mod hnsw;
-mod bm25;
 
+pub use bm25::{BM25Index, BM25SearchResult, BM25Stats};
 pub use flat::FlatIndex;
 pub use hnsw::HNSWIndex;
-pub use bm25::{BM25Index, BM25SearchResult, BM25Stats};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,9 +14,10 @@ use crate::storage::Storage;
 use crate::types::SearchResult;
 
 /// Type of index to use for similarity search
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum IndexType {
     /// Flat index with brute-force search (exact results)
+    #[default]
     Flat,
     /// HNSW index for approximate nearest neighbor search
     HNSW {
@@ -25,12 +26,6 @@ pub enum IndexType {
         /// Size of dynamic candidate list during construction (default: 200)
         ef_construction: usize,
     },
-}
-
-impl Default for IndexType {
-    fn default() -> Self {
-        IndexType::Flat
-    }
 }
 
 impl IndexType {

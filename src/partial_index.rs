@@ -27,10 +27,10 @@
 //! let results = db.search_partial("tech_docs", &query_vector, 10).unwrap();
 //! ```
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::distance::Distance;
 use crate::error::{Error, Result};
@@ -167,8 +167,10 @@ impl PartialIndex {
         }
 
         // Almacenar en storage local y en el índice
-        self.storage.insert(id.to_string(), Some(vector.to_vec()), metadata.cloned())?;
-        self.index.add(id, vector, &self.storage, self.config.distance)?;
+        self.storage
+            .insert(id.to_string(), Some(vector.to_vec()), metadata.cloned())?;
+        self.index
+            .add(id, vector, &self.storage, self.config.distance)?;
         self.document_ids.write().push(id.to_string());
         Ok(true)
     }
@@ -183,7 +185,9 @@ impl PartialIndex {
 
     /// Busca los k vectores más cercanos en este índice parcial.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(VectorId, f32)>> {
-        let results = self.index.search(query, k, &self.storage, self.config.distance)?;
+        let results = self
+            .index
+            .search(query, k, &self.storage, self.config.distance)?;
         Ok(results.into_iter().map(|r| (r.id, r.distance)).collect())
     }
 
@@ -341,12 +345,7 @@ impl PartialIndexManager {
     /// Notifica la actualización de un documento.
     ///
     /// Actualiza el documento en los índices parciales correspondientes.
-    pub fn on_update(
-        &self,
-        id: &str,
-        vector: &[f32],
-        metadata: Option<&Metadata>,
-    ) -> Result<()> {
+    pub fn on_update(&self, id: &str, vector: &[f32], metadata: Option<&Metadata>) -> Result<()> {
         let indexes = self.indexes.read();
 
         for index in indexes.values() {
@@ -360,7 +359,12 @@ impl PartialIndexManager {
     }
 
     /// Busca en un índice parcial específico.
-    pub fn search(&self, index_name: &str, query: &[f32], k: usize) -> Result<Vec<(VectorId, f32)>> {
+    pub fn search(
+        &self,
+        index_name: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(VectorId, f32)>> {
         let indexes = self.indexes.read();
 
         match indexes.get(index_name) {
@@ -426,9 +430,15 @@ mod tests {
         let mut meta = Metadata::new();
         meta.insert("category", "tech");
 
-        index.try_add("doc1", &[1.0, 0.0, 0.0], Some(&meta)).unwrap();
-        index.try_add("doc2", &[0.0, 1.0, 0.0], Some(&meta)).unwrap();
-        index.try_add("doc3", &[0.0, 0.0, 1.0], Some(&meta)).unwrap();
+        index
+            .try_add("doc1", &[1.0, 0.0, 0.0], Some(&meta))
+            .unwrap();
+        index
+            .try_add("doc2", &[0.0, 1.0, 0.0], Some(&meta))
+            .unwrap();
+        index
+            .try_add("doc3", &[0.0, 0.0, 1.0], Some(&meta))
+            .unwrap();
 
         // Buscar
         let results = index.search(&[1.0, 0.1, 0.0], 2).unwrap();
@@ -468,12 +478,10 @@ mod tests {
 
     #[test]
     fn test_partial_index_with_complex_filter() {
-        let config = PartialIndexConfig::new(
-            Filter::and(vec![
-                Filter::eq("category", "tech"),
-                Filter::gt("score", 0.5f64),
-            ])
-        );
+        let config = PartialIndexConfig::new(Filter::and(vec![
+            Filter::eq("category", "tech"),
+            Filter::gt("score", 0.5f64),
+        ]));
         let index = PartialIndex::new("high_score_tech", config).unwrap();
 
         // Documento que cumple ambas condiciones

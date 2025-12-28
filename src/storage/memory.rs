@@ -26,8 +26,17 @@ impl Default for MemoryStorage {
 }
 
 impl Storage for MemoryStorage {
-    fn insert(&self, id: VectorId, vector: Option<Vec<f32>>, metadata: Option<Metadata>) -> Result<()> {
-        let doc = StoredVector { id: id.clone(), vector, metadata };
+    fn insert(
+        &self,
+        id: VectorId,
+        vector: Option<Vec<f32>>,
+        metadata: Option<Metadata>,
+    ) -> Result<()> {
+        let doc = StoredVector {
+            id: id.clone(),
+            vector,
+            metadata,
+        };
         self.vectors.write().insert(id, doc);
         Ok(())
     }
@@ -54,7 +63,8 @@ impl Storage for MemoryStorage {
     }
 
     fn iter_with_vectors(&self) -> Box<dyn Iterator<Item = StoredVector> + '_> {
-        let docs: Vec<StoredVector> = self.vectors
+        let docs: Vec<StoredVector> = self
+            .vectors
             .read()
             .values()
             .filter(|doc| doc.vector.is_some())
@@ -82,7 +92,9 @@ mod tests {
         let id = "test-1".to_string();
         let data = vec![1.0, 2.0, 3.0];
 
-        storage.insert(id.clone(), Some(data.clone()), None).unwrap();
+        storage
+            .insert(id.clone(), Some(data.clone()), None)
+            .unwrap();
 
         let result = storage.get(&id).unwrap().unwrap();
         assert_eq!(result.id, id);
@@ -109,11 +121,15 @@ mod tests {
         let storage = MemoryStorage::new();
 
         // Document with vector
-        storage.insert("vec-1".to_string(), Some(vec![1.0]), None).unwrap();
+        storage
+            .insert("vec-1".to_string(), Some(vec![1.0]), None)
+            .unwrap();
         // Document without vector (metadata only)
         storage.insert("doc-1".to_string(), None, None).unwrap();
         // Another document with vector
-        storage.insert("vec-2".to_string(), Some(vec![2.0]), None).unwrap();
+        storage
+            .insert("vec-2".to_string(), Some(vec![2.0]), None)
+            .unwrap();
 
         let with_vectors: Vec<_> = storage.iter_with_vectors().collect();
         assert_eq!(with_vectors.len(), 2);
@@ -139,8 +155,12 @@ mod tests {
     fn test_len_and_clear() {
         let storage = MemoryStorage::new();
 
-        storage.insert("a".to_string(), Some(vec![1.0]), None).unwrap();
-        storage.insert("b".to_string(), Some(vec![2.0]), None).unwrap();
+        storage
+            .insert("a".to_string(), Some(vec![1.0]), None)
+            .unwrap();
+        storage
+            .insert("b".to_string(), Some(vec![2.0]), None)
+            .unwrap();
         assert_eq!(storage.len(), 2);
 
         storage.clear();

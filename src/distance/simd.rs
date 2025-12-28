@@ -291,7 +291,12 @@ mod tests {
         let scalar = euclidean_scalar(&a, &b);
         let simd = euclidean_distance(&a, &b);
 
-        assert!((scalar - simd).abs() < 1e-4, "scalar={}, simd={}", scalar, simd);
+        assert!(
+            (scalar - simd).abs() < 1e-4,
+            "scalar={}, simd={}",
+            scalar,
+            simd
+        );
     }
 
     #[test]

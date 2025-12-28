@@ -261,7 +261,10 @@ impl Config {
     /// let config = Config::new(4096)
     ///     .with_quantization(QuantizationType::Binary);
     /// ```
-    pub fn with_quantization(mut self, quantization: crate::quantization::QuantizationType) -> Self {
+    pub fn with_quantization(
+        mut self,
+        quantization: crate::quantization::QuantizationType,
+    ) -> Self {
         self.quantization = quantization;
         self
     }

@@ -46,9 +46,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::{
-    Config as RustConfig,
-    Distance as RustDistance,
-    IndexType as RustIndexType,
+    Config as RustConfig, Distance as RustDistance, IndexType as RustIndexType,
     VectorDB as RustVectorDB,
 };
 
@@ -110,7 +108,10 @@ pub extern "C" fn mmdb_new(
 
     let idx = match idx_str {
         "flat" => RustIndexType::Flat,
-        "hnsw" => RustIndexType::HNSW { m: 16, ef_construction: 200 },
+        "hnsw" => RustIndexType::HNSW {
+            m: 16,
+            ef_construction: 200,
+        },
         _ => return ptr::null_mut(),
     };
 
@@ -119,7 +120,9 @@ pub extern "C" fn mmdb_new(
         .with_index(idx);
 
     match RustVectorDB::new(config) {
-        Ok(db) => Box::into_raw(Box::new(MiniMemoryDB { inner: Arc::new(db) })),
+        Ok(db) => Box::into_raw(Box::new(MiniMemoryDB {
+            inner: Arc::new(db),
+        })),
         Err(_) => ptr::null_mut(),
     }
 }
@@ -157,9 +160,7 @@ pub extern "C" fn mmdb_insert(
         }
     };
 
-    let vec: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(vector, len as usize).to_vec()
-    };
+    let vec: Vec<f32> = unsafe { std::slice::from_raw_parts(vector, len as usize).to_vec() };
 
     match db.inner.insert(id_str, &vec, None) {
         Ok(_) => 0,
@@ -191,9 +192,7 @@ pub extern "C" fn mmdb_search(
     }
 
     let db = unsafe { &*db };
-    let query_vec: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(query, len as usize).to_vec()
-    };
+    let query_vec: Vec<f32> = unsafe { std::slice::from_raw_parts(query, len as usize).to_vec() };
 
     match db.inner.search(&query_vec, k as usize) {
         Ok(results) => {
@@ -334,7 +333,11 @@ pub extern "C" fn mmdb_contains(db: *mut MiniMemoryDB, id: *const c_char) -> c_i
         }
     };
 
-    if db.inner.contains(id_str) { 1 } else { 0 }
+    if db.inner.contains(id_str) {
+        1
+    } else {
+        0
+    }
 }
 
 /// Guarda la base de datos a un archivo.
@@ -379,7 +382,9 @@ pub extern "C" fn mmdb_load(path: *const c_char) -> *mut MiniMemoryDB {
     };
 
     match RustVectorDB::open(path_str) {
-        Ok(db) => Box::into_raw(Box::new(MiniMemoryDB { inner: Arc::new(db) })),
+        Ok(db) => Box::into_raw(Box::new(MiniMemoryDB {
+            inner: Arc::new(db),
+        })),
         Err(_) => ptr::null_mut(),
     }
 }

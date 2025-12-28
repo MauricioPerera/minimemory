@@ -42,8 +42,8 @@ use crate::query::Filter;
 use crate::replication::ChangeLog;
 use crate::search::HybridSearchParams;
 use crate::types::{Metadata, SearchResult, VectorId};
-use crate::VectorDB;
 use crate::Config;
+use crate::VectorDB;
 
 // ============================================================================
 // Tipos de Memoria
@@ -479,11 +479,10 @@ impl AgentMemory {
     /// Crea una nueva memoria de agente
     pub fn new(config: MemoryConfig) -> Result<Self> {
         let db_config = if config.use_hnsw {
-            Config::new(config.embedding_dimensions)
-                .with_index(crate::IndexType::HNSW {
-                    m: config.hnsw_m,
-                    ef_construction: config.hnsw_ef,
-                })
+            Config::new(config.embedding_dimensions).with_index(crate::IndexType::HNSW {
+                m: config.hnsw_m,
+                ef_construction: config.hnsw_ef,
+            })
         } else {
             Config::new(config.embedding_dimensions)
         };
@@ -671,7 +670,10 @@ impl AgentMemory {
             meta.insert("project", project.as_str());
         }
 
-        let embed_text = format!("{}\n{}\n{}", snippet.description, snippet.code, snippet.use_case);
+        let embed_text = format!(
+            "{}\n{}\n{}",
+            snippet.description, snippet.code, snippet.use_case
+        );
         let embedding = self.embed(&embed_text);
 
         self.db.insert(&id, &embedding, Some(meta))?;
@@ -767,7 +769,10 @@ impl AgentMemory {
     /// Busca memorias similares con embedding externo
     pub fn recall_by_embedding(&self, embedding: &[f32], k: usize) -> Result<Vec<MemoryRecall>> {
         let results = self.db.search(embedding, k)?;
-        Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| self.to_recall_from_search(r))
+            .collect())
     }
 
     /// Busca experiencias similares (solo episodios)
@@ -780,7 +785,10 @@ impl AgentMemory {
             Filter::eq("type", MemoryType::Episode.as_str()),
         )?;
 
-        Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| self.to_recall_from_search(r))
+            .collect())
     }
 
     /// Busca código similar
@@ -793,11 +801,18 @@ impl AgentMemory {
             Filter::eq("type", MemoryType::CodeSnippet.as_str()),
         )?;
 
-        Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| self.to_recall_from_search(r))
+            .collect())
     }
 
     /// Busca soluciones a errores
-    pub fn recall_error_solutions(&self, error_message: &str, k: usize) -> Result<Vec<MemoryRecall>> {
+    pub fn recall_error_solutions(
+        &self,
+        error_message: &str,
+        k: usize,
+    ) -> Result<Vec<MemoryRecall>> {
         let embedding = self.embed(error_message);
 
         let results = self.db.search_with_filter(
@@ -806,7 +821,10 @@ impl AgentMemory {
             Filter::eq("type", MemoryType::ErrorSolution.as_str()),
         )?;
 
-        Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| self.to_recall_from_search(r))
+            .collect())
     }
 
     /// Busca por keywords exactos
@@ -825,7 +843,10 @@ impl AgentMemory {
             if self.db.has_partial_index(&index_name) {
                 let embedding = self.embed(query);
                 let results = self.db.search_partial(&index_name, &embedding, k)?;
-                return Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect());
+                return Ok(results
+                    .into_iter()
+                    .map(|r| self.to_recall_from_search(r))
+                    .collect());
             }
         }
 
@@ -837,7 +858,10 @@ impl AgentMemory {
                 k,
                 Filter::eq("project", project.as_str()),
             )?;
-            return Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect());
+            return Ok(results
+                .into_iter()
+                .map(|r| self.to_recall_from_search(r))
+                .collect());
         }
 
         self.recall_similar(query, k)
@@ -856,7 +880,10 @@ impl AgentMemory {
             ]),
         )?;
 
-        Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| self.to_recall_from_search(r))
+            .collect())
     }
 
     /// Busca experiencias fallidas para evitar errores
@@ -872,7 +899,10 @@ impl AgentMemory {
             ]),
         )?;
 
-        Ok(results.into_iter().map(|r| self.to_recall_from_search(r)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| self.to_recall_from_search(r))
+            .collect())
     }
 
     // ========================================================================
@@ -958,30 +988,30 @@ impl AgentMemory {
         let total = self.db.len();
 
         // Contar por tipo (simplificado)
-        let episodes = self.db.filter_search(
-            Filter::eq("type", "episode"),
-            total,
-        )?.len();
+        let episodes = self
+            .db
+            .filter_search(Filter::eq("type", "episode"), total)?
+            .len();
 
-        let code_snippets = self.db.filter_search(
-            Filter::eq("type", "code_snippet"),
-            total,
-        )?.len();
+        let code_snippets = self
+            .db
+            .filter_search(Filter::eq("type", "code_snippet"), total)?
+            .len();
 
-        let api_knowledge = self.db.filter_search(
-            Filter::eq("type", "api_knowledge"),
-            total,
-        )?.len();
+        let api_knowledge = self
+            .db
+            .filter_search(Filter::eq("type", "api_knowledge"), total)?
+            .len();
 
-        let error_solutions = self.db.filter_search(
-            Filter::eq("type", "error_solution"),
-            total,
-        )?.len();
+        let error_solutions = self
+            .db
+            .filter_search(Filter::eq("type", "error_solution"), total)?
+            .len();
 
-        let patterns = self.db.filter_search(
-            Filter::eq("type", "pattern"),
-            total,
-        )?.len();
+        let patterns = self
+            .db
+            .filter_search(Filter::eq("type", "pattern"), total)?
+            .len();
 
         Ok(MemoryStats {
             total_entries: total,
@@ -990,11 +1020,11 @@ impl AgentMemory {
             api_knowledge,
             error_solutions,
             patterns,
-            projects: self.db.list_partial_indexes()
+            projects: self
+                .db
+                .list_partial_indexes()
                 .iter()
-                .filter_map(|idx| {
-                    idx.name.strip_prefix("project_").map(String::from)
-                })
+                .filter_map(|idx| idx.name.strip_prefix("project_").map(String::from))
                 .collect(),
         })
     }
@@ -1019,10 +1049,8 @@ impl AgentMemory {
         for id in all_ids {
             if let Some((_, Some(meta))) = self.db.get(&id)? {
                 if let Some(crate::MetadataValue::Int(ts)) = meta.get("timestamp") {
-                    if (*ts as u64) < cutoff {
-                        if self.db.delete(&id)? {
-                            deleted += 1;
-                        }
+                    if (*ts as u64) < cutoff && self.db.delete(&id)? {
+                        deleted += 1;
                     }
                 }
             }
@@ -1093,12 +1121,14 @@ mod tests {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        let id = memory.learn_task(
-            "Implement login",
-            "fn login() { ... }",
-            TaskOutcome::Success,
-            vec!["Use bcrypt for passwords"],
-        ).unwrap();
+        let id = memory
+            .learn_task(
+                "Implement login",
+                "fn login() { ... }",
+                TaskOutcome::Success,
+                vec!["Use bcrypt for passwords"],
+            )
+            .unwrap();
 
         assert!(id.starts_with("episode-"));
         assert_eq!(memory.db.len(), 1);
@@ -1109,15 +1139,17 @@ mod tests {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        let id = memory.learn_code(CodeSnippet {
-            code: "fn hello() { println!(\"Hello\"); }".to_string(),
-            description: "Simple hello function".to_string(),
-            language: Language::Rust,
-            dependencies: vec![],
-            use_case: "Greeting".to_string(),
-            quality_score: 0.9,
-            tags: vec!["example".to_string()],
-        }).unwrap();
+        let id = memory
+            .learn_code(CodeSnippet {
+                code: "fn hello() { println!(\"Hello\"); }".to_string(),
+                description: "Simple hello function".to_string(),
+                language: Language::Rust,
+                dependencies: vec![],
+                use_case: "Greeting".to_string(),
+                quality_score: 0.9,
+                tags: vec!["example".to_string()],
+            })
+            .unwrap();
 
         assert!(id.starts_with("code-"));
     }
@@ -1127,14 +1159,16 @@ mod tests {
         let config = MemoryConfig::small();
         let memory = AgentMemory::new(config).unwrap();
 
-        let id = memory.learn_error_solution(ErrorSolution {
-            error_message: "cannot borrow as mutable".to_string(),
-            error_type: "E0596".to_string(),
-            root_cause: "Missing mut keyword".to_string(),
-            solution: "Add mut to variable declaration".to_string(),
-            fixed_code: Some("let mut x = 5;".to_string()),
-            language: Language::Rust,
-        }).unwrap();
+        let id = memory
+            .learn_error_solution(ErrorSolution {
+                error_message: "cannot borrow as mutable".to_string(),
+                error_type: "E0596".to_string(),
+                root_cause: "Missing mut keyword".to_string(),
+                solution: "Add mut to variable declaration".to_string(),
+                fixed_code: Some("let mut x = 5;".to_string()),
+                language: Language::Rust,
+            })
+            .unwrap();
 
         assert!(id.starts_with("error-"));
     }

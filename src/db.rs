@@ -188,7 +188,11 @@ impl VectorDB {
         for stored in vectors {
             let id = stored.id.clone();
             // Insertar en storage primero
-            storage.insert(stored.id.clone(), stored.vector.clone(), stored.metadata.clone())?;
+            storage.insert(
+                stored.id.clone(),
+                stored.vector.clone(),
+                stored.metadata.clone(),
+            )?;
             // Solo indexar en HNSW/Flat si tiene vector
             if let Some(ref vec) = stored.vector {
                 index.add(&id, vec, &*storage, config.distance)?;
@@ -264,8 +268,10 @@ impl VectorDB {
             return Err(Error::AlreadyExists(id));
         }
 
-        self.storage.insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        self.index.add(&id, vector, &*self.storage, self.config.distance)?;
+        self.storage
+            .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
+        self.index
+            .add(&id, vector, &*self.storage, self.config.distance)?;
 
         // Indexar en BM25 si está habilitado
         if let Some(ref bm25) = self.bm25_index {
@@ -273,7 +279,9 @@ impl VectorDB {
         }
 
         // Añadir a índices parciales que coincidan
-        let _ = self.partial_indexes.on_insert(&id, vector, metadata.as_ref());
+        let _ = self
+            .partial_indexes
+            .on_insert(&id, vector, metadata.as_ref());
 
         Ok(())
     }
@@ -333,11 +341,13 @@ impl VectorDB {
         }
 
         let vec_data = vector.map(|v| v.to_vec());
-        self.storage.insert(id.clone(), vec_data, metadata.clone())?;
+        self.storage
+            .insert(id.clone(), vec_data, metadata.clone())?;
 
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
-            self.index.add(&id, vec, &*self.storage, self.config.distance)?;
+            self.index
+                .add(&id, vec, &*self.storage, self.config.distance)?;
             // Añadir a índices parciales que coincidan
             let _ = self.partial_indexes.on_insert(&id, vec, metadata.as_ref());
         }
@@ -462,8 +472,10 @@ impl VectorDB {
         let id = id.into();
         self.delete(&id)?;
 
-        self.storage.insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        self.index.add(&id, vector, &*self.storage, self.config.distance)?;
+        self.storage
+            .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
+        self.index
+            .add(&id, vector, &*self.storage, self.config.distance)?;
 
         // Re-indexar en BM25 si está habilitado
         if let Some(ref bm25) = self.bm25_index {
@@ -638,7 +650,12 @@ impl VectorDB {
     ///     println!("{}: {:.4}", result.id, result.distance);
     /// }
     /// ```
-    pub fn search_partial(&self, index_name: &str, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+    pub fn search_partial(
+        &self,
+        index_name: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<SearchResult>> {
         // Validar dimensiones
         if query.len() != self.config.dimensions {
             return Err(Error::DimensionMismatch {
@@ -671,12 +688,15 @@ impl VectorDB {
     ///
     /// Número de documentos añadidos al índice.
     pub fn rebuild_partial_index(&self, index_name: &str) -> Result<usize> {
-        let index = self.partial_indexes.get_index(index_name)
+        let index = self
+            .partial_indexes
+            .get_index(index_name)
             .ok_or_else(|| Error::NotFound(index_name.to_string()))?;
 
         // Obtener todos los documentos con vector
         let all_ids = self.storage.ids();
-        let documents: Vec<_> = all_ids.iter()
+        let documents: Vec<_> = all_ids
+            .iter()
             .filter_map(|id| {
                 if let Ok(Some(sv)) = self.storage.get(id) {
                     sv.vector.map(|vec| (id.clone(), vec, sv.metadata))
@@ -687,9 +707,9 @@ impl VectorDB {
             .collect();
 
         // Reconstruir
-        let docs_iter = documents.iter().map(|(id, vec, meta)| {
-            (id.as_str(), vec.as_slice(), meta.as_ref())
-        });
+        let docs_iter = documents
+            .iter()
+            .map(|(id, vec, meta)| (id.as_str(), vec.as_slice(), meta.as_ref()));
 
         index.rebuild(docs_iter)
     }
@@ -754,11 +774,13 @@ impl VectorDB {
         metadata.insert("content", chunk.content.as_str());
 
         let vec_data = vector.map(|v| v.to_vec());
-        self.storage.insert(chunk.id.clone(), vec_data, Some(metadata.clone()))?;
+        self.storage
+            .insert(chunk.id.clone(), vec_data, Some(metadata.clone()))?;
 
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
-            self.index.add(&chunk.id, vec, &*self.storage, self.config.distance)?;
+            self.index
+                .add(&chunk.id, vec, &*self.storage, self.config.distance)?;
         }
 
         // Indexar en BM25 si está habilitado
@@ -1164,7 +1186,8 @@ mod tests {
         meta.insert("title", "Post with embedding");
 
         // Insert with vector
-        db.insert_document("post-2", Some(&[0.1, 0.2, 0.3]), Some(meta)).unwrap();
+        db.insert_document("post-2", Some(&[0.1, 0.2, 0.3]), Some(meta))
+            .unwrap();
 
         let (vec, _) = db.get("post-2").unwrap().unwrap();
         assert_eq!(vec, Some(vec![0.1, 0.2, 0.3]));
@@ -1182,8 +1205,10 @@ mod tests {
         meta2.insert("title", "Python Guide");
         meta2.insert("content", "Python for beginners");
 
-        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1)).unwrap();
-        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2)).unwrap();
+        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1))
+            .unwrap();
+        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2))
+            .unwrap();
 
         let results = db.keyword_search("rust programming", 10).unwrap();
 
@@ -1203,10 +1228,14 @@ mod tests {
         meta2.insert("title", "Food Recipe");
         meta2.insert("category", "food");
 
-        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1)).unwrap();
-        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2)).unwrap();
+        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1))
+            .unwrap();
+        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2))
+            .unwrap();
 
-        let results = db.filter_search(Filter::eq("category", "tech"), 10).unwrap();
+        let results = db
+            .filter_search(Filter::eq("category", "tech"), 10)
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
@@ -1226,11 +1255,9 @@ mod tests {
         db.insert("doc-2", &[0.9, 0.1, 0.0], Some(meta2)).unwrap();
 
         // Search for vectors close to [1.0, 0.0, 0.0] but only in "tech" category
-        let results = db.search_with_filter(
-            &[1.0, 0.0, 0.0],
-            10,
-            Filter::eq("category", "tech"),
-        ).unwrap();
+        let results = db
+            .search_with_filter(&[1.0, 0.0, 0.0], 10, Filter::eq("category", "tech"))
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
@@ -1274,7 +1301,8 @@ mod tests {
         let mut meta2 = Metadata::new();
         meta2.insert("title", "Doc without vector");
 
-        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1)).unwrap();
+        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1))
+            .unwrap();
         db.insert_document("doc-2", None, Some(meta2)).unwrap();
 
         // Vector search should only find doc-1

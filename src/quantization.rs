@@ -16,8 +16,8 @@
 //! | Int8 | 4x | ~99% | Faster |
 //! | Binary | 32x | ~90-95% | Much faster |
 
-use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 
 /// Type of quantization to apply to vectors
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -59,7 +59,11 @@ impl ScalarQuantParams {
     pub fn new(min_val: f32, max_val: f32) -> Self {
         let range = max_val - min_val;
         let scale = if range > 0.0 { 255.0 / range } else { 1.0 };
-        Self { min_val, max_val, scale }
+        Self {
+            min_val,
+            max_val,
+            scale,
+        }
     }
 
     /// Learn parameters from a set of vectors
@@ -73,8 +77,12 @@ impl ScalarQuantParams {
 
         for vec in vectors {
             for &val in *vec {
-                if val < min_val { min_val = val; }
-                if val > max_val { max_val = val; }
+                if val < min_val {
+                    min_val = val;
+                }
+                if val > max_val {
+                    max_val = val;
+                }
             }
         }
 
@@ -108,10 +116,7 @@ pub enum QuantizedVector {
         params: ScalarQuantParams,
     },
     /// Binary quantized (packed bits)
-    Binary {
-        data: Vec<u64>,
-        dimensions: usize,
-    },
+    Binary { data: Vec<u64>, dimensions: usize },
 }
 
 impl QuantizedVector {
@@ -128,7 +133,9 @@ impl QuantizedVector {
     pub fn memory_bytes(&self) -> usize {
         match self {
             QuantizedVector::Full(v) => v.len() * 4,
-            QuantizedVector::Int8 { data, .. } => data.len() + std::mem::size_of::<ScalarQuantParams>(),
+            QuantizedVector::Int8 { data, .. } => {
+                data.len() + std::mem::size_of::<ScalarQuantParams>()
+            }
             QuantizedVector::Binary { data, .. } => data.len() * 8,
         }
     }
@@ -215,17 +222,13 @@ impl Quantizer {
             QuantizationType::None => Ok(QuantizedVector::Full(vector.to_vec())),
 
             QuantizationType::Int8 => {
-                let params = self.scalar_params.as_ref()
-                    .cloned()
-                    .unwrap_or_default();
-                let data: Vec<i8> = vector.iter()
-                    .map(|&v| params.quantize_value(v))
-                    .collect();
+                let params = self.scalar_params.as_ref().cloned().unwrap_or_default();
+                let data: Vec<i8> = vector.iter().map(|&v| params.quantize_value(v)).collect();
                 Ok(QuantizedVector::Int8 { data, params })
             }
 
             QuantizationType::Binary => {
-                let num_words = (self.dimensions + 63) / 64;
+                let num_words = self.dimensions.div_ceil(64);
                 let mut data = vec![0u64; num_words];
 
                 for (i, &val) in vector.iter().enumerate() {
@@ -236,7 +239,10 @@ impl Quantizer {
                     }
                 }
 
-                Ok(QuantizedVector::Binary { data, dimensions: self.dimensions })
+                Ok(QuantizedVector::Binary {
+                    data,
+                    dimensions: self.dimensions,
+                })
             }
         }
     }
@@ -360,10 +366,21 @@ pub fn quantized_distance(
             })
         }
 
-        (QuantizedVector::Binary { data: da, dimensions: dim_a },
-         QuantizedVector::Binary { data: db, dimensions: dim_b }) => {
+        (
+            QuantizedVector::Binary {
+                data: da,
+                dimensions: dim_a,
+            },
+            QuantizedVector::Binary {
+                data: db,
+                dimensions: dim_b,
+            },
+        ) => {
             if dim_a != dim_b {
-                return Err(Error::DimensionMismatch { expected: *dim_a, got: *dim_b });
+                return Err(Error::DimensionMismatch {
+                    expected: *dim_a,
+                    got: *dim_b,
+                });
             }
             Ok(match distance_type {
                 Distance::Cosine => cosine_distance_binary(da, db, *dim_a),
@@ -415,7 +432,9 @@ mod tests {
     #[test]
     fn test_binary_quantization() {
         let quantizer = Quantizer::binary(128);
-        let vector: Vec<f32> = (0..128).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let vector: Vec<f32> = (0..128)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
 
         let quantized = quantizer.quantize(&vector).unwrap();
 

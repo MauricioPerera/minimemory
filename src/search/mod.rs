@@ -23,8 +23,8 @@
 //!     .with_filter(Filter::eq("category", "tech"));
 //! ```
 
-mod rrf;
 mod hybrid;
+mod rrf;
 
-pub use rrf::{reciprocal_rank_fusion, weighted_reciprocal_rank_fusion, RankedResult};
 pub use hybrid::{HybridSearch, HybridSearchParams, SearchMode};
+pub use rrf::{reciprocal_rank_fusion, weighted_reciprocal_rank_fusion, RankedResult};

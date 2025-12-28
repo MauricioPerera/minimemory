@@ -1,6 +1,6 @@
-mod memory;
 pub mod disk;
 pub mod format;
+mod memory;
 
 pub use memory::MemoryStorage;
 
@@ -18,7 +18,12 @@ pub trait Storage: Send + Sync {
     /// * `id` - Unique identifier for the document
     /// * `vector` - Optional vector embedding (None for metadata-only documents)
     /// * `metadata` - Optional metadata associated with the document
-    fn insert(&self, id: VectorId, vector: Option<Vec<f32>>, metadata: Option<Metadata>) -> Result<()>;
+    fn insert(
+        &self,
+        id: VectorId,
+        vector: Option<Vec<f32>>,
+        metadata: Option<Metadata>,
+    ) -> Result<()>;
 
     /// Get a document by ID
     fn get(&self, id: &str) -> Result<Option<StoredVector>>;

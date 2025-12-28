@@ -75,7 +75,10 @@ impl PartialOrd for Candidate {
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
         // Invertido para min-heap (menor distancia = mayor prioridad)
-        other.distance.partial_cmp(&self.distance).unwrap_or(Ordering::Equal)
+        other
+            .distance
+            .partial_cmp(&self.distance)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -98,7 +101,10 @@ impl PartialOrd for MaxCandidate {
 
 impl Ord for MaxCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.distance.partial_cmp(&other.0.distance).unwrap_or(Ordering::Equal)
+        self.0
+            .distance
+            .partial_cmp(&other.0.distance)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -163,7 +169,10 @@ impl HNSWIndex {
                 if let Ok(Some(stored)) = storage.get(id) {
                     if let Some(vec) = &stored.vector {
                         let dist = distance_fn.calculate(query, vec);
-                        let candidate = Candidate { idx: ep, distance: dist };
+                        let candidate = Candidate {
+                            idx: ep,
+                            distance: dist,
+                        };
                         candidates.push(candidate.clone());
                         result.push(MaxCandidate(candidate));
                     }
@@ -199,7 +208,10 @@ impl HNSWIndex {
                                     };
 
                                     if should_add {
-                                        let candidate = Candidate { idx: neighbor_idx, distance: dist };
+                                        let candidate = Candidate {
+                                            idx: neighbor_idx,
+                                            distance: dist,
+                                        };
                                         candidates.push(candidate.clone());
                                         result.push(MaxCandidate(candidate));
 
@@ -221,13 +233,13 @@ impl HNSWIndex {
     }
 
     /// Selecciona los mejores vecinos usando heurística simple
-    fn select_neighbors(
-        &self,
-        candidates: Vec<Candidate>,
-        m: usize,
-    ) -> Vec<usize> {
+    fn select_neighbors(&self, candidates: Vec<Candidate>, m: usize) -> Vec<usize> {
         let mut sorted: Vec<_> = candidates;
-        sorted.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
         sorted.truncate(m);
         sorted.into_iter().map(|c| c.idx).collect()
     }
@@ -243,7 +255,9 @@ impl HNSWIndex {
     ) {
         // Asegurar que el nivel existe
         while inner.levels.len() <= level {
-            inner.levels.push(Level { neighbors: Vec::new() });
+            inner.levels.push(Level {
+                neighbors: Vec::new(),
+            });
         }
 
         // Asegurar espacio para el nodo
@@ -303,7 +317,9 @@ impl Index for HNSWIndex {
 
             // Crear niveles vacíos
             for _ in 0..=node_level {
-                inner.levels.push(Level { neighbors: Vec::new() });
+                inner.levels.push(Level {
+                    neighbors: Vec::new(),
+                });
             }
             for level in &mut inner.levels {
                 level.neighbors.push(Vec::new());
@@ -314,7 +330,9 @@ impl Index for HNSWIndex {
 
         // Asegurar que hay suficientes niveles
         while inner.levels.len() <= node_level {
-            inner.levels.push(Level { neighbors: Vec::new() });
+            inner.levels.push(Level {
+                neighbors: Vec::new(),
+            });
         }
 
         // Expandir neighbors para el nuevo nodo en cada nivel
@@ -399,9 +417,7 @@ impl Index for HNSWIndex {
             // Actualizar entry point si es necesario
             if inner.entry_point == Some(idx) {
                 // Buscar un nuevo entry point
-                inner.entry_point = inner.id_to_idx.values()
-                    .find(|&&i| i != idx)
-                    .copied();
+                inner.entry_point = inner.id_to_idx.values().find(|&&i| i != idx).copied();
             }
 
             inner.id_to_idx.remove(id);
@@ -463,18 +479,20 @@ impl Index for HNSWIndex {
             .take(k)
             .filter_map(|c| {
                 let id = inner.idx_to_id.get(c.idx)?.clone();
-                storage.get(&id).ok().flatten().map(|stored| {
-                    SearchResult {
-                        id,
-                        distance: c.distance,
-                        metadata: stored.metadata,
-                    }
+                storage.get(&id).ok().flatten().map(|stored| SearchResult {
+                    id,
+                    distance: c.distance,
+                    metadata: stored.metadata,
                 })
             })
             .collect();
 
         // Ordenar por distancia
-        results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
         results.truncate(k);
 
         Ok(results)
@@ -491,10 +509,14 @@ impl Index for HNSWIndex {
         inner.max_level = 0;
 
         // Recopilar IDs y vectores
-        let entries: Vec<(String, Vec<f32>)> = storage.ids()
+        let entries: Vec<(String, Vec<f32>)> = storage
+            .ids()
             .into_iter()
             .filter_map(|id| {
-                storage.get(&id).ok().flatten()
+                storage
+                    .get(&id)
+                    .ok()
+                    .flatten()
                     .and_then(|stored| stored.vector.map(|v| (id.clone(), v)))
             })
             .collect();
@@ -548,7 +570,9 @@ mod tests {
         ];
 
         for (id, data) in &vectors {
-            storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
+            storage
+                .insert(id.to_string(), Some(data.clone()), None)
+                .unwrap();
             index.add(id, data, &storage, Distance::Euclidean).unwrap();
         }
 
@@ -568,12 +592,16 @@ mod tests {
         ];
 
         for (id, data) in &vectors {
-            storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
+            storage
+                .insert(id.to_string(), Some(data.clone()), None)
+                .unwrap();
             index.add(id, data, &storage, Distance::Euclidean).unwrap();
         }
 
         let query = vec![1.0, 0.0, 0.0];
-        let results = index.search(&query, 2, &storage, Distance::Euclidean).unwrap();
+        let results = index
+            .search(&query, 2, &storage, Distance::Euclidean)
+            .unwrap();
 
         // Debería encontrar "a" primero (distancia 0)
         assert!(!results.is_empty());
@@ -585,11 +613,19 @@ mod tests {
         let storage = MemoryStorage::new();
         let index = HNSWIndex::new(4, 20);
 
-        storage.insert("a".to_string(), Some(vec![1.0, 0.0]), None).unwrap();
-        storage.insert("b".to_string(), Some(vec![0.0, 1.0]), None).unwrap();
+        storage
+            .insert("a".to_string(), Some(vec![1.0, 0.0]), None)
+            .unwrap();
+        storage
+            .insert("b".to_string(), Some(vec![0.0, 1.0]), None)
+            .unwrap();
 
-        index.add("a", &[1.0, 0.0], &storage, Distance::Euclidean).unwrap();
-        index.add("b", &[0.0, 1.0], &storage, Distance::Euclidean).unwrap();
+        index
+            .add("a", &[1.0, 0.0], &storage, Distance::Euclidean)
+            .unwrap();
+        index
+            .add("b", &[0.0, 1.0], &storage, Distance::Euclidean)
+            .unwrap();
 
         assert_eq!(index.len(), 2);
 

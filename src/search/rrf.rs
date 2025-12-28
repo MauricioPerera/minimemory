@@ -9,8 +9,8 @@
 //!
 //! donde k es una constante (típicamente 60) que suaviza el ranking.
 
-use std::collections::HashMap;
 use crate::types::VectorId;
+use std::collections::HashMap;
 
 /// Constante k por defecto para RRF (valor estándar de la literatura)
 pub const DEFAULT_RRF_K: f32 = 60.0;
@@ -124,15 +124,39 @@ mod tests {
     #[test]
     fn test_rrf_basic() {
         let list1 = vec![
-            RankedResult { id: "a".into(), rank: 0, original_score: 1.0 },
-            RankedResult { id: "b".into(), rank: 1, original_score: 0.9 },
-            RankedResult { id: "c".into(), rank: 2, original_score: 0.8 },
+            RankedResult {
+                id: "a".into(),
+                rank: 0,
+                original_score: 1.0,
+            },
+            RankedResult {
+                id: "b".into(),
+                rank: 1,
+                original_score: 0.9,
+            },
+            RankedResult {
+                id: "c".into(),
+                rank: 2,
+                original_score: 0.8,
+            },
         ];
 
         let list2 = vec![
-            RankedResult { id: "b".into(), rank: 0, original_score: 5.0 },
-            RankedResult { id: "a".into(), rank: 1, original_score: 4.0 },
-            RankedResult { id: "d".into(), rank: 2, original_score: 3.0 },
+            RankedResult {
+                id: "b".into(),
+                rank: 0,
+                original_score: 5.0,
+            },
+            RankedResult {
+                id: "a".into(),
+                rank: 1,
+                original_score: 4.0,
+            },
+            RankedResult {
+                id: "d".into(),
+                rank: 2,
+                original_score: 3.0,
+            },
         ];
 
         let results = reciprocal_rank_fusion(vec![list1, list2], 60.0);
@@ -155,8 +179,16 @@ mod tests {
     #[test]
     fn test_rrf_single_list() {
         let list = vec![
-            RankedResult { id: "a".into(), rank: 0, original_score: 1.0 },
-            RankedResult { id: "b".into(), rank: 1, original_score: 0.5 },
+            RankedResult {
+                id: "a".into(),
+                rank: 0,
+                original_score: 1.0,
+            },
+            RankedResult {
+                id: "b".into(),
+                rank: 1,
+                original_score: 0.5,
+            },
         ];
 
         let results = reciprocal_rank_fusion(vec![list], 60.0);
@@ -169,19 +201,20 @@ mod tests {
 
     #[test]
     fn test_weighted_rrf() {
-        let list1 = vec![
-            RankedResult { id: "a".into(), rank: 0, original_score: 1.0 },
-        ];
+        let list1 = vec![RankedResult {
+            id: "a".into(),
+            rank: 0,
+            original_score: 1.0,
+        }];
 
-        let list2 = vec![
-            RankedResult { id: "b".into(), rank: 0, original_score: 1.0 },
-        ];
+        let list2 = vec![RankedResult {
+            id: "b".into(),
+            rank: 0,
+            original_score: 1.0,
+        }];
 
         // Give much more weight to list2
-        let results = weighted_reciprocal_rank_fusion(
-            vec![(list1, 0.1), (list2, 0.9)],
-            60.0
-        );
+        let results = weighted_reciprocal_rank_fusion(vec![(list1, 0.1), (list2, 0.9)], 60.0);
 
         assert_eq!(results.len(), 2);
         // 'b' should rank higher due to higher weight

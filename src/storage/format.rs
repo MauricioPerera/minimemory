@@ -115,7 +115,9 @@ impl FileHeader {
         reader.read_exact(&mut magic)?;
 
         if &magic != MAGIC {
-            return Err(Error::InvalidConfig("Invalid file format: bad magic bytes".into()));
+            return Err(Error::InvalidConfig(
+                "Invalid file format: bad magic bytes".into(),
+            ));
         }
 
         let mut buf4 = [0u8; 4];

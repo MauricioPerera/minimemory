@@ -69,9 +69,7 @@ pub fn save_vectors<P: AsRef<Path>>(
 }
 
 /// Carga vectores desde un archivo .mmdb
-pub fn load_vectors<P: AsRef<Path>>(
-    path: P,
-) -> Result<(FileHeader, Vec<StoredVector>)> {
+pub fn load_vectors<P: AsRef<Path>>(path: P) -> Result<(FileHeader, Vec<StoredVector>)> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
 

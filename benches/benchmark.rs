@@ -11,10 +11,10 @@
 //! - hybrid: Búsqueda híbrida (vector + keyword)
 //! - memory_traits: Sistema de memoria genérica con prioridades
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use minimemory::{Config, Distance, IndexType, VectorDB, Metadata, Filter};
-use minimemory::memory_traits::{GenericMemory, Priority};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use minimemory::memory_traits::presets::SoftwareDevelopment;
+use minimemory::memory_traits::{GenericMemory, Priority};
+use minimemory::{Config, Distance, Filter, IndexType, Metadata, VectorDB};
 
 fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {
     (0..dim)
@@ -44,37 +44,29 @@ fn bench_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert");
 
     for dim in [64, 128, 384, 768].iter() {
-        group.bench_with_input(
-            BenchmarkId::new("flat", dim),
-            dim,
-            |b, &dim| {
-                b.iter_with_setup(
-                    || VectorDB::new(Config::new(dim)).unwrap(),
-                    |db| {
-                        for i in 0..100 {
-                            let v = generate_vector(dim, i);
-                            db.insert(format!("v{}", i), &v, None).unwrap();
-                        }
-                    },
-                )
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("flat", dim), dim, |b, &dim| {
+            b.iter_with_setup(
+                || VectorDB::new(Config::new(dim)).unwrap(),
+                |db| {
+                    for i in 0..100 {
+                        let v = generate_vector(dim, i);
+                        db.insert(format!("v{}", i), &v, None).unwrap();
+                    }
+                },
+            )
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("hnsw", dim),
-            dim,
-            |b, &dim| {
-                b.iter_with_setup(
-                    || VectorDB::new(Config::new(dim).with_index(IndexType::hnsw())).unwrap(),
-                    |db| {
-                        for i in 0..100 {
-                            let v = generate_vector(dim, i);
-                            db.insert(format!("v{}", i), &v, None).unwrap();
-                        }
-                    },
-                )
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("hnsw", dim), dim, |b, &dim| {
+            b.iter_with_setup(
+                || VectorDB::new(Config::new(dim).with_index(IndexType::hnsw())).unwrap(),
+                |db| {
+                    for i in 0..100 {
+                        let v = generate_vector(dim, i);
+                        db.insert(format!("v{}", i), &v, None).unwrap();
+                    }
+                },
+            )
+        });
     }
 
     group.finish();
@@ -114,21 +106,13 @@ fn bench_search(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("flat", format!("{}x{}", size, dim)),
             &(&db_flat, &query),
-            |b, (db, q)| {
-                b.iter(|| {
-                    black_box(db.search(q, 10).unwrap())
-                })
-            },
+            |b, (db, q)| b.iter(|| black_box(db.search(q, 10).unwrap())),
         );
 
         group.bench_with_input(
             BenchmarkId::new("hnsw", format!("{}x{}", size, dim)),
             &(&db_hnsw, &query),
-            |b, (db, q)| {
-                b.iter(|| {
-                    black_box(db.search(q, 10).unwrap())
-                })
-            },
+            |b, (db, q)| b.iter(|| black_box(db.search(q, 10).unwrap())),
         );
     }
 
@@ -149,31 +133,19 @@ fn bench_distance(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("cosine", dim),
             &(&a, &b),
-            |bench, (a, b)| {
-                bench.iter(|| {
-                    black_box(Distance::Cosine.calculate(a, b))
-                })
-            },
+            |bench, (a, b)| bench.iter(|| black_box(Distance::Cosine.calculate(a, b))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("euclidean", dim),
             &(&a, &b),
-            |bench, (a, b)| {
-                bench.iter(|| {
-                    black_box(Distance::Euclidean.calculate(a, b))
-                })
-            },
+            |bench, (a, b)| bench.iter(|| black_box(Distance::Euclidean.calculate(a, b))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("dot_product", dim),
             &(&a, &b),
-            |bench, (a, b)| {
-                bench.iter(|| {
-                    black_box(Distance::DotProduct.calculate(a, b))
-                })
-            },
+            |bench, (a, b)| bench.iter(|| black_box(Distance::DotProduct.calculate(a, b))),
         );
     }
 
@@ -203,25 +175,15 @@ fn bench_persistence(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("save", size),
             &(&db, &path),
-            |b, (db, path)| {
-                b.iter(|| {
-                    db.save(path).unwrap()
-                })
-            },
+            |b, (db, path)| b.iter(|| db.save(path).unwrap()),
         );
 
         // Guardar para benchmark de load
         db.save(&path).unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::new("open", size),
-            &path,
-            |b, path| {
-                b.iter(|| {
-                    black_box(VectorDB::open(path).unwrap())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("open", size), &path, |b, path| {
+            b.iter(|| black_box(VectorDB::open(path).unwrap()))
+        });
 
         fs::remove_file(&path).ok();
     }
@@ -238,23 +200,44 @@ fn bench_bm25(c: &mut Criterion) {
 
     // Sample documents for full-text search
     let documents = vec![
-        ("doc1", "Rust programming language systems programming memory safety"),
-        ("doc2", "Python machine learning data science artificial intelligence"),
-        ("doc3", "JavaScript web development frontend React Angular Vue"),
-        ("doc4", "Database SQL PostgreSQL MySQL performance optimization"),
-        ("doc5", "Kubernetes Docker containers orchestration microservices"),
-        ("doc6", "Security authentication authorization JWT tokens encryption"),
+        (
+            "doc1",
+            "Rust programming language systems programming memory safety",
+        ),
+        (
+            "doc2",
+            "Python machine learning data science artificial intelligence",
+        ),
+        (
+            "doc3",
+            "JavaScript web development frontend React Angular Vue",
+        ),
+        (
+            "doc4",
+            "Database SQL PostgreSQL MySQL performance optimization",
+        ),
+        (
+            "doc5",
+            "Kubernetes Docker containers orchestration microservices",
+        ),
+        (
+            "doc6",
+            "Security authentication authorization JWT tokens encryption",
+        ),
         ("doc7", "API REST GraphQL endpoints HTTP web services"),
-        ("doc8", "Testing unit tests integration tests TDD BDD coverage"),
-        ("doc9", "Git version control branching merging collaboration"),
+        (
+            "doc8",
+            "Testing unit tests integration tests TDD BDD coverage",
+        ),
+        (
+            "doc9",
+            "Git version control branching merging collaboration",
+        ),
         ("doc10", "Cloud AWS Azure GCP infrastructure serverless"),
     ];
 
     for size in [10, 100, 500].iter() {
-        let db = VectorDB::with_fulltext(
-            Config::new(128),
-            vec!["content".into()],
-        ).unwrap();
+        let db = VectorDB::with_fulltext(Config::new(128), vec!["content".into()]).unwrap();
 
         // Insert documents
         for i in 0..*size {
@@ -262,18 +245,13 @@ fn bench_bm25(c: &mut Criterion) {
             let mut meta = Metadata::new();
             meta.insert("content", format!("{} variant {}", content, i));
             let v = generate_vector(128, i);
-            db.insert_document(&format!("{}_{}", id, i), Some(&v), Some(meta)).unwrap();
+            db.insert_document(&format!("{}_{}", id, i), Some(&v), Some(meta))
+                .unwrap();
         }
 
-        group.bench_with_input(
-            BenchmarkId::new("keyword_search", size),
-            &db,
-            |b, db| {
-                b.iter(|| {
-                    black_box(db.keyword_search("programming Rust", 10).unwrap())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("keyword_search", size), &db, |b, db| {
+            b.iter(|| black_box(db.keyword_search("programming Rust", 10).unwrap()))
+        });
     }
 
     group.finish();
@@ -288,65 +266,56 @@ fn bench_hybrid(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("hybrid");
 
-    let db = VectorDB::with_fulltext(
-        Config::new(128),
-        vec!["content".into()],
-    ).unwrap();
+    let db = VectorDB::with_fulltext(Config::new(128), vec!["content".into()]).unwrap();
 
     // Insert 500 documents with vectors and metadata
     for i in 0..500 {
         let mut meta = Metadata::new();
-        meta.insert("content", format!("Document about {} topic {}",
-            if i % 3 == 0 { "Rust programming" }
-            else if i % 3 == 1 { "Python machine learning" }
-            else { "JavaScript web development" },
-            i
-        ));
+        meta.insert(
+            "content",
+            format!(
+                "Document about {} topic {}",
+                if i % 3 == 0 {
+                    "Rust programming"
+                } else if i % 3 == 1 {
+                    "Python machine learning"
+                } else {
+                    "JavaScript web development"
+                },
+                i
+            ),
+        );
         meta.insert("category", if i % 2 == 0 { "tech" } else { "science" });
         meta.insert("score", (i % 100) as f64 / 100.0);
 
         let v = generate_normalized_vector(128, i);
-        db.insert_document(&format!("doc_{}", i), Some(&v), Some(meta)).unwrap();
+        db.insert_document(&format!("doc_{}", i), Some(&v), Some(meta))
+            .unwrap();
     }
 
     let query = generate_normalized_vector(128, 9999);
 
     // Vector-only search
     group.bench_function("vector_only_500", |b| {
-        b.iter(|| {
-            black_box(db.search(&query, 10).unwrap())
-        })
+        b.iter(|| black_box(db.search(&query, 10).unwrap()))
     });
 
     // Keyword-only search
     group.bench_function("keyword_only_500", |b| {
-        b.iter(|| {
-            black_box(db.keyword_search("Rust programming", 10).unwrap())
-        })
+        b.iter(|| black_box(db.keyword_search("Rust programming", 10).unwrap()))
     });
 
     // Hybrid search (vector + keyword)
     group.bench_function("hybrid_500", |b| {
-        let params = HybridSearchParams::hybrid(
-            query.clone(),
-            "Rust programming",
-            10,
-        );
-        b.iter(|| {
-            black_box(db.hybrid_search(params.clone()).unwrap())
-        })
+        let params = HybridSearchParams::hybrid(query.clone(), "Rust programming", 10);
+        b.iter(|| black_box(db.hybrid_search(params.clone()).unwrap()))
     });
 
     // Hybrid with filter
     group.bench_function("hybrid_filtered_500", |b| {
-        let params = HybridSearchParams::hybrid(
-            query.clone(),
-            "Rust programming",
-            10,
-        ).with_filter(Filter::eq("category", "tech"));
-        b.iter(|| {
-            black_box(db.hybrid_search(params.clone()).unwrap())
-        })
+        let params = HybridSearchParams::hybrid(query.clone(), "Rust programming", 10)
+            .with_filter(Filter::eq("category", "tech"));
+        b.iter(|| black_box(db.hybrid_search(params.clone()).unwrap()))
     });
 
     group.finish();
@@ -381,7 +350,8 @@ fn bench_memory_traits(c: &mut Criterion) {
                         &format!("Fixed bug in module {}", i),
                         "Bug fix for authentication issue",
                         "success",
-                    ).unwrap();
+                    )
+                    .unwrap();
                 }
             },
         )
@@ -398,43 +368,43 @@ fn bench_memory_traits(c: &mut Criterion) {
             2 => Priority::High,
             _ => Priority::Critical,
         };
-        memory_filled.learn_with_priority(
-            &format!("task_{}", i),
-            emb,
-            &format!("Task content {}", i),
-            &format!("Description for task {}", i),
-            if i % 2 == 0 { "success" } else { "failure" },
-            priority,
-        ).unwrap();
+        memory_filled
+            .learn_with_priority(
+                &format!("task_{}", i),
+                emb,
+                &format!("Task content {}", i),
+                &format!("Description for task {}", i),
+                if i % 2 == 0 { "success" } else { "failure" },
+                priority,
+            )
+            .unwrap();
     }
 
     let query = generate_normalized_vector(dim, 9999);
 
     // Benchmark: recall
     group.bench_function("recall_k10", |b| {
-        b.iter(|| {
-            black_box(memory_filled.recall(&query, 10).unwrap())
-        })
+        b.iter(|| black_box(memory_filled.recall(&query, 10).unwrap()))
     });
 
     // Benchmark: recall_critical
     group.bench_function("recall_critical", |b| {
-        b.iter(|| {
-            black_box(memory_filled.recall_critical(&query, 10).unwrap())
-        })
+        b.iter(|| black_box(memory_filled.recall_critical(&query, 10).unwrap()))
     });
 
     // Benchmark: recall_high_priority
     group.bench_function("recall_high_priority", |b| {
-        b.iter(|| {
-            black_box(memory_filled.recall_high_priority(&query, 10).unwrap())
-        })
+        b.iter(|| black_box(memory_filled.recall_high_priority(&query, 10).unwrap()))
     });
 
     // Benchmark: recall_by_keywords
     group.bench_function("recall_by_keywords", |b| {
         b.iter(|| {
-            black_box(memory_filled.recall_by_keywords("task content", 10).unwrap())
+            black_box(
+                memory_filled
+                    .recall_by_keywords("task content", 10)
+                    .unwrap(),
+            )
         })
     });
 
@@ -462,7 +432,16 @@ fn bench_filters(c: &mut Criterion) {
     // Insert documents with varied metadata
     for i in 0..1000 {
         let mut meta = Metadata::new();
-        meta.insert("category", if i % 3 == 0 { "tech" } else if i % 3 == 1 { "science" } else { "art" });
+        meta.insert(
+            "category",
+            if i % 3 == 0 {
+                "tech"
+            } else if i % 3 == 1 {
+                "science"
+            } else {
+                "art"
+            },
+        );
         meta.insert("score", (i % 100) as f64 / 100.0);
         meta.insert("active", i % 2 == 0);
         meta.insert("priority", if i % 4 == 0 { "critical" } else { "normal" });
@@ -476,38 +455,47 @@ fn bench_filters(c: &mut Criterion) {
     // Simple equality filter
     group.bench_function("filter_eq_1000", |b| {
         b.iter(|| {
-            black_box(db.search_with_filter(&query, 10, Filter::eq("category", "tech")).unwrap())
+            black_box(
+                db.search_with_filter(&query, 10, Filter::eq("category", "tech"))
+                    .unwrap(),
+            )
         })
     });
 
     // Numeric comparison filter
     group.bench_function("filter_gt_1000", |b| {
         b.iter(|| {
-            black_box(db.search_with_filter(&query, 10, Filter::gt("score", 0.5f64)).unwrap())
+            black_box(
+                db.search_with_filter(&query, 10, Filter::gt("score", 0.5f64))
+                    .unwrap(),
+            )
         })
     });
 
     // Combined AND filter
     group.bench_function("filter_and_1000", |b| {
         b.iter(|| {
-            black_box(db.search_with_filter(
-                &query,
-                10,
-                Filter::and(vec![
-                    Filter::eq("category", "tech"),
-                    Filter::eq("active", true)
-                ])
-            ).unwrap())
+            black_box(
+                db.search_with_filter(
+                    &query,
+                    10,
+                    Filter::and(vec![
+                        Filter::eq("category", "tech"),
+                        Filter::eq("active", true),
+                    ]),
+                )
+                .unwrap(),
+            )
         })
     });
 
     // Filter-only search (no vector)
     group.bench_function("filter_search_1000", |b| {
         b.iter(|| {
-            black_box(db.filter_search(
-                Filter::eq("priority", "critical"),
-                10
-            ).unwrap())
+            black_box(
+                db.filter_search(Filter::eq("priority", "critical"), 10)
+                    .unwrap(),
+            )
         })
     });
 

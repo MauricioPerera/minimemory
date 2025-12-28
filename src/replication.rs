@@ -207,13 +207,7 @@ impl ChangeLog {
         metadata: Option<Metadata>,
     ) -> u64 {
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let entry = ChangeEntry::insert(
-            seq,
-            &self.instance_id,
-            doc_id,
-            vector.to_vec(),
-            metadata,
-        );
+        let entry = ChangeEntry::insert(seq, &self.instance_id, doc_id, vector.to_vec(), metadata);
         self.entries.write().push(entry);
         self.maybe_compact();
         seq
@@ -227,13 +221,7 @@ impl ChangeLog {
         metadata: Option<Metadata>,
     ) -> u64 {
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let entry = ChangeEntry::update(
-            seq,
-            &self.instance_id,
-            doc_id,
-            vector.to_vec(),
-            metadata,
-        );
+        let entry = ChangeEntry::update(seq, &self.instance_id, doc_id, vector.to_vec(), metadata);
         self.entries.write().push(entry);
         self.maybe_compact();
         seq
@@ -498,13 +486,15 @@ impl ReplicationManager {
         let mut states = self.states.write();
 
         // Obtener o crear estado de replicación
-        let state = states.entry(remote_id.to_string()).or_insert(ReplicationState {
-            local_id: local_log.instance_id().to_string(),
-            remote_id: remote_id.to_string(),
-            last_synced_sequence: 0,
-            last_sync_time: current_timestamp(),
-            changes_applied: 0,
-        });
+        let state = states
+            .entry(remote_id.to_string())
+            .or_insert(ReplicationState {
+                local_id: local_log.instance_id().to_string(),
+                remote_id: remote_id.to_string(),
+                last_synced_sequence: 0,
+                last_sync_time: current_timestamp(),
+                changes_applied: 0,
+            });
 
         // Filtrar cambios ya sincronizados
         let new_changes: Vec<_> = remote_changes

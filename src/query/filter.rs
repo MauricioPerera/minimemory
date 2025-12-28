@@ -1,7 +1,7 @@
 //! Filtros de metadata con operadores lógicos y soporte para dot notation.
 
-use crate::types::{Metadata, MetadataValue};
 use super::FilterOp;
+use crate::types::{Metadata, MetadataValue};
 
 /// Filtro de metadata con operadores lógicos.
 ///
@@ -230,18 +230,14 @@ impl FilterEvaluator {
                 let value = Self::get_nested_value(metadata, field);
                 op.evaluate(value)
             }
-            Filter::And(filters) => {
-                filters.iter().all(|f| Self::evaluate(f, metadata))
-            }
+            Filter::And(filters) => filters.iter().all(|f| Self::evaluate(f, metadata)),
             Filter::Or(filters) => {
                 if filters.is_empty() {
                     return true; // Empty OR is vacuously true
                 }
                 filters.iter().any(|f| Self::evaluate(f, metadata))
             }
-            Filter::Not(filter) => {
-                !Self::evaluate(filter, metadata)
-            }
+            Filter::Not(filter) => !Self::evaluate(filter, metadata),
         }
     }
 
@@ -255,7 +251,10 @@ impl FilterEvaluator {
     /// # Arguments
     /// * `metadata` - La metadata del documento
     /// * `path` - El path al valor (e.g., "author.name")
-    fn get_nested_value<'a>(metadata: Option<&'a Metadata>, path: &str) -> Option<&'a MetadataValue> {
+    fn get_nested_value<'a>(
+        metadata: Option<&'a Metadata>,
+        path: &str,
+    ) -> Option<&'a MetadataValue> {
         let metadata = metadata?;
         let parts: Vec<&str> = path.split('.').collect();
 
@@ -299,16 +298,23 @@ mod tests {
 
     fn create_nested_metadata() -> Metadata {
         let mut author = HashMap::new();
-        author.insert("name".to_string(), MetadataValue::String("Juan".to_string()));
+        author.insert(
+            "name".to_string(),
+            MetadataValue::String("Juan".to_string()),
+        );
         author.insert("age".to_string(), MetadataValue::Int(30));
 
         let mut meta = Metadata::new();
         meta.insert("title", "Nested Document");
-        meta.fields.insert("author".to_string(), MetadataValue::Map(author));
-        meta.fields.insert("tags".to_string(), MetadataValue::List(vec![
-            MetadataValue::String("rust".to_string()),
-            MetadataValue::String("programming".to_string()),
-        ]));
+        meta.fields
+            .insert("author".to_string(), MetadataValue::Map(author));
+        meta.fields.insert(
+            "tags".to_string(),
+            MetadataValue::List(vec![
+                MetadataValue::String("rust".to_string()),
+                MetadataValue::String("programming".to_string()),
+            ]),
+        );
         meta
     }
 

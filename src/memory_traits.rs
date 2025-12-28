@@ -43,16 +43,16 @@
 //! memory.learn("greeting", embedding, "User prefers informal tone", "positive")?;
 //! ```
 
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::Result;
 use crate::types::{Metadata, VectorId};
-use crate::VectorDB;
 use crate::Config;
 use crate::Filter;
+use crate::VectorDB;
 
 // ============================================================================
 // Core Traits
@@ -160,8 +160,10 @@ pub trait DomainPreset: Send + Sync + 'static {
 /// Nivel de transferibilidad del conocimiento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum TransferLevel {
     /// Solo aplica a esta instancia especifica.
+    #[default]
     Instance = 1,
     /// Aplica al mismo contexto (lenguaje, tono, etc.).
     Context = 2,
@@ -209,12 +211,6 @@ impl TransferLevel {
     }
 }
 
-impl Default for TransferLevel {
-    fn default() -> Self {
-        Self::Instance
-    }
-}
-
 // ============================================================================
 // Priority System (Hibrido)
 // ============================================================================
@@ -222,10 +218,12 @@ impl Default for TransferLevel {
 /// Nivel de prioridad base (manual).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum Priority {
     /// Prioridad minima, puede ser olvidado.
     Low = 1,
     /// Prioridad normal, comportamiento por defecto.
+    #[default]
     Normal = 2,
     /// Prioridad alta, preferido en recall.
     High = 3,
@@ -263,12 +261,6 @@ impl Priority {
             Self::High => 0.75,
             Self::Critical => 1.0,
         }
-    }
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Normal
     }
 }
 
@@ -489,13 +481,7 @@ impl PriorityWeights {
     }
 
     /// Calcula score combinado de prioridad.
-    pub fn calculate_score(
-        &self,
-        base: f32,
-        frequency: f32,
-        usefulness: f32,
-        recency: f32,
-    ) -> f32 {
+    pub fn calculate_score(&self, base: f32, frequency: f32, usefulness: f32, recency: f32) -> f32 {
         (self.base_priority * base
             + self.frequency * frequency
             + self.usefulness * usefulness
@@ -623,7 +609,8 @@ impl<P: DomainPreset> GenericMemory<P> {
     pub fn new(dimensions: usize) -> Result<Self> {
         let config = Config::new(dimensions);
         let db = VectorDB::with_fulltext(config, vec!["content".into(), "description".into()])?;
-        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) = P::create();
+        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) =
+            P::create();
 
         Ok(Self {
             db,
@@ -645,7 +632,8 @@ impl<P: DomainPreset> GenericMemory<P> {
     /// Crea con configuracion personalizada.
     pub fn with_config(config: Config) -> Result<Self> {
         let db = VectorDB::with_fulltext(config, vec!["content".into(), "description".into()])?;
-        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) = P::create();
+        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) =
+            P::create();
 
         Ok(Self {
             db,
@@ -722,7 +710,9 @@ impl<P: DomainPreset> GenericMemory<P> {
         outcome: &str,
     ) -> Result<VectorId> {
         // Calcular prioridad automatica
-        let priority = self.priority_calculator.calculate(description, content, outcome);
+        let priority = self
+            .priority_calculator
+            .calculate(description, content, outcome);
         self.learn_with_priority(id, embedding, content, description, outcome, priority)
     }
 
@@ -773,7 +763,7 @@ impl<P: DomainPreset> GenericMemory<P> {
         }
 
         // Clasificar dominio automaticamente si no esta establecido
-        if ctx.as_ref().map_or(true, |c| c.domain.is_empty()) {
+        if ctx.as_ref().is_none_or(|c| c.domain.is_empty()) {
             let domain = self.domain_classifier.classify(content);
             meta.insert("domain", domain.as_str());
         }
@@ -828,10 +818,7 @@ impl<P: DomainPreset> GenericMemory<P> {
             "nuestra",
         ];
 
-        if instance_patterns
-            .iter()
-            .any(|p| content_lower.contains(p))
-        {
+        if instance_patterns.iter().any(|p| content_lower.contains(p)) {
             return TransferLevel::Instance;
         }
 
@@ -878,7 +865,12 @@ impl<P: DomainPreset> GenericMemory<P> {
                     .unwrap_or(Priority::Normal);
 
                 // Obtener o crear estadisticas de uso
-                let usage = self.usage_stats.read().get(&id).cloned().unwrap_or_default();
+                let usage = self
+                    .usage_stats
+                    .read()
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
 
                 // Calcular score de prioridad hibrido
                 let priority_score = self.calculate_priority_score(&usage, priority);
@@ -942,7 +934,9 @@ impl<P: DomainPreset> GenericMemory<P> {
         let recency = recency_score(usage.staleness_seconds());
 
         // Combinar con pesos
-        let raw_score = self.priority_weights.calculate_score(base, frequency, usefulness, recency);
+        let raw_score = self
+            .priority_weights
+            .calculate_score(base, frequency, usefulness, recency);
 
         // Aplicar decay temporal
         let age = usage.age_seconds();
@@ -990,7 +984,9 @@ impl<P: DomainPreset> GenericMemory<P> {
 
         // Ponderar segun nivel
         match level {
-            TransferLevel::Instance => instance_match * 0.6 + context_compat * 0.2 + domain_compat * 0.2,
+            TransferLevel::Instance => {
+                instance_match * 0.6 + context_compat * 0.2 + domain_compat * 0.2
+            }
             TransferLevel::Context => context_compat * 0.5 + domain_compat * 0.3 + 0.2,
             TransferLevel::Domain => domain_compat * 0.6 + 0.4,
             TransferLevel::Universal => 1.0,
@@ -1011,7 +1007,12 @@ impl<P: DomainPreset> GenericMemory<P> {
             .and_then(Priority::from_str)
             .unwrap_or(Priority::Normal);
 
-        let usage = self.usage_stats.read().get(&id).cloned().unwrap_or_default();
+        let usage = self
+            .usage_stats
+            .read()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
         let priority_score = self.calculate_priority_score(&usage, priority);
         let relevance = 1.0 - distance;
 
@@ -1035,7 +1036,11 @@ impl<P: DomainPreset> GenericMemory<P> {
     }
 
     /// Recall solo de conocimiento universal.
-    pub fn recall_universal(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
+    pub fn recall_universal(
+        &self,
+        query_embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<GenericRecall>> {
         let results = self.db.search_with_filter(
             query_embedding,
             k,
@@ -1109,11 +1114,9 @@ impl<P: DomainPreset> GenericMemory<P> {
 
     /// Recall solo de prioridad critica.
     pub fn recall_critical(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
-        let results = self.db.search_with_filter(
-            query_embedding,
-            k,
-            Filter::eq("priority", "critical"),
-        )?;
+        let results =
+            self.db
+                .search_with_filter(query_embedding, k, Filter::eq("priority", "critical"))?;
 
         Ok(results
             .into_iter()
@@ -1125,7 +1128,11 @@ impl<P: DomainPreset> GenericMemory<P> {
     }
 
     /// Recall de prioridad alta o critica.
-    pub fn recall_high_priority(&self, query_embedding: &[f32], k: usize) -> Result<Vec<GenericRecall>> {
+    pub fn recall_high_priority(
+        &self,
+        query_embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<GenericRecall>> {
         let results = self.db.search_with_filter(
             query_embedding,
             k * 2,
@@ -1168,7 +1175,12 @@ impl<P: DomainPreset> GenericMemory<P> {
                     .and_then(Priority::from_str)
                     .unwrap_or(Priority::Normal);
                 let id = r.id.clone();
-                let usage = self.usage_stats.read().get(&id).cloned().unwrap_or_default();
+                let usage = self
+                    .usage_stats
+                    .read()
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
                 let priority_score = self.calculate_priority_score(&usage, priority);
 
                 let concepts = meta
@@ -1199,7 +1211,11 @@ impl<P: DomainPreset> GenericMemory<P> {
         let avg_usefulness = if usage_stats.is_empty() {
             0.0
         } else {
-            usage_stats.values().map(|u| u.usefulness_score()).sum::<f32>() / usage_stats.len() as f32
+            usage_stats
+                .values()
+                .map(|u| u.usefulness_score())
+                .sum::<f32>()
+                / usage_stats.len() as f32
         };
 
         MemoryStats {
@@ -1268,23 +1284,41 @@ pub mod presets {
                 "web_backend".into()
             } else if lower.contains("react") || lower.contains("vue") || lower.contains("css") {
                 "web_frontend".into()
-            } else if lower.contains("cli") || lower.contains("terminal") || lower.contains("command") {
+            } else if lower.contains("cli")
+                || lower.contains("terminal")
+                || lower.contains("command")
+            {
                 "cli".into()
             } else if lower.contains("pandas") || lower.contains("numpy") || lower.contains("ml") {
                 "data_science".into()
-            } else if lower.contains("docker") || lower.contains("kubernetes") || lower.contains("ci/cd") {
+            } else if lower.contains("docker")
+                || lower.contains("kubernetes")
+                || lower.contains("ci/cd")
+            {
                 "devops".into()
-            } else if lower.contains("auth") || lower.contains("security") || lower.contains("encrypt") {
+            } else if lower.contains("auth")
+                || lower.contains("security")
+                || lower.contains("encrypt")
+            {
                 "security".into()
-            } else if lower.contains("sql") || lower.contains("database") || lower.contains("query") {
+            } else if lower.contains("sql") || lower.contains("database") || lower.contains("query")
+            {
                 "database".into()
-            } else if lower.contains("android") || lower.contains("ios") || lower.contains("mobile") {
+            } else if lower.contains("android") || lower.contains("ios") || lower.contains("mobile")
+            {
                 "mobile".into()
-            } else if lower.contains("kernel") || lower.contains("memory") || lower.contains("syscall") {
+            } else if lower.contains("kernel")
+                || lower.contains("memory")
+                || lower.contains("syscall")
+            {
                 "systems".into()
-            } else if lower.contains("game") || lower.contains("render") || lower.contains("sprite") {
+            } else if lower.contains("game") || lower.contains("render") || lower.contains("sprite")
+            {
                 "gamedev".into()
-            } else if lower.contains("embedded") || lower.contains("mcu") || lower.contains("firmware") {
+            } else if lower.contains("embedded")
+                || lower.contains("mcu")
+                || lower.contains("firmware")
+            {
                 "embedded".into()
             } else {
                 "general".into()
@@ -1312,7 +1346,10 @@ pub mod presets {
             let mut concepts = Vec::new();
 
             let patterns = [
-                ("error handling", &["error", "exception", "try", "catch", "result"][..]),
+                (
+                    "error handling",
+                    &["error", "exception", "try", "catch", "result"][..],
+                ),
                 ("validation", &["valid", "check", "verify", "sanitize"]),
                 ("caching", &["cache", "memoize", "ttl"]),
                 ("async", &["async", "await", "future", "promise"]),
@@ -1359,8 +1396,19 @@ pub mod presets {
 
         fn available_contexts(&self) -> Vec<&'static str> {
             vec![
-                "rust", "python", "javascript", "typescript", "go", "java",
-                "c", "cpp", "csharp", "ruby", "php", "swift", "kotlin",
+                "rust",
+                "python",
+                "javascript",
+                "typescript",
+                "go",
+                "java",
+                "c",
+                "cpp",
+                "csharp",
+                "ruby",
+                "php",
+                "swift",
+                "kotlin",
             ]
         }
 
@@ -1419,24 +1467,53 @@ pub mod presets {
 
         fn critical_keywords(&self) -> Vec<&'static str> {
             vec![
-                "security", "vulnerability", "cve", "injection", "xss", "csrf",
-                "production", "outage", "data loss", "corruption", "breach",
-                "critical", "urgent", "emergency", "hotfix",
+                "security",
+                "vulnerability",
+                "cve",
+                "injection",
+                "xss",
+                "csrf",
+                "production",
+                "outage",
+                "data loss",
+                "corruption",
+                "breach",
+                "critical",
+                "urgent",
+                "emergency",
+                "hotfix",
             ]
         }
 
         fn high_keywords(&self) -> Vec<&'static str> {
             vec![
-                "bug", "error", "exception", "crash", "failure", "broken",
-                "performance", "slow", "memory leak", "timeout",
-                "important", "priority", "blocking",
+                "bug",
+                "error",
+                "exception",
+                "crash",
+                "failure",
+                "broken",
+                "performance",
+                "slow",
+                "memory leak",
+                "timeout",
+                "important",
+                "priority",
+                "blocking",
             ]
         }
 
         fn low_keywords(&self) -> Vec<&'static str> {
             vec![
-                "style", "formatting", "comment", "typo", "rename",
-                "refactor", "cleanup", "todo", "nice to have",
+                "style",
+                "formatting",
+                "comment",
+                "typo",
+                "rename",
+                "refactor",
+                "cleanup",
+                "todo",
+                "nice to have",
             ]
         }
     }
@@ -1503,13 +1580,21 @@ pub mod presets {
 
             if lower.contains("help") || lower.contains("problem") || lower.contains("issue") {
                 "support".into()
-            } else if lower.contains("buy") || lower.contains("price") || lower.contains("offer") || lower.contains("cost") {
+            } else if lower.contains("buy")
+                || lower.contains("price")
+                || lower.contains("offer")
+                || lower.contains("cost")
+            {
                 "sales".into()
             } else if lower.contains("joke") || lower.contains("fun") || lower.contains("play") {
                 "entertainment".into()
-            } else if lower.contains("learn") || lower.contains("explain") || lower.contains("how") {
+            } else if lower.contains("learn") || lower.contains("explain") || lower.contains("how")
+            {
                 "education".into()
-            } else if lower.contains("meeting") || lower.contains("report") || lower.contains("deadline") {
+            } else if lower.contains("meeting")
+                || lower.contains("report")
+                || lower.contains("deadline")
+            {
                 "professional".into()
             } else {
                 "casual".into()
@@ -1537,12 +1622,18 @@ pub mod presets {
             let mut concepts = Vec::new();
 
             let patterns = [
-                ("greeting", &["hello", "hi", "hey", "good morning", "hola"][..]),
+                (
+                    "greeting",
+                    &["hello", "hi", "hey", "good morning", "hola"][..],
+                ),
                 ("farewell", &["bye", "goodbye", "see you", "adios"]),
                 ("gratitude", &["thank", "thanks", "gracias", "appreciate"]),
                 ("apology", &["sorry", "apologize", "excuse", "disculpa"]),
                 ("empathy", &["understand", "feel", "sorry to hear"]),
-                ("clarification", &["mean", "clarify", "explain", "what do you"]),
+                (
+                    "clarification",
+                    &["mean", "clarify", "explain", "what do you"],
+                ),
                 ("confirmation", &["yes", "correct", "right", "exactly"]),
                 ("negation", &["no", "not", "don't", "can't"]),
                 ("urgency", &["urgent", "asap", "immediately", "now"]),
@@ -1647,24 +1738,42 @@ pub mod presets {
 
         fn critical_keywords(&self) -> Vec<&'static str> {
             vec![
-                "never", "always", "hate", "love", "allergy", "allergic",
-                "important", "remember", "don't forget", "must",
-                "preference", "please don't", "stop",
+                "never",
+                "always",
+                "hate",
+                "love",
+                "allergy",
+                "allergic",
+                "important",
+                "remember",
+                "don't forget",
+                "must",
+                "preference",
+                "please don't",
+                "stop",
             ]
         }
 
         fn high_keywords(&self) -> Vec<&'static str> {
             vec![
-                "frustrated", "angry", "upset", "disappointed",
-                "happy", "excited", "grateful", "thank",
-                "favorite", "prefer", "like", "dislike",
+                "frustrated",
+                "angry",
+                "upset",
+                "disappointed",
+                "happy",
+                "excited",
+                "grateful",
+                "thank",
+                "favorite",
+                "prefer",
+                "like",
+                "dislike",
             ]
         }
 
         fn low_keywords(&self) -> Vec<&'static str> {
             vec![
-                "ok", "fine", "sure", "maybe", "whatever",
-                "casual", "just", "random",
+                "ok", "fine", "sure", "maybe", "whatever", "casual", "just", "random",
             ]
         }
     }
@@ -1728,17 +1837,35 @@ pub mod presets {
 
             if lower.contains("bill") || lower.contains("charge") || lower.contains("payment") {
                 "billing".into()
-            } else if lower.contains("broken") || lower.contains("not working") || lower.contains("bug") {
+            } else if lower.contains("broken")
+                || lower.contains("not working")
+                || lower.contains("bug")
+            {
                 "technical".into()
-            } else if lower.contains("return") || lower.contains("refund") || lower.contains("exchange") {
+            } else if lower.contains("return")
+                || lower.contains("refund")
+                || lower.contains("exchange")
+            {
                 "returns".into()
-            } else if lower.contains("ship") || lower.contains("deliver") || lower.contains("tracking") {
+            } else if lower.contains("ship")
+                || lower.contains("deliver")
+                || lower.contains("tracking")
+            {
                 "shipping".into()
-            } else if lower.contains("account") || lower.contains("password") || lower.contains("login") {
+            } else if lower.contains("account")
+                || lower.contains("password")
+                || lower.contains("login")
+            {
                 "account".into()
-            } else if lower.contains("product") || lower.contains("feature") || lower.contains("spec") {
+            } else if lower.contains("product")
+                || lower.contains("feature")
+                || lower.contains("spec")
+            {
                 "product_info".into()
-            } else if lower.contains("complain") || lower.contains("unhappy") || lower.contains("terrible") {
+            } else if lower.contains("complain")
+                || lower.contains("unhappy")
+                || lower.contains("terrible")
+            {
                 "complaints".into()
             } else {
                 "general".into()
@@ -1766,13 +1893,19 @@ pub mod presets {
             let mut concepts = Vec::new();
 
             let patterns = [
-                ("escalation needed", &["manager", "supervisor", "escalate"][..]),
+                (
+                    "escalation needed",
+                    &["manager", "supervisor", "escalate"][..],
+                ),
                 ("resolution", &["solved", "fixed", "resolved", "done"]),
                 ("compensation", &["refund", "credit", "discount", "free"]),
                 ("verification", &["verify", "confirm", "check identity"]),
                 ("policy reference", &["policy", "terms", "conditions"]),
                 ("empathy response", &["understand", "sorry", "apologize"]),
-                ("follow up needed", &["follow up", "callback", "contact again"]),
+                (
+                    "follow up needed",
+                    &["follow up", "callback", "contact again"],
+                ),
                 ("urgent", &["urgent", "emergency", "asap"]),
             ];
 
@@ -1865,24 +1998,46 @@ pub mod presets {
 
         fn critical_keywords(&self) -> Vec<&'static str> {
             vec![
-                "vip", "enterprise", "legal", "lawyer", "sue",
-                "escalate", "manager", "supervisor", "ceo",
-                "fraud", "breach", "unauthorized",
+                "vip",
+                "enterprise",
+                "legal",
+                "lawyer",
+                "sue",
+                "escalate",
+                "manager",
+                "supervisor",
+                "ceo",
+                "fraud",
+                "breach",
+                "unauthorized",
             ]
         }
 
         fn high_keywords(&self) -> Vec<&'static str> {
             vec![
-                "complaint", "unhappy", "refund", "cancel",
-                "broken", "defective", "wrong", "missing",
-                "urgent", "immediately", "asap",
+                "complaint",
+                "unhappy",
+                "refund",
+                "cancel",
+                "broken",
+                "defective",
+                "wrong",
+                "missing",
+                "urgent",
+                "immediately",
+                "asap",
             ]
         }
 
         fn low_keywords(&self) -> Vec<&'static str> {
             vec![
-                "question", "inquiry", "information", "how to",
-                "general", "routine", "standard",
+                "question",
+                "inquiry",
+                "information",
+                "how to",
+                "general",
+                "routine",
+                "standard",
             ]
         }
     }
@@ -1922,8 +2077,8 @@ pub mod presets {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::presets::*;
+    use super::*;
 
     #[test]
     fn test_transfer_level_ordering() {

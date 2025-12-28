@@ -44,8 +44,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_memory::{
-    AgentMemory, CodeSnippet, Language, MemoryConfig, MemoryRecall,
-    TaskEpisode, TaskOutcome,
+    AgentMemory, CodeSnippet, Language, MemoryConfig, MemoryRecall, TaskEpisode, TaskOutcome,
 };
 use crate::error::Result;
 use crate::types::{MetadataValue, VectorId};
@@ -169,44 +168,26 @@ impl KnowledgeDomain {
                 KnowledgeDomain::Security,
                 KnowledgeDomain::DevOps,
             ],
-            KnowledgeDomain::WebFrontend => vec![
-                KnowledgeDomain::Mobile,
-                KnowledgeDomain::WebBackend,
-            ],
-            KnowledgeDomain::CLI => vec![
-                KnowledgeDomain::Systems,
-                KnowledgeDomain::DevOps,
-            ],
-            KnowledgeDomain::DataScience => vec![
-                KnowledgeDomain::Database,
-                KnowledgeDomain::Systems,
-            ],
-            KnowledgeDomain::Systems => vec![
-                KnowledgeDomain::Embedded,
-                KnowledgeDomain::Security,
-            ],
-            KnowledgeDomain::Mobile => vec![
-                KnowledgeDomain::WebFrontend,
-            ],
-            KnowledgeDomain::DevOps => vec![
-                KnowledgeDomain::Security,
-                KnowledgeDomain::Systems,
-            ],
-            KnowledgeDomain::Security => vec![
-                KnowledgeDomain::WebBackend,
-                KnowledgeDomain::Systems,
-            ],
-            KnowledgeDomain::Database => vec![
-                KnowledgeDomain::WebBackend,
-                KnowledgeDomain::DataScience,
-            ],
-            KnowledgeDomain::GameDev => vec![
-                KnowledgeDomain::Systems,
-                KnowledgeDomain::WebFrontend,
-            ],
-            KnowledgeDomain::Embedded => vec![
-                KnowledgeDomain::Systems,
-            ],
+            KnowledgeDomain::WebFrontend => {
+                vec![KnowledgeDomain::Mobile, KnowledgeDomain::WebBackend]
+            }
+            KnowledgeDomain::CLI => vec![KnowledgeDomain::Systems, KnowledgeDomain::DevOps],
+            KnowledgeDomain::DataScience => {
+                vec![KnowledgeDomain::Database, KnowledgeDomain::Systems]
+            }
+            KnowledgeDomain::Systems => vec![KnowledgeDomain::Embedded, KnowledgeDomain::Security],
+            KnowledgeDomain::Mobile => vec![KnowledgeDomain::WebFrontend],
+            KnowledgeDomain::DevOps => vec![KnowledgeDomain::Security, KnowledgeDomain::Systems],
+            KnowledgeDomain::Security => {
+                vec![KnowledgeDomain::WebBackend, KnowledgeDomain::Systems]
+            }
+            KnowledgeDomain::Database => {
+                vec![KnowledgeDomain::WebBackend, KnowledgeDomain::DataScience]
+            }
+            KnowledgeDomain::GameDev => {
+                vec![KnowledgeDomain::Systems, KnowledgeDomain::WebFrontend]
+            }
+            KnowledgeDomain::Embedded => vec![KnowledgeDomain::Systems],
             KnowledgeDomain::General => vec![],
         }
     }
@@ -374,7 +355,10 @@ impl ConceptExtractor {
                 ("liskov", "Liskov Substitution"),
                 ("interface segregation", "Interface Segregation"),
                 ("dependency inversion", "Dependency Inversion"),
-                ("composition over inheritance", "Composition over Inheritance"),
+                (
+                    "composition over inheritance",
+                    "Composition over Inheritance",
+                ),
                 ("fail fast", "Fail Fast"),
                 ("defensive programming", "Defensive Programming"),
             ],
@@ -416,18 +400,18 @@ impl ConceptExtractor {
     /// Determina el nivel de transferencia basado en los conceptos
     pub fn infer_transfer_level(&self, concepts: &[String]) -> TransferLevel {
         // Si contiene principios fundamentales, es universal
-        let has_principle = concepts.iter().any(|c| {
-            self.principles.iter().any(|(_, name)| c == *name)
-        });
+        let has_principle = concepts
+            .iter()
+            .any(|c| self.principles.iter().any(|(_, name)| c == *name));
 
         if has_principle {
             return TransferLevel::Universal;
         }
 
         // Si tiene patrones de diseño, es al menos de dominio
-        let has_pattern = concepts.iter().any(|c| {
-            self.design_patterns.iter().any(|(_, name)| c == *name)
-        });
+        let has_pattern = concepts
+            .iter()
+            .any(|c| self.design_patterns.iter().any(|(_, name)| c == *name));
 
         if has_pattern {
             return TransferLevel::Domain;
@@ -616,9 +600,8 @@ impl TransferableMemory {
         let concepts = self.extractor.extract(task, code);
 
         // Inferir nivel de transferencia si no se proporciona
-        let level = transfer_level.unwrap_or_else(|| {
-            self.extractor.infer_transfer_level(&concepts)
-        });
+        let level =
+            transfer_level.unwrap_or_else(|| self.extractor.infer_transfer_level(&concepts));
 
         // Inferir dominio si no se proporciona
         let domain = domain.unwrap_or_else(|| {
@@ -637,15 +620,13 @@ impl TransferableMemory {
             steps: Vec::new(),
             learnings: learnings.iter().map(|s| s.to_string()).collect(),
             errors: Vec::new(),
-            language: self.current_context
+            language: self
+                .current_context
                 .read()
                 .as_ref()
                 .map(|c| c.language.clone())
                 .unwrap_or(Language::Other("unknown".into())),
-            project: self.current_context
-                .read()
-                .as_ref()
-                .map(|c| c.name.clone()),
+            project: self.current_context.read().as_ref().map(|c| c.name.clone()),
             duration_secs: None,
             tags: Vec::new(),
         };
@@ -654,7 +635,10 @@ impl TransferableMemory {
         episode.tags.push(format!("transfer:{}", level.as_str()));
         episode.tags.push(format!("domain:{}", domain.as_str()));
         for concept in &concepts {
-            episode.tags.push(format!("concept:{}", concept.to_lowercase().replace(' ', "_")));
+            episode.tags.push(format!(
+                "concept:{}",
+                concept.to_lowercase().replace(' ', "_")
+            ));
         }
 
         // Guardar
@@ -669,9 +653,8 @@ impl TransferableMemory {
         domain: Option<KnowledgeDomain>,
     ) -> Result<VectorId> {
         let concepts = self.extractor.extract(&snippet.description, &snippet.code);
-        let level = transfer_level.unwrap_or_else(|| {
-            self.extractor.infer_transfer_level(&concepts)
-        });
+        let level =
+            transfer_level.unwrap_or_else(|| self.extractor.infer_transfer_level(&concepts));
         let domain = domain.unwrap_or(KnowledgeDomain::General);
 
         // Crear snippet enriquecido
@@ -679,7 +662,10 @@ impl TransferableMemory {
         enriched.tags.push(format!("transfer:{}", level.as_str()));
         enriched.tags.push(format!("domain:{}", domain.as_str()));
         for concept in &concepts {
-            enriched.tags.push(format!("concept:{}", concept.to_lowercase().replace(' ', "_")));
+            enriched.tags.push(format!(
+                "concept:{}",
+                concept.to_lowercase().replace(' ', "_")
+            ));
         }
 
         self.memory.learn_code(enriched)
@@ -690,11 +676,7 @@ impl TransferableMemory {
     // ========================================================================
 
     /// Busca conocimiento considerando transferibilidad al contexto actual.
-    pub fn recall_transferable(
-        &self,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<TransferableRecall>> {
+    pub fn recall_transferable(&self, query: &str, k: usize) -> Result<Vec<TransferableRecall>> {
         // Búsqueda amplia
         let all_results = self.memory.recall_similar(query, k * 3)?;
 

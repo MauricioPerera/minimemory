@@ -114,13 +114,17 @@ mod tests {
         ];
 
         for (id, data) in &vectors {
-            storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
+            storage
+                .insert(id.to_string(), Some(data.clone()), None)
+                .unwrap();
             index.add(id, data, &storage, Distance::Euclidean).unwrap();
         }
 
         // Search for vector closest to [1, 0, 0]
         let query = vec![1.0, 0.0, 0.0];
-        let results = index.search(&query, 2, &storage, Distance::Euclidean).unwrap();
+        let results = index
+            .search(&query, 2, &storage, Distance::Euclidean)
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a"); // Exact match
@@ -140,7 +144,9 @@ mod tests {
         ];
 
         for (id, data) in &vectors {
-            storage.insert(id.to_string(), Some(data.clone()), None).unwrap();
+            storage
+                .insert(id.to_string(), Some(data.clone()), None)
+                .unwrap();
             index.add(id, data, &storage, Distance::Cosine).unwrap();
         }
 

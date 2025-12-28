@@ -21,19 +21,15 @@
 //! db = VectorDB.load("database.mmdb")
 //! ```
 
+use pyo3::exceptions::{PyIOError, PyKeyError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::exceptions::{PyValueError, PyIOError, PyKeyError};
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    Config as RustConfig,
-    Distance as RustDistance,
-    IndexType as RustIndexType,
-    Metadata as RustMetadata,
-    VectorDB as RustVectorDB,
-    types::MetadataValue as RustMetadataValue,
+    types::MetadataValue as RustMetadataValue, Config as RustConfig, Distance as RustDistance,
+    IndexType as RustIndexType, Metadata as RustMetadata, VectorDB as RustVectorDB,
 };
 
 /// Base de datos vectorial embebida.
@@ -64,29 +60,37 @@ impl PyVectorDB {
             "cosine" | "cos" => RustDistance::Cosine,
             "euclidean" | "l2" => RustDistance::Euclidean,
             "dot" | "dot_product" | "inner" => RustDistance::DotProduct,
-            _ => return Err(PyValueError::new_err(format!(
-                "Unknown distance: {}. Use 'cosine', 'euclidean', or 'dot'",
-                distance
-            ))),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown distance: {}. Use 'cosine', 'euclidean', or 'dot'",
+                    distance
+                )))
+            }
         };
 
         let idx = match index.to_lowercase().as_str() {
             "flat" | "brute" | "exact" => RustIndexType::Flat,
-            "hnsw" => RustIndexType::HNSW { m: hnsw_m, ef_construction: hnsw_ef },
-            _ => return Err(PyValueError::new_err(format!(
-                "Unknown index: {}. Use 'flat' or 'hnsw'",
-                index
-            ))),
+            "hnsw" => RustIndexType::HNSW {
+                m: hnsw_m,
+                ef_construction: hnsw_ef,
+            },
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown index: {}. Use 'flat' or 'hnsw'",
+                    index
+                )))
+            }
         };
 
         let config = RustConfig::new(dimensions)
             .with_distance(dist)
             .with_index(idx);
 
-        let db = RustVectorDB::new(config)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let db = RustVectorDB::new(config).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        Ok(Self { inner: Arc::new(db) })
+        Ok(Self {
+            inner: Arc::new(db),
+        })
     }
 
     /// Carga una base de datos desde archivo.
@@ -98,10 +102,11 @@ impl PyVectorDB {
     ///     VectorDB: Base de datos cargada
     #[staticmethod]
     fn load(path: &str) -> PyResult<Self> {
-        let db = RustVectorDB::open(path)
-            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let db = RustVectorDB::open(path).map_err(|e| PyIOError::new_err(e.to_string()))?;
 
-        Ok(Self { inner: Arc::new(db) })
+        Ok(Self {
+            inner: Arc::new(db),
+        })
     }
 
     /// Inserta un vector en la base de datos.
@@ -128,7 +133,10 @@ impl PyVectorDB {
     ///
     /// Args:
     ///     items: Lista de tuplas (id, vector, metadata)
-    fn insert_batch(&self, items: Vec<(String, Vec<f32>, Option<&Bound<'_, PyDict>>)>) -> PyResult<()> {
+    fn insert_batch(
+        &self,
+        items: Vec<(String, Vec<f32>, Option<&Bound<'_, PyDict>>)>,
+    ) -> PyResult<()> {
         for (id, vector, metadata) in items {
             let meta = metadata.map(|m| dict_to_metadata(m)).transpose()?;
             self.inner
@@ -147,7 +155,8 @@ impl PyVectorDB {
     /// Returns:
     ///     Lista de SearchResult con id, distance y metadata
     fn search(&self, query: Vec<f32>, k: usize) -> PyResult<Vec<PySearchResult>> {
-        let results = self.inner
+        let results = self
+            .inner
             .search(&query, k)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -169,7 +178,11 @@ impl PyVectorDB {
     /// Returns:
     ///     Tupla (vector, metadata) o None si no existe
     fn get(&self, id: &str) -> PyResult<Option<(Vec<f32>, Option<HashMap<String, PyObject>>)>> {
-        match self.inner.get(id).map_err(|e| PyValueError::new_err(e.to_string()))? {
+        match self
+            .inner
+            .get(id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+        {
             Some((vector, metadata)) => {
                 let meta = metadata.map(metadata_to_dict);
                 Ok(Some((vector, meta)))
