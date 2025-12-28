@@ -34,6 +34,11 @@ export default {
 
       // Route requests
       switch (true) {
+        // Root - Server info
+        case path === '/' || path === '':
+          response = handleRoot(url);
+          break;
+
         // Health check
         case path === '/health':
           response = new Response(JSON.stringify({ status: 'ok' }), {
@@ -114,6 +119,30 @@ export default {
     }
   },
 };
+
+/**
+ * Root endpoint - Server info and discovery
+ */
+function handleRoot(url: URL): Response {
+  const baseUrl = `${url.protocol}//${url.host}`;
+
+  const info = {
+    name: 'VectorPass MCP Server',
+    version: '1.0.0',
+    description: 'MCP server for VectorPass vector database',
+    mcp_endpoint: `${baseUrl}/mcp`,
+    oauth: {
+      authorization_endpoint: `${baseUrl}/authorize`,
+      token_endpoint: `${baseUrl}/token`,
+      registration_endpoint: `${baseUrl}/register`,
+    },
+    documentation: 'https://vectorpass.pages.dev',
+  };
+
+  return new Response(JSON.stringify(info, null, 2), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 /**
  * OAuth Authorization Server Metadata (RFC 8414)
