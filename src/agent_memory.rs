@@ -874,7 +874,7 @@ impl AgentMemory {
         let results = self.db.search_with_filter(
             &embedding,
             k,
-            Filter::and(vec![
+            Filter::all(vec![
                 Filter::eq("type", MemoryType::Episode.as_str()),
                 Filter::eq("outcome", "success"),
             ]),
@@ -893,7 +893,7 @@ impl AgentMemory {
         let results = self.db.search_with_filter(
             &embedding,
             k,
-            Filter::and(vec![
+            Filter::all(vec![
                 Filter::eq("type", MemoryType::Episode.as_str()),
                 Filter::eq("outcome", "failure"),
             ]),

@@ -416,17 +416,23 @@ mod tests {
 
     #[test]
     fn test_int8_quantization() {
-        let quantizer = Quantizer::int8(4);
-        let vector = vec![0.1, -0.5, 0.8, -0.2];
+        // Use 32 dimensions - small vectors don't save space due to 12-byte params overhead
+        let quantizer = Quantizer::int8(32);
+        let vector: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) / 16.0).collect();
 
         let quantized = quantizer.quantize(&vector).unwrap();
         let restored = quantizer.dequantize(&quantized);
 
         // Check dimensions match
-        assert_eq!(restored.len(), 4);
+        assert_eq!(restored.len(), 32);
 
-        // Check memory is smaller
-        assert!(quantized.memory_bytes() < 4 * 4);
+        // Check memory is smaller (32 bytes data + 12 bytes params = 44 < 128)
+        assert!(quantized.memory_bytes() < 32 * 4);
+
+        // Check values are approximately correct
+        for (orig, rest) in vector.iter().zip(restored.iter()) {
+            assert!((orig - rest).abs() < 0.02, "Dequantization error too large");
+        }
     }
 
     #[test]

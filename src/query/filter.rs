@@ -11,21 +11,23 @@ use crate::types::{Metadata, MetadataValue};
 /// # Ejemplo
 ///
 /// ```rust
-/// use minimemory::query::Filter;
+/// use minimemory::Filter;
 ///
 /// // Filtro simple
 /// let filter = Filter::eq("author", "Juan");
 ///
-/// // Combinación AND
-/// let filter = Filter::and(vec![
+/// // Encadenamiento con AND
+/// let filter = Filter::eq("category", "tech")
+///     .and(Filter::gte("score", 0.5f64));
+///
+/// // Encadenamiento con OR
+/// let filter = Filter::eq("status", "published")
+///     .or(Filter::eq("status", "featured"));
+///
+/// // Múltiples filtros con all/any
+/// let filter = Filter::all(vec![
 ///     Filter::eq("category", "tech"),
 ///     Filter::gte("score", 0.5f64),
-/// ]);
-///
-/// // Combinación OR
-/// let filter = Filter::or(vec![
-///     Filter::eq("status", "published"),
-///     Filter::eq("status", "featured"),
 /// ]);
 ///
 /// // Dot notation para campos anidados
@@ -196,19 +198,57 @@ impl Filter {
 
     // ========== Combinadores lógicos ==========
 
-    /// Combina filtros con AND (todas deben cumplirse).
-    pub fn and(filters: Vec<Filter>) -> Self {
-        Filter::And(filters)
-    }
-
-    /// Combina filtros con OR (al menos una debe cumplirse).
-    pub fn or(filters: Vec<Filter>) -> Self {
-        Filter::Or(filters)
-    }
-
     /// Niega un filtro.
     pub fn not(filter: Filter) -> Self {
         Filter::Not(Box::new(filter))
+    }
+
+    // ========== Métodos encadenables ==========
+
+    /// Combina este filtro con otro usando AND.
+    ///
+    /// # Ejemplo
+    /// ```rust
+    /// use minimemory::Filter;
+    /// let filter = Filter::eq("category", "tech")
+    ///     .and(Filter::gt("score", 0.5f64));
+    /// ```
+    pub fn and(self, other: Filter) -> Self {
+        match self {
+            Filter::And(mut filters) => {
+                filters.push(other);
+                Filter::And(filters)
+            }
+            _ => Filter::And(vec![self, other]),
+        }
+    }
+
+    /// Combina este filtro con otro usando OR.
+    ///
+    /// # Ejemplo
+    /// ```rust
+    /// use minimemory::Filter;
+    /// let filter = Filter::eq("status", "published")
+    ///     .or(Filter::eq("status", "featured"));
+    /// ```
+    pub fn or(self, other: Filter) -> Self {
+        match self {
+            Filter::Or(mut filters) => {
+                filters.push(other);
+                Filter::Or(filters)
+            }
+            _ => Filter::Or(vec![self, other]),
+        }
+    }
+
+    /// Combina múltiples filtros con AND (versión estática).
+    pub fn all(filters: Vec<Filter>) -> Self {
+        Filter::And(filters)
+    }
+
+    /// Combina múltiples filtros con OR (versión estática).
+    pub fn any(filters: Vec<Filter>) -> Self {
+        Filter::Or(filters)
     }
 }
 
@@ -346,13 +386,13 @@ mod tests {
     fn test_and_filter() {
         let meta = create_test_metadata();
 
-        let filter = Filter::and(vec![
+        let filter = Filter::all(vec![
             Filter::eq("category", "tech"),
             Filter::gte("score", 0.5f64),
         ]);
         assert!(FilterEvaluator::evaluate(&filter, Some(&meta)));
 
-        let filter = Filter::and(vec![
+        let filter = Filter::all(vec![
             Filter::eq("category", "sports"), // Fails
             Filter::gte("score", 0.5f64),
         ]);
@@ -363,13 +403,13 @@ mod tests {
     fn test_or_filter() {
         let meta = create_test_metadata();
 
-        let filter = Filter::or(vec![
+        let filter = Filter::any(vec![
             Filter::eq("category", "sports"), // Fails
             Filter::eq("category", "tech"),   // Passes
         ]);
         assert!(FilterEvaluator::evaluate(&filter, Some(&meta)));
 
-        let filter = Filter::or(vec![
+        let filter = Filter::any(vec![
             Filter::eq("category", "sports"),
             Filter::eq("category", "news"),
         ]);

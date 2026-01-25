@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_partial_index_with_complex_filter() {
-        let config = PartialIndexConfig::new(Filter::and(vec![
+        let config = PartialIndexConfig::new(Filter::all(vec![
             Filter::eq("category", "tech"),
             Filter::gt("score", 0.5f64),
         ]));

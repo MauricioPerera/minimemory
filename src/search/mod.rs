@@ -13,12 +13,15 @@
 //! # Ejemplo
 //!
 //! ```rust
-//! use minimemory::search::{HybridSearchParams, SearchMode};
+//! use minimemory::{HybridSearchParams, SearchMode, Filter};
 //!
-//! // Búsqueda híbrida
-//! let params = HybridSearchParams::hybrid(query_vec, "rust programming", 10);
+//! // Vector de consulta (embedding)
+//! let query_vec = vec![0.1, 0.2, 0.3];
 //!
-//! // Búsqueda con filtro
+//! // Búsqueda híbrida (vector + keywords)
+//! let params = HybridSearchParams::hybrid(query_vec.clone(), "rust programming", 10);
+//!
+//! // Búsqueda vectorial con filtro de metadata
 //! let params = HybridSearchParams::vector(query_vec, 10)
 //!     .with_filter(Filter::eq("category", "tech"));
 //! ```

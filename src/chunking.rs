@@ -468,12 +468,21 @@ impl BasicMarkdownParser {
                 chunk_index += 1;
             }
 
-            // Mover con overlap
-            start = if actual_end > overlap {
+            // Mover con overlap, pero asegurar que siempre avanzamos
+            // Si llegamos al final, salir del loop
+            if actual_end >= content.len() {
+                break;
+            }
+
+            // Calcular nuevo start con overlap
+            let new_start = if actual_end > overlap {
                 actual_end - overlap
             } else {
                 actual_end
             };
+
+            // Asegurar que siempre avanzamos al menos 1 posición
+            start = new_start.max(start + 1);
         }
 
         let total = chunks.len();

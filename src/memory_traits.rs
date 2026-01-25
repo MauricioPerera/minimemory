@@ -1136,7 +1136,7 @@ impl<P: DomainPreset> GenericMemory<P> {
         let results = self.db.search_with_filter(
             query_embedding,
             k * 2,
-            Filter::or(vec![
+            Filter::any(vec![
                 Filter::eq("priority", "critical"),
                 Filter::eq("priority", "high"),
             ]),

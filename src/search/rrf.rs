@@ -38,7 +38,7 @@ pub struct RankedResult {
 /// # Ejemplo
 ///
 /// ```rust
-/// use minimemory::search::rrf::{reciprocal_rank_fusion, RankedResult};
+/// use minimemory::search::{reciprocal_rank_fusion, RankedResult};
 ///
 /// let vector_results = vec![
 ///     RankedResult { id: "doc-1".into(), rank: 0, original_score: 0.95 },
@@ -82,7 +82,7 @@ pub fn reciprocal_rank_fusion(
 /// # Example
 ///
 /// ```rust
-/// use minimemory::search::rrf::{weighted_reciprocal_rank_fusion, RankedResult};
+/// use minimemory::search::{weighted_reciprocal_rank_fusion, RankedResult};
 ///
 /// let vector_results = vec![
 ///     RankedResult { id: "doc-1".into(), rank: 0, original_score: 0.95 },

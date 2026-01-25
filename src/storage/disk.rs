@@ -112,10 +112,18 @@ mod tests {
     use crate::types::Metadata;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_path() -> PathBuf {
+        let unique_id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("minimemory_test_{}.mmdb", std::process::id()));
+        path.push(format!(
+            "minimemory_test_{}_{}.mmdb",
+            std::process::id(),
+            unique_id
+        ));
         path
     }
 

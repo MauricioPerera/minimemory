@@ -6,13 +6,17 @@
 //! # Ejemplo
 //!
 //! ```rust
-//! use minimemory::query::{Filter, FilterOp};
+//! use minimemory::Filter;
 //!
 //! // Filtro simple
 //! let filter = Filter::eq("author", "Juan");
 //!
-//! // Filtro con operadores lógicos
-//! let filter = Filter::and(vec![
+//! // Encadenamiento con AND/OR
+//! let filter = Filter::eq("category", "tech")
+//!     .and(Filter::gte("score", 0.5f64));
+//!
+//! // Múltiples filtros con all/any
+//! let filter = Filter::all(vec![
 //!     Filter::eq("category", "tech"),
 //!     Filter::gte("score", 0.5f64),
 //! ]);
