@@ -16,22 +16,23 @@ MCP_SERVER_VERSION = "1.0.0"
 ALLOWED_REDIRECT_URIS = "http://localhost:3000/callback,http://127.0.0.1:3000/callback,https://modelcontextprotocol.io/callback,https://inspector.mcp.garden/callback"
 
 # KV Namespaces
+# Create with: wrangler kv:namespace create <NAME>
 [[kv_namespaces]]
 binding = "OAUTH_CODES"
-id = "e6d79abeb3f543e38c55da82ddad8471"
+id = "YOUR_OAUTH_CODES_KV_NAMESPACE_ID"
 
 [[kv_namespaces]]
 binding = "OAUTH_TOKENS"
-id = "2280791333ab4846b1c0bc2aaed6f6b7"
+id = "YOUR_OAUTH_TOKENS_KV_NAMESPACE_ID"
 
 [[kv_namespaces]]
 binding = "OAUTH_SESSIONS"
-id = "09f041bcac454370b47b2dba5505d928"
+id = "YOUR_OAUTH_SESSIONS_KV_NAMESPACE_ID"
 
 # Reuse existing VectorPass USERS KV namespace
 [[kv_namespaces]]
 binding = "USERS"
-id = "6e8c4591923b41fdb569a341138ca01a"
+id = "YOUR_USERS_KV_NAMESPACE_ID"
 
 # Secrets to configure:
 # wrangler secret put EMAIL_API_KEY

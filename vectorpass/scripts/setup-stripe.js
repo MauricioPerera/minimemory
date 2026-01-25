@@ -6,7 +6,13 @@
 
 const Stripe = require('stripe');
 
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_live_jz1e7jCPXBqEPlJe6JIPIahJ';
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+
+if (!STRIPE_SECRET_KEY) {
+    console.error('Error: STRIPE_SECRET_KEY environment variable is required');
+    console.error('Usage: STRIPE_SECRET_KEY=sk_live_xxx node scripts/setup-stripe.js');
+    process.exit(1);
+}
 
 const stripe = new Stripe(STRIPE_SECRET_KEY, {
     apiVersion: '2023-10-16'

@@ -12,17 +12,19 @@ workers_dev = true
 routes = [{ pattern = "vectorpass-api.automators.work/*", zone_name = "automators.work" }]
 
 # KV Namespaces
+# Create with: wrangler kv:namespace create <NAME>
+# Then update the IDs below
 [[kv_namespaces]]
 binding = "USERS"        # User data, API keys, verification codes
-id = "6e8c4591923b41fdb569a341138ca01a"
+id = "YOUR_USERS_KV_NAMESPACE_ID"
 
 [[kv_namespaces]]
 binding = "VECTORS"      # Vector databases per user
-id = "14cbf98553b54bcc95a5fe375cfb333b"
+id = "YOUR_VECTORS_KV_NAMESPACE_ID"
 
 [[kv_namespaces]]
 binding = "RATE_LIMITS"  # Rate limiting counters
-id = "34804b8aebdd4da2aec3ade0c25f37b3"
+id = "YOUR_RATE_LIMITS_KV_NAMESPACE_ID"
 
 # Workers AI binding
 [ai]
@@ -45,8 +47,8 @@ PRO_SEARCHES_PER_DAY = "100000"
 EMAIL_SERVICE = "resend"
 FROM_EMAIL = "noreply@automators.work"
 
-# Stripe (publishable key is safe in code)
-STRIPE_PUBLISHABLE_KEY = "pk_live_0HpwPAaQwAQqDsO9iQTURF1v"
+# Stripe publishable key (set your own)
+STRIPE_PUBLISHABLE_KEY = "pk_live_YOUR_STRIPE_PUBLISHABLE_KEY"
 
 # Secrets (set via wrangler secret put):
 # - STRIPE_WEBHOOK_SECRET

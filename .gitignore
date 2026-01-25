@@ -31,5 +31,14 @@ demo-data/
 *.log
 nul
 
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Wrangler local state
+.wrangler/
+
 # Claude
 .claude/
