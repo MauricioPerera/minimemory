@@ -13,19 +13,17 @@
 //! ## Ejemplo
 //!
 //! ```rust,ignore
-//! use minimemory::transfer::{TransferableMemory, ProjectContext, TransferLevel, KnowledgeDomain};
-//! use minimemory::agent_memory::Language;
+//! use minimemory::transfer::{TransferableMemory, ProjectContext, KnowledgeDomain};
 //!
 //! let mut memory = TransferableMemory::new()?;
 //!
 //! // Configurar proyecto actual
-//! memory.set_project_context(ProjectContext {
-//!     name: "my-rust-api".into(),
-//!     language: Language::Rust,
-//!     domain: KnowledgeDomain::WebBackend,
-//!     frameworks: vec!["Axum".into()],
-//!     patterns: vec!["REST".into()],
-//! });
+//! memory.set_project_context(ProjectContext::new(
+//!     "my-rust-api",
+//!     "rust",
+//!     KnowledgeDomain::WebBackend,
+//! ).with_frameworks(vec!["Axum".into()])
+//!  .with_patterns(vec!["REST".into()]));
 //!
 //! // Buscar conocimiento transferible
 //! let results = memory.recall_transferable("implementar autenticación", 5)?;
@@ -41,208 +39,16 @@
 //! ```
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 
 use crate::agent_memory::{
     AgentMemory, CodeSnippet, Language, MemoryConfig, MemoryRecall, TaskEpisode, TaskOutcome,
 };
 use crate::error::Result;
+use crate::memory_traits::TransferLevel;
 use crate::types::{MetadataValue, VectorId};
 
-// ============================================================================
-// Tipos de Transferencia
-// ============================================================================
-
-/// Nivel de transferibilidad del conocimiento.
-///
-/// Determina qué tan aplicable es un conocimiento a otros contextos.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum TransferLevel {
-    /// Solo aplica a este proyecto específico
-    ProjectSpecific = 1,
-    /// Aplica al mismo stack tecnológico (lenguaje/framework)
-    Stack = 2,
-    /// Aplica al mismo dominio (web, CLI, data, etc.)
-    Domain = 3,
-    /// Aplica a cualquier proyecto (patrones, principios)
-    Universal = 4,
-}
-
-impl TransferLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TransferLevel::ProjectSpecific => "project",
-            TransferLevel::Stack => "stack",
-            TransferLevel::Domain => "domain",
-            TransferLevel::Universal => "universal",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "universal" => TransferLevel::Universal,
-            "domain" => TransferLevel::Domain,
-            "stack" => TransferLevel::Stack,
-            _ => TransferLevel::ProjectSpecific,
-        }
-    }
-
-    /// Score normalizado (0.0 - 1.0)
-    pub fn score(&self) -> f32 {
-        (*self as u8) as f32 / 4.0
-    }
-}
-
-/// Dominio del conocimiento.
-///
-/// Categoriza el tipo de aplicación o sistema.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum KnowledgeDomain {
-    /// APIs, servicios web, microservicios
-    WebBackend,
-    /// Interfaces de usuario web (React, Vue, etc.)
-    WebFrontend,
-    /// Aplicaciones de línea de comandos
-    CLI,
-    /// Análisis de datos, ML, visualización
-    DataScience,
-    /// Programación de sistemas, bajo nivel
-    Systems,
-    /// Apps móviles (iOS, Android, Flutter)
-    Mobile,
-    /// DevOps, CI/CD, infraestructura
-    DevOps,
-    /// Seguridad, criptografía, pentesting
-    Security,
-    /// Bases de datos, almacenamiento
-    Database,
-    /// Juegos y gráficos
-    GameDev,
-    /// IoT y sistemas embebidos
-    Embedded,
-    /// Conocimiento general que aplica a todo
-    General,
-}
-
-impl KnowledgeDomain {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            KnowledgeDomain::WebBackend => "web_backend",
-            KnowledgeDomain::WebFrontend => "web_frontend",
-            KnowledgeDomain::CLI => "cli",
-            KnowledgeDomain::DataScience => "data_science",
-            KnowledgeDomain::Systems => "systems",
-            KnowledgeDomain::Mobile => "mobile",
-            KnowledgeDomain::DevOps => "devops",
-            KnowledgeDomain::Security => "security",
-            KnowledgeDomain::Database => "database",
-            KnowledgeDomain::GameDev => "gamedev",
-            KnowledgeDomain::Embedded => "embedded",
-            KnowledgeDomain::General => "general",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "web_backend" | "webbackend" | "backend" => KnowledgeDomain::WebBackend,
-            "web_frontend" | "webfrontend" | "frontend" => KnowledgeDomain::WebFrontend,
-            "cli" | "command_line" => KnowledgeDomain::CLI,
-            "data_science" | "datascience" | "data" | "ml" => KnowledgeDomain::DataScience,
-            "systems" | "system" => KnowledgeDomain::Systems,
-            "mobile" | "ios" | "android" => KnowledgeDomain::Mobile,
-            "devops" | "ops" | "infra" => KnowledgeDomain::DevOps,
-            "security" | "sec" => KnowledgeDomain::Security,
-            "database" | "db" => KnowledgeDomain::Database,
-            "gamedev" | "game" | "games" => KnowledgeDomain::GameDev,
-            "embedded" | "iot" => KnowledgeDomain::Embedded,
-            _ => KnowledgeDomain::General,
-        }
-    }
-
-    /// Dominios relacionados que pueden compartir conocimiento
-    pub fn related_domains(&self) -> Vec<KnowledgeDomain> {
-        match self {
-            KnowledgeDomain::WebBackend => vec![
-                KnowledgeDomain::Database,
-                KnowledgeDomain::Security,
-                KnowledgeDomain::DevOps,
-            ],
-            KnowledgeDomain::WebFrontend => {
-                vec![KnowledgeDomain::Mobile, KnowledgeDomain::WebBackend]
-            }
-            KnowledgeDomain::CLI => vec![KnowledgeDomain::Systems, KnowledgeDomain::DevOps],
-            KnowledgeDomain::DataScience => {
-                vec![KnowledgeDomain::Database, KnowledgeDomain::Systems]
-            }
-            KnowledgeDomain::Systems => vec![KnowledgeDomain::Embedded, KnowledgeDomain::Security],
-            KnowledgeDomain::Mobile => vec![KnowledgeDomain::WebFrontend],
-            KnowledgeDomain::DevOps => vec![KnowledgeDomain::Security, KnowledgeDomain::Systems],
-            KnowledgeDomain::Security => {
-                vec![KnowledgeDomain::WebBackend, KnowledgeDomain::Systems]
-            }
-            KnowledgeDomain::Database => {
-                vec![KnowledgeDomain::WebBackend, KnowledgeDomain::DataScience]
-            }
-            KnowledgeDomain::GameDev => {
-                vec![KnowledgeDomain::Systems, KnowledgeDomain::WebFrontend]
-            }
-            KnowledgeDomain::Embedded => vec![KnowledgeDomain::Systems],
-            KnowledgeDomain::General => vec![],
-        }
-    }
-}
-
-// ============================================================================
-// Contexto del Proyecto
-// ============================================================================
-
-/// Contexto del proyecto actual.
-///
-/// Define las características del proyecto para calcular transferibilidad.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectContext {
-    /// Nombre del proyecto
-    pub name: String,
-    /// Lenguaje principal
-    pub language: Language,
-    /// Dominio de la aplicación
-    pub domain: KnowledgeDomain,
-    /// Frameworks y librerías principales
-    pub frameworks: Vec<String>,
-    /// Patrones arquitectónicos usados (REST, GraphQL, event-driven, etc.)
-    pub patterns: Vec<String>,
-    /// Tags adicionales para matching
-    pub tags: Vec<String>,
-}
-
-impl ProjectContext {
-    pub fn new(name: impl Into<String>, language: Language, domain: KnowledgeDomain) -> Self {
-        Self {
-            name: name.into(),
-            language,
-            domain,
-            frameworks: Vec::new(),
-            patterns: Vec::new(),
-            tags: Vec::new(),
-        }
-    }
-
-    pub fn with_frameworks(mut self, frameworks: Vec<String>) -> Self {
-        self.frameworks = frameworks;
-        self
-    }
-
-    pub fn with_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.patterns = patterns;
-        self
-    }
-
-    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
-        self.tags = tags;
-        self
-    }
-}
+// Types are now defined in memory_traits.rs — re-export for backward compatibility.
+pub use crate::memory_traits::{KnowledgeDomain, LanguageCompatibility, ProjectContext};
 
 // ============================================================================
 // Resultado de Búsqueda con Transferencia
@@ -422,80 +228,27 @@ impl ConceptExtractor {
             return TransferLevel::Domain;
         }
 
-        TransferLevel::Stack
+        TransferLevel::Context
     }
 }
 
-// ============================================================================
-// Calculador de Compatibilidad de Lenguajes
-// ============================================================================
-
-/// Calcula compatibilidad entre lenguajes de programación.
-pub struct LanguageCompatibility;
-
-impl LanguageCompatibility {
-    /// Grupos de lenguajes similares
-    const LANGUAGE_GROUPS: &'static [&'static [&'static str]] = &[
-        &["typescript", "javascript", "js", "ts"],
-        &["python", "ruby", "perl"],
-        &["rust", "go", "c", "cpp", "c++", "zig"],
-        &["java", "kotlin", "scala", "groovy"],
-        &["csharp", "c#", "fsharp", "f#"],
-        &["swift", "objective-c", "objc"],
-        &["haskell", "ocaml", "elm", "purescript"],
-        &["clojure", "lisp", "scheme", "racket"],
-        &["php", "hack"],
-        &["elixir", "erlang"],
-    ];
-
-    /// Calcula compatibilidad entre dos lenguajes (0.0 - 1.0)
-    pub fn compatibility(lang_a: &str, lang_b: &str) -> f32 {
-        let a = lang_a.to_lowercase();
-        let b = lang_b.to_lowercase();
-
-        // Mismo lenguaje
-        if a == b {
-            return 1.0;
-        }
-
-        // Buscar en grupos
-        for group in Self::LANGUAGE_GROUPS {
-            let a_in_group = group.contains(&a.as_str());
-            let b_in_group = group.contains(&b.as_str());
-
-            if a_in_group && b_in_group {
-                return 0.7; // Mismo grupo = alta compatibilidad
-            }
-        }
-
-        // Lenguajes no relacionados
-        0.2
+/// Implement the generic ConceptExtractor trait for interoperability with GenericMemory.
+impl crate::memory_traits::ConceptExtractor for ConceptExtractor {
+    fn extract(&self, description: &str, content: &str) -> Vec<String> {
+        // Delegate to inherent method
+        ConceptExtractor::extract(self, description, content)
     }
 
-    /// Describe la adaptación necesaria entre lenguajes
-    pub fn adaptation_description(from: &str, to: &str) -> Option<String> {
-        let from_lower = from.to_lowercase();
-        let to_lower = to.to_lowercase();
+    fn is_universal(&self, concept: &str) -> bool {
+        self.principles.iter().any(|(_, name)| *name == concept)
+    }
 
-        if from_lower == to_lower {
-            return None;
-        }
-
-        // Casos específicos
-        let desc = match (from_lower.as_str(), to_lower.as_str()) {
-            ("python", "rust") => "Cambiar a tipado estático, usar Result para errores, ownership",
-            ("javascript", "typescript") => "Añadir tipos, interfaces",
-            ("typescript", "javascript") => "Remover tipos",
-            ("java", "kotlin") => "Simplificar sintaxis, usar null-safety",
-            ("python", "javascript") | ("javascript", "python") => "Adaptar sintaxis y async model",
-            ("rust", "go") => "Simplificar ownership, usar goroutines",
-            ("go", "rust") => "Añadir ownership, Result types, macros",
-            _ => return Some(format!("Adaptar sintaxis de {} a {}", from, to)),
-        };
-
-        Some(desc.to_string())
+    fn universal_concepts(&self) -> Vec<&'static str> {
+        self.principles.iter().map(|(_, name)| *name).collect()
     }
 }
+
+// LanguageCompatibility is now defined in memory_traits.rs and re-exported above.
 
 // ============================================================================
 // Memoria Transferible
@@ -624,7 +377,7 @@ impl TransferableMemory {
                 .current_context
                 .read()
                 .as_ref()
-                .map(|c| c.language.clone())
+                .map(|c| Language::from_str(&c.language))
                 .unwrap_or(Language::Other("unknown".into())),
             project: self.current_context.read().as_ref().map(|c| c.name.clone()),
             duration_secs: None,
@@ -754,7 +507,7 @@ impl TransferableMemory {
             .current_context
             .read()
             .as_ref()
-            .map(|c| c.language.as_str().to_string());
+            .map(|c| c.language.clone());
 
         let results = self.recall_transferable(query, k * 2)?;
 
@@ -803,7 +556,8 @@ impl TransferableMemory {
             if let Some(MetadataValue::String(tags)) = meta.get("tags") {
                 for tag in tags.split(',') {
                     if tag.starts_with("transfer:") {
-                        return TransferLevel::from_str(tag.trim_start_matches("transfer:"));
+                        return TransferLevel::from_str(tag.trim_start_matches("transfer:"))
+                            .unwrap_or(TransferLevel::Instance);
                     }
                 }
             }
@@ -823,7 +577,7 @@ impl TransferableMemory {
 
         // 1. Nivel de transferencia base (30%)
         let level = self.infer_level_from_recall(recall, concepts);
-        score += level.score() * 0.3;
+        score += level.transfer_score() * 0.3;
 
         // 2. Compatibilidad de dominio (25%)
         if self.is_domain_compatible(recall, &ctx.domain) {
@@ -833,7 +587,7 @@ impl TransferableMemory {
         }
 
         // 3. Compatibilidad de lenguaje (30%)
-        let lang_compat = self.get_language_compatibility(recall, ctx.language.as_str());
+        let lang_compat = self.get_language_compatibility(recall, &ctx.language);
         score += lang_compat * 0.3;
 
         // 4. Conceptos compartidos (15%)
@@ -922,14 +676,14 @@ mod tests {
     #[test]
     fn test_transfer_level_ordering() {
         assert!(TransferLevel::Universal > TransferLevel::Domain);
-        assert!(TransferLevel::Domain > TransferLevel::Stack);
-        assert!(TransferLevel::Stack > TransferLevel::ProjectSpecific);
+        assert!(TransferLevel::Domain > TransferLevel::Context);
+        assert!(TransferLevel::Context > TransferLevel::Instance);
     }
 
     #[test]
     fn test_transfer_level_score() {
-        assert!((TransferLevel::Universal.score() - 1.0).abs() < 0.01);
-        assert!((TransferLevel::ProjectSpecific.score() - 0.25).abs() < 0.01);
+        assert!((TransferLevel::Universal.transfer_score() - 1.0).abs() < 0.01);
+        assert!((TransferLevel::Instance.transfer_score() - 0.25).abs() < 0.01);
     }
 
     #[test]
@@ -989,7 +743,7 @@ mod tests {
         let concepts: Vec<String> = vec![];
         assert_eq!(
             extractor.infer_transfer_level(&concepts),
-            TransferLevel::Stack
+            TransferLevel::Context
         );
     }
 
@@ -1005,7 +759,7 @@ mod tests {
 
     #[test]
     fn test_project_context_builder() {
-        let ctx = ProjectContext::new("my-api", Language::Rust, KnowledgeDomain::WebBackend)
+        let ctx = ProjectContext::new("my-api", "rust", KnowledgeDomain::WebBackend)
             .with_frameworks(vec!["Axum".into(), "SQLx".into()])
             .with_patterns(vec!["REST".into(), "Clean Architecture".into()]);
 
@@ -1030,7 +784,7 @@ mod tests {
 
         memory.set_project_context(ProjectContext::new(
             "test-project",
-            Language::Rust,
+            "rust",
             KnowledgeDomain::CLI,
         ));
 

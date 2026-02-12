@@ -19,8 +19,11 @@ use crate::index::IndexType;
 /// Magic bytes para identificar archivos .mmdb
 pub const MAGIC: &[u8; 4] = b"MMDB";
 
-/// Versión actual del formato
-pub const VERSION: u32 = 1;
+/// Versión actual del formato (v2 adds serialized index section)
+pub const VERSION: u32 = 2;
+
+/// Minimum supported version for reading
+pub const MIN_VERSION: u32 = 1;
 
 /// Tamaño del header en bytes
 pub const HEADER_SIZE: usize = 64;
@@ -128,10 +131,10 @@ impl FileHeader {
         // Version
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
-        if version != VERSION {
+        if version < MIN_VERSION || version > VERSION {
             return Err(Error::InvalidConfig(format!(
-                "Unsupported file version: {}",
-                version
+                "Unsupported file version: {} (supported: {}-{})",
+                version, MIN_VERSION, VERSION
             )));
         }
 

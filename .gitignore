@@ -12,7 +12,23 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Implementation projects (separate repos)
+# =============================================================================
+# Implementation projects (not part of core memory library)
+# =============================================================================
+
+# VectorPass API service (Cloudflare Workers TypeScript)
+vectorpass/
+
+# VectorPass MCP server (TypeScript)
+vectorpass-mcp/
+
+# VectorPass web dashboard
+vectorpass-web/
+
+# Language bindings (external wrappers, not src/bindings which is part of the crate)
+bindings/
+
+# Previously separated implementation repos
 minimemory-service/
 minimemory-mcp/
 minimemory-dashboard/
@@ -20,7 +36,17 @@ minimemory-py/
 minimemory-sdk/
 n8n-nodes-minimemory/
 
-# Node modules (if any)
+# =============================================================================
+# Non-core documentation
+# =============================================================================
+API.md
+PROJECT_STATUS.md
+
+# =============================================================================
+# General
+# =============================================================================
+
+# Node modules
 node_modules/
 
 # Demo data

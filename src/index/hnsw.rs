@@ -10,6 +10,7 @@
 
 use parking_lot::RwLock;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -45,6 +46,7 @@ pub struct HNSWIndex {
     ef_search: AtomicUsize,
 }
 
+#[derive(Serialize, Deserialize)]
 struct HNSWInner {
     /// Niveles del grafo (nivel 0 es el más denso)
     levels: Vec<Level>,
@@ -56,8 +58,13 @@ struct HNSWInner {
     entry_point: Option<usize>,
     /// Nivel máximo actual
     max_level: usize,
+    /// Nivel asignado a cada nodo (para seleccionar entry point tras deletion)
+    node_levels: HashMap<usize, usize>,
+    /// Índices libres para reutilización (evita fragmentación de idx_to_id)
+    free_indices: Vec<usize>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Level {
     /// Vecinos de cada nodo en este nivel
     /// neighbors[node_idx] = lista de vecinos
@@ -141,6 +148,8 @@ impl HNSWIndex {
                 idx_to_id: Vec::new(),
                 entry_point: None,
                 max_level: 0,
+                node_levels: HashMap::new(),
+                free_indices: Vec::new(),
             }),
             m,
             m_max0,
@@ -291,7 +300,7 @@ impl HNSWIndex {
         sorted.into_iter().map(|c| c.idx).collect()
     }
 
-    /// Agrega conexiones bidireccionales
+    /// Agrega conexiones bidireccionales con pruning basado en distancia
     fn connect_neighbors(
         &self,
         inner: &mut HNSWInner,
@@ -299,6 +308,8 @@ impl HNSWIndex {
         neighbors: &[usize],
         level: usize,
         m_max: usize,
+        storage: &dyn Storage,
+        distance_fn: Distance,
     ) {
         // Asegurar que el nivel existe
         while inner.levels.len() <= level {
@@ -325,10 +336,28 @@ impl HNSWIndex {
             if !neighbor_neighbors.contains(&node_idx) {
                 neighbor_neighbors.push(node_idx);
 
-                // Si excede m_max, podar
+                // Si excede m_max, podar basándose en distancia real
                 if neighbor_neighbors.len() > m_max {
-                    // Mantener solo los más cercanos (simplificado)
-                    neighbor_neighbors.truncate(m_max);
+                    let neighbor_id = &inner.idx_to_id[neighbor_idx];
+                    if let Ok(Some(neighbor_stored)) = storage.get(neighbor_id) {
+                        if let Some(neighbor_vec) = &neighbor_stored.vector {
+                            // Calcular distancias de todos los vecinos al nodo central
+                            let mut scored: Vec<(usize, f32)> = neighbor_neighbors
+                                .iter()
+                                .filter_map(|&n_idx| {
+                                    let n_id = inner.idx_to_id.get(n_idx)?;
+                                    let stored = storage.get(n_id).ok()??;
+                                    let vec = stored.vector.as_ref()?;
+                                    Some((n_idx, distance_fn.calculate(neighbor_vec, vec)))
+                                })
+                                .collect();
+                            scored.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
+                            });
+                            scored.truncate(m_max);
+                            *neighbor_neighbors = scored.into_iter().map(|(idx, _)| idx).collect();
+                        }
+                    }
                 }
             }
         }
@@ -350,8 +379,14 @@ impl Index for HNSWIndex {
             return Ok(());
         }
 
-        let new_idx = inner.idx_to_id.len();
-        inner.idx_to_id.push(id.to_string());
+        let new_idx = if let Some(free_idx) = inner.free_indices.pop() {
+            inner.idx_to_id[free_idx] = id.to_string();
+            free_idx
+        } else {
+            let idx = inner.idx_to_id.len();
+            inner.idx_to_id.push(id.to_string());
+            idx
+        };
         inner.id_to_idx.insert(id.to_string(), new_idx);
 
         // Seleccionar nivel para este nodo
@@ -361,15 +396,18 @@ impl Index for HNSWIndex {
         if inner.entry_point.is_none() {
             inner.entry_point = Some(new_idx);
             inner.max_level = node_level;
+            inner.node_levels.insert(new_idx, node_level);
 
-            // Crear niveles vacíos
-            for _ in 0..=node_level {
+            // Crear niveles (usando while para manejar niveles preexistentes tras delete-all)
+            while inner.levels.len() <= node_level {
                 inner.levels.push(Level {
                     neighbors: Vec::new(),
                 });
             }
             for level in &mut inner.levels {
-                level.neighbors.push(Vec::new());
+                while level.neighbors.len() <= new_idx {
+                    level.neighbors.push(Vec::new());
+                }
             }
 
             return Ok(());
@@ -427,13 +465,16 @@ impl Index for HNSWIndex {
             let neighbors = self.select_neighbors(candidates.clone(), m_limit);
 
             // Conectar bidireccional
-            self.connect_neighbors(&mut inner, new_idx, &neighbors, level, m_limit);
+            self.connect_neighbors(&mut inner, new_idx, &neighbors, level, m_limit, storage, distance);
 
             // Usar los mejores candidatos como entrada para el siguiente nivel
             if !candidates.is_empty() {
                 current_nearest = candidates.iter().map(|c| c.idx).collect();
             }
         }
+
+        // Track node level
+        inner.node_levels.insert(new_idx, node_level);
 
         // Actualizar entry point si este nodo tiene nivel más alto
         if node_level > inner.max_level {
@@ -461,14 +502,26 @@ impl Index for HNSWIndex {
                 }
             }
 
+            // Remove node level tracking
+            inner.node_levels.remove(&idx);
+
             // Actualizar entry point si es necesario
             if inner.entry_point == Some(idx) {
-                // Buscar un nuevo entry point
-                inner.entry_point = inner.id_to_idx.values().find(|&&i| i != idx).copied();
+                // Find node with highest level as new entry point
+                if let Some((&best_idx, &best_level)) =
+                    inner.node_levels.iter().max_by_key(|(_, &lvl)| lvl)
+                {
+                    inner.entry_point = Some(best_idx);
+                    inner.max_level = best_level;
+                } else {
+                    inner.entry_point = None;
+                    inner.max_level = 0;
+                }
             }
 
             inner.id_to_idx.remove(id);
-            // Nota: idx_to_id mantiene el índice pero el ID ya no es válido
+            // Mark index as free for reuse (avoids idx_to_id fragmentation)
+            inner.free_indices.push(idx);
 
             Ok(true)
         } else {
@@ -522,10 +575,9 @@ impl Index for HNSWIndex {
             distance,
         );
 
-        // Convertir a SearchResult
+        // Convertir a SearchResult (no take(k) aquí — into_iter es unsorted)
         let mut results: Vec<SearchResult> = candidates
             .into_iter()
-            .take(k)
             .filter_map(|c| {
                 let id = inner.idx_to_id.get(c.idx)?.clone();
                 storage.get(&id).ok().flatten().map(|stored| SearchResult {
@@ -556,6 +608,8 @@ impl Index for HNSWIndex {
         inner.idx_to_id.clear();
         inner.entry_point = None;
         inner.max_level = 0;
+        inner.node_levels.clear();
+        inner.free_indices.clear();
 
         // Recopilar IDs y vectores
         let entries: Vec<(String, Vec<f32>)> = storage
@@ -591,6 +645,21 @@ impl Index for HNSWIndex {
         inner.idx_to_id.clear();
         inner.entry_point = None;
         inner.max_level = 0;
+        inner.node_levels.clear();
+        inner.free_indices.clear();
+    }
+
+    fn serialize_index(&self) -> Result<Option<Vec<u8>>> {
+        let inner = self.inner.read();
+        let data = bincode::serialize(&*inner)?;
+        Ok(Some(data))
+    }
+
+    fn load_index(&self, data: &[u8]) -> Result<()> {
+        let loaded: HNSWInner = bincode::deserialize(data)?;
+        let mut inner = self.inner.write();
+        *inner = loaded;
+        Ok(())
     }
 }
 
@@ -701,7 +770,141 @@ mod tests {
         assert_eq!(index.len(), 2);
 
         index.remove("a").unwrap();
-        // Nota: len() no decrece porque mantenemos el índice
+        assert_eq!(index.len(), 1);
+
+        // Search should still work after deletion
+        let results = index
+            .search(&[0.0, 1.0], 2, &storage, Distance::Euclidean)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, "b");
+    }
+
+    #[test]
+    fn test_hnsw_delete_entry_point() {
+        let storage = MemoryStorage::new();
+        let index = HNSWIndex::new(4, 20);
+
+        let vectors = vec![
+            ("a", vec![1.0, 0.0, 0.0]),
+            ("b", vec![0.0, 1.0, 0.0]),
+            ("c", vec![0.0, 0.0, 1.0]),
+            ("d", vec![0.5, 0.5, 0.0]),
+        ];
+
+        for (id, data) in &vectors {
+            storage
+                .insert(id.to_string(), Some(data.clone()), None)
+                .unwrap();
+            index.add(id, data, &storage, Distance::Euclidean).unwrap();
+        }
+
+        assert_eq!(index.len(), 4);
+
+        // Get the entry point's ID
+        let entry_id = {
+            let inner = index.inner.read();
+            let ep = inner.entry_point.unwrap();
+            inner.idx_to_id[ep].clone()
+        };
+
+        // Delete the entry point
+        index.remove(&entry_id).unwrap();
+        assert_eq!(index.len(), 3);
+
+        // Graph should still have a valid entry point
+        {
+            let inner = index.inner.read();
+            assert!(inner.entry_point.is_some());
+            // New entry point should be the node with highest level
+            let ep = inner.entry_point.unwrap();
+            let ep_level = inner.node_levels[&ep];
+            for (&idx, &level) in &inner.node_levels {
+                assert!(level <= ep_level, "Entry point should have highest level");
+                let _ = idx;
+            }
+        }
+
+        // Search should still work
+        let results = index
+            .search(&[0.5, 0.5, 0.0], 3, &storage, Distance::Euclidean)
+            .unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_hnsw_delete_all_and_readd() {
+        let storage = MemoryStorage::new();
+        let index = HNSWIndex::new(4, 20);
+
+        storage
+            .insert("a".to_string(), Some(vec![1.0, 0.0]), None)
+            .unwrap();
+        storage
+            .insert("b".to_string(), Some(vec![0.0, 1.0]), None)
+            .unwrap();
+
+        index
+            .add("a", &[1.0, 0.0], &storage, Distance::Euclidean)
+            .unwrap();
+        index
+            .add("b", &[0.0, 1.0], &storage, Distance::Euclidean)
+            .unwrap();
+
+        // Delete all
+        index.remove("a").unwrap();
+        index.remove("b").unwrap();
+        assert_eq!(index.len(), 0);
+        assert!(index.inner.read().entry_point.is_none());
+
+        // Re-add (should reuse freed indices)
+        storage
+            .insert("c".to_string(), Some(vec![0.5, 0.5]), None)
+            .unwrap();
+        index
+            .add("c", &[0.5, 0.5], &storage, Distance::Euclidean)
+            .unwrap();
+        assert_eq!(index.len(), 1);
+
+        let results = index
+            .search(&[0.5, 0.5], 1, &storage, Distance::Euclidean)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "c");
+    }
+
+    #[test]
+    fn test_hnsw_index_reuse() {
+        let storage = MemoryStorage::new();
+        let index = HNSWIndex::new(4, 20);
+
+        // Add 5 nodes
+        for i in 0..5 {
+            let id = format!("node-{}", i);
+            let vec = vec![i as f32, 0.0];
+            storage.insert(id.clone(), Some(vec.clone()), None).unwrap();
+            index.add(&id, &vec, &storage, Distance::Euclidean).unwrap();
+        }
+
+        let initial_size = index.inner.read().idx_to_id.len();
+        assert_eq!(initial_size, 5);
+
+        // Delete two nodes to create free indices
+        index.remove("node-1").unwrap();
+        index.remove("node-3").unwrap();
+        assert_eq!(index.inner.read().free_indices.len(), 2);
+
+        // Add new node - should reuse a freed index
+        storage
+            .insert("new-a".to_string(), Some(vec![10.0, 0.0]), None)
+            .unwrap();
+        index
+            .add("new-a", &[10.0, 0.0], &storage, Distance::Euclidean)
+            .unwrap();
+
+        assert_eq!(index.inner.read().free_indices.len(), 1);
+        // idx_to_id should NOT have grown
+        assert_eq!(index.inner.read().idx_to_id.len(), 5);
     }
 
     #[test]
@@ -722,5 +925,196 @@ mod tests {
                 assert!(levels[i] >= levels[i + 1]);
             }
         }
+    }
+
+    #[test]
+    fn test_hnsw_recall_accuracy() {
+        // Generate 500 random vectors in 32 dimensions
+        let mut rng = rand::thread_rng();
+        let n = 500;
+        let dim = 32;
+        let k = 10;
+
+        let storage = MemoryStorage::new();
+        let index = HNSWIndex::new(16, 200);
+
+        let mut vectors: Vec<(String, Vec<f32>)> = Vec::new();
+        for i in 0..n {
+            let id = format!("v{}", i);
+            let vec: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+            storage
+                .insert(id.clone(), Some(vec.clone()), None)
+                .unwrap();
+            index
+                .add(&id, &vec, &storage, Distance::Euclidean)
+                .unwrap();
+            vectors.push((id, vec));
+        }
+
+        // Run multiple queries and measure recall against brute-force
+        let num_queries = 20;
+        let mut total_recall = 0.0;
+
+        for _ in 0..num_queries {
+            let query: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+
+            // Brute-force exact results
+            let mut distances: Vec<(usize, f32)> = vectors
+                .iter()
+                .enumerate()
+                .map(|(i, (_, v))| {
+                    let d: f32 = query
+                        .iter()
+                        .zip(v.iter())
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f32>()
+                        .sqrt();
+                    (i, d)
+                })
+                .collect();
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let exact_top_k: HashSet<String> = distances[..k]
+                .iter()
+                .map(|(i, _)| vectors[*i].0.clone())
+                .collect();
+
+            // HNSW results
+            let hnsw_results = index
+                .search(&query, k, &storage, Distance::Euclidean)
+                .unwrap();
+            let hnsw_top_k: HashSet<String> =
+                hnsw_results.iter().map(|r| r.id.clone()).collect();
+
+            // Recall = intersection / k
+            let overlap = exact_top_k.intersection(&hnsw_top_k).count();
+            total_recall += overlap as f32 / k as f32;
+        }
+
+        let avg_recall = total_recall / num_queries as f32;
+        assert!(
+            avg_recall >= 0.85,
+            "HNSW recall@{} should be >= 0.85, got {:.3}",
+            k,
+            avg_recall,
+        );
+    }
+
+    #[test]
+    fn test_hnsw_serialization_roundtrip() {
+        let storage = MemoryStorage::new();
+        let index = HNSWIndex::new(8, 50);
+
+        let vectors = vec![
+            ("a", vec![1.0, 0.0, 0.0]),
+            ("b", vec![0.0, 1.0, 0.0]),
+            ("c", vec![0.0, 0.0, 1.0]),
+            ("d", vec![0.5, 0.5, 0.0]),
+            ("e", vec![0.3, 0.3, 0.3]),
+        ];
+
+        for (id, data) in &vectors {
+            storage
+                .insert(id.to_string(), Some(data.clone()), None)
+                .unwrap();
+            index.add(id, data, &storage, Distance::Euclidean).unwrap();
+        }
+
+        // Serialize
+        let serialized = index.serialize_index().unwrap().unwrap();
+
+        // Create new index and load
+        let index2 = HNSWIndex::new(8, 50);
+        index2.load_index(&serialized).unwrap();
+
+        // Same length
+        assert_eq!(index2.len(), 5);
+
+        // Same search results
+        let query = vec![0.5, 0.5, 0.0];
+        let results1 = index
+            .search(&query, 3, &storage, Distance::Euclidean)
+            .unwrap();
+        let results2 = index2
+            .search(&query, 3, &storage, Distance::Euclidean)
+            .unwrap();
+
+        assert_eq!(results1.len(), results2.len());
+        for (r1, r2) in results1.iter().zip(results2.iter()) {
+            assert_eq!(r1.id, r2.id);
+            assert!((r1.distance - r2.distance).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_hnsw_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let storage = Arc::new(MemoryStorage::new());
+        let index = Arc::new(HNSWIndex::new(8, 50));
+
+        // First, insert some base vectors
+        for i in 0..50 {
+            let id = format!("base-{}", i);
+            let vec = vec![i as f32 / 50.0, 1.0 - i as f32 / 50.0];
+            storage
+                .insert(id.clone(), Some(vec.clone()), None)
+                .unwrap();
+            index
+                .add(&id, &vec, &*storage, Distance::Euclidean)
+                .unwrap();
+        }
+
+        // Concurrent reads from 8 threads
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let idx = index.clone();
+            let stor = storage.clone();
+            handles.push(thread::spawn(move || {
+                let query = vec![t as f32 / 8.0, 1.0 - t as f32 / 8.0];
+                for _ in 0..100 {
+                    let results = idx
+                        .search(&query, 5, &*stor, Distance::Euclidean)
+                        .unwrap();
+                    assert!(!results.is_empty());
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Concurrent inserts + searches
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let idx = index.clone();
+            let stor = storage.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..10 {
+                    let id = format!("thread-{}-{}", t, i);
+                    let vec = vec![t as f32 / 4.0 + i as f32 / 40.0, 0.5];
+                    stor.insert(id.clone(), Some(vec.clone()), None).unwrap();
+                    idx.add(&id, &vec, &*stor, Distance::Euclidean).unwrap();
+                }
+            }));
+        }
+        for t in 4..8 {
+            let idx = index.clone();
+            let stor = storage.clone();
+            handles.push(thread::spawn(move || {
+                let query = vec![t as f32 / 8.0, 0.5];
+                for _ in 0..50 {
+                    let _ = idx.search(&query, 5, &*stor, Distance::Euclidean);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All inserts should be visible
+        assert!(index.len() >= 50 + 40);
     }
 }

@@ -126,7 +126,7 @@ impl VectorDB {
     /// let db = VectorDB::open("my_database.mmdb").unwrap();
     /// ```
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let (header, vectors) = disk::load_vectors(path)?;
+        let (header, vectors, index_blocks) = disk::load_vectors(path)?;
 
         let config = Config {
             dimensions: header.dimensions as usize,
@@ -138,14 +138,31 @@ impl VectorDB {
         let storage = Arc::new(MemoryStorage::new());
         let index = Self::create_index(&config.index)?;
 
-        // Cargar documentos al storage e índice
-        for stored in vectors {
-            let id = stored.id.clone();
-            // Insertar en storage primero
-            storage.insert(stored.id.clone(), stored.vector.clone(), stored.metadata)?;
-            // Solo indexar si tiene vector
-            if let Some(ref vec) = stored.vector {
-                index.add(&id, vec, &*storage, config.distance)?;
+        // Load documents into storage
+        for stored in &vectors {
+            storage.insert(
+                stored.id.clone(),
+                stored.vector.clone(),
+                stored.metadata.clone(),
+            )?;
+        }
+
+        // Try to load serialized HNSW index (v2+), fall back to rebuilding
+        if let Some(data) = index_blocks.hnsw {
+            if index.load_index(&data).is_err() {
+                // Fallback: rebuild index from vectors
+                for stored in &vectors {
+                    if let Some(ref vec) = stored.vector {
+                        index.add(&stored.id, vec, &*storage, config.distance)?;
+                    }
+                }
+            }
+        } else {
+            // v1 file or no HNSW data: rebuild index from vectors
+            for stored in &vectors {
+                if let Some(ref vec) = stored.vector {
+                    index.add(&stored.id, vec, &*storage, config.distance)?;
+                }
             }
         }
 
@@ -171,7 +188,7 @@ impl VectorDB {
         path: P,
         indexed_fields: Vec<String>,
     ) -> Result<Self> {
-        let (header, vectors) = disk::load_vectors(path)?;
+        let (header, vectors, index_blocks) = disk::load_vectors(path)?;
 
         let config = Config {
             dimensions: header.dimensions as usize,
@@ -182,24 +199,54 @@ impl VectorDB {
 
         let storage = Arc::new(MemoryStorage::new());
         let index = Self::create_index(&config.index)?;
-        let bm25_index = Arc::new(BM25Index::new(indexed_fields.clone()));
 
-        // Cargar documentos al storage, índice vectorial y BM25
-        for stored in vectors {
-            let id = stored.id.clone();
-            // Insertar en storage primero
+        // Load documents into storage
+        for stored in &vectors {
             storage.insert(
                 stored.id.clone(),
                 stored.vector.clone(),
                 stored.metadata.clone(),
             )?;
-            // Solo indexar en HNSW/Flat si tiene vector
-            if let Some(ref vec) = stored.vector {
-                index.add(&id, vec, &*storage, config.distance)?;
-            }
-            // Siempre indexar en BM25 si tiene metadata
-            bm25_index.add(&id, stored.metadata.as_ref())?;
         }
+
+        // Try to load serialized HNSW index, fall back to rebuilding
+        if let Some(data) = index_blocks.hnsw {
+            if index.load_index(&data).is_err() {
+                for stored in &vectors {
+                    if let Some(ref vec) = stored.vector {
+                        index.add(&stored.id, vec, &*storage, config.distance)?;
+                    }
+                }
+            }
+        } else {
+            for stored in &vectors {
+                if let Some(ref vec) = stored.vector {
+                    index.add(&stored.id, vec, &*storage, config.distance)?;
+                }
+            }
+        }
+
+        // Try to load persisted BM25 index, fall back to rebuilding
+        let bm25_index = if let Some(data) = index_blocks.bm25 {
+            match BM25Index::deserialize(indexed_fields.clone(), &data) {
+                Ok(idx) => Arc::new(idx),
+                Err(_) => {
+                    // Fallback: rebuild BM25 from metadata
+                    let idx = Arc::new(BM25Index::new(indexed_fields.clone()));
+                    for stored in &vectors {
+                        idx.add(&stored.id, stored.metadata.as_ref())?;
+                    }
+                    idx
+                }
+            }
+        } else {
+            // No persisted BM25: rebuild from metadata
+            let idx = Arc::new(BM25Index::new(indexed_fields.clone()));
+            for stored in &vectors {
+                idx.add(&stored.id, stored.metadata.as_ref())?;
+            }
+            idx
+        };
 
         Ok(Self {
             config,
@@ -555,7 +602,20 @@ impl VectorDB {
             &self.config.index,
         );
 
-        disk::save_vectors(path, &mut header, self.storage.iter())
+        // Serialize indices for persistence
+        let hnsw_data = self.index.serialize_index()?;
+        let bm25_data = self
+            .bm25_index
+            .as_ref()
+            .map(|idx| idx.serialize())
+            .transpose()?;
+
+        let index_blocks = disk::IndexBlocks {
+            hnsw: hnsw_data.as_deref(),
+            bm25: bm25_data.as_deref(),
+        };
+
+        disk::save_vectors(path, &mut header, self.storage.iter(), &index_blocks)
     }
 
     /// Retorna las dimensiones configuradas.

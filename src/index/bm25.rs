@@ -131,10 +131,28 @@ impl BM25Index {
 
         let mut inner = self.inner.write();
 
-        // Verificar si el documento ya existía
-        let existed = inner.documents.contains_key(id);
+        // If document already existed, remove old term frequencies first
+        if let Some(old_doc) = inner.documents.remove(id) {
+            inner.total_doc_length = inner.total_doc_length.saturating_sub(old_doc.length as u64);
 
-        // Actualizar índice invertido y frecuencias
+            for term in old_doc.term_frequencies.keys() {
+                if let Some(docs) = inner.inverted_index.get_mut(term) {
+                    docs.remove(id);
+                    if docs.is_empty() {
+                        inner.inverted_index.remove(term);
+                    }
+                }
+
+                if let Some(count) = inner.doc_frequencies.get_mut(term) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        inner.doc_frequencies.remove(term);
+                    }
+                }
+            }
+        }
+
+        // Add new term frequencies
         for term in term_frequencies.keys() {
             inner
                 .inverted_index
@@ -142,10 +160,7 @@ impl BM25Index {
                 .or_default()
                 .insert(id.to_string());
 
-            // Solo incrementar doc_freq si es nuevo documento
-            if !existed {
-                *inner.doc_frequencies.entry(term.clone()).or_insert(0) += 1;
-            }
+            *inner.doc_frequencies.entry(term.clone()).or_insert(0) += 1;
         }
 
         inner.total_doc_length += doc.length as u64;

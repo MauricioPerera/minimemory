@@ -206,9 +206,14 @@ impl ChangeLog {
         vector: &[f32],
         metadata: Option<Metadata>,
     ) -> u64 {
-        let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let entry = ChangeEntry::insert(seq, &self.instance_id, doc_id, vector.to_vec(), metadata);
-        self.entries.write().push(entry);
+        let seq = {
+            let mut entries = self.entries.write();
+            let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
+            let entry =
+                ChangeEntry::insert(seq, &self.instance_id, doc_id, vector.to_vec(), metadata);
+            entries.push(entry);
+            seq
+        };
         self.maybe_compact();
         seq
     }
@@ -220,18 +225,27 @@ impl ChangeLog {
         vector: &[f32],
         metadata: Option<Metadata>,
     ) -> u64 {
-        let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let entry = ChangeEntry::update(seq, &self.instance_id, doc_id, vector.to_vec(), metadata);
-        self.entries.write().push(entry);
+        let seq = {
+            let mut entries = self.entries.write();
+            let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
+            let entry =
+                ChangeEntry::update(seq, &self.instance_id, doc_id, vector.to_vec(), metadata);
+            entries.push(entry);
+            seq
+        };
         self.maybe_compact();
         seq
     }
 
     /// Registra una eliminación.
     pub fn track_delete(&self, doc_id: impl Into<VectorId>) -> u64 {
-        let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let entry = ChangeEntry::delete(seq, &self.instance_id, doc_id);
-        self.entries.write().push(entry);
+        let seq = {
+            let mut entries = self.entries.write();
+            let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
+            let entry = ChangeEntry::delete(seq, &self.instance_id, doc_id);
+            entries.push(entry);
+            seq
+        };
         self.maybe_compact();
         seq
     }

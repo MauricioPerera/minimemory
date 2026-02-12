@@ -82,4 +82,14 @@ pub trait Index: Send + Sync {
 
     /// Clear the index
     fn clear(&self);
+
+    /// Serialize the index state for persistence. Returns None if not supported.
+    fn serialize_index(&self) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Load index state from serialized data.
+    fn load_index(&self, _data: &[u8]) -> Result<()> {
+        Ok(())
+    }
 }

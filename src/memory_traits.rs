@@ -343,6 +343,41 @@ impl UsageStats {
             .as_secs() as i64;
         now - self.last_accessed
     }
+
+    /// Guarda los campos de UsageStats en metadata para persistencia.
+    pub fn save_to_metadata(&self, meta: &mut Metadata) {
+        meta.insert("_access_count", self.access_count as i64);
+        meta.insert("_last_accessed", self.last_accessed);
+        meta.insert("_created_at", self.created_at);
+        meta.insert("_useful_count", self.useful_count as i64);
+    }
+
+    /// Restaura UsageStats desde metadata. Retorna Default si faltan campos.
+    pub fn load_from_metadata(meta: &Metadata) -> Self {
+        let access_count = meta
+            .get("_access_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as u32;
+        let last_accessed = meta
+            .get("_last_accessed")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let created_at = meta
+            .get("_created_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let useful_count = meta
+            .get("_useful_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as u32;
+
+        Self {
+            access_count,
+            last_accessed,
+            created_at,
+            useful_count,
+        }
+    }
 }
 
 /// Configuracion de decay temporal.
@@ -541,6 +576,260 @@ impl InstanceContext {
         self.extra.insert(key.into(), value.into());
         self
     }
+
+    /// Creates an InstanceContext from a ProjectContext.
+    pub fn from_project_context(ctx: &ProjectContext) -> Self {
+        let mut ic = Self::new(&ctx.name)
+            .with_context(&ctx.language)
+            .with_domain(ctx.domain.as_str());
+
+        for (i, fw) in ctx.frameworks.iter().enumerate() {
+            ic.extra
+                .insert(format!("framework_{}", i), fw.clone());
+        }
+        for (i, pat) in ctx.patterns.iter().enumerate() {
+            ic.extra
+                .insert(format!("pattern_{}", i), pat.clone());
+        }
+        for (i, tag) in ctx.tags.iter().enumerate() {
+            ic.extra.insert(format!("tag_{}", i), tag.clone());
+        }
+
+        ic
+    }
+}
+
+// ============================================================================
+// Knowledge Domain
+// ============================================================================
+
+/// Dominio del conocimiento.
+///
+/// Categoriza el tipo de aplicacion o sistema.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KnowledgeDomain {
+    /// APIs, servicios web, microservicios
+    WebBackend,
+    /// Interfaces de usuario web (React, Vue, etc.)
+    WebFrontend,
+    /// Aplicaciones de linea de comandos
+    CLI,
+    /// Analisis de datos, ML, visualizacion
+    DataScience,
+    /// Programacion de sistemas, bajo nivel
+    Systems,
+    /// Apps moviles (iOS, Android, Flutter)
+    Mobile,
+    /// DevOps, CI/CD, infraestructura
+    DevOps,
+    /// Seguridad, criptografia, pentesting
+    Security,
+    /// Bases de datos, almacenamiento
+    Database,
+    /// Juegos y graficos
+    GameDev,
+    /// IoT y sistemas embebidos
+    Embedded,
+    /// Conocimiento general que aplica a todo
+    General,
+}
+
+impl KnowledgeDomain {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            KnowledgeDomain::WebBackend => "web_backend",
+            KnowledgeDomain::WebFrontend => "web_frontend",
+            KnowledgeDomain::CLI => "cli",
+            KnowledgeDomain::DataScience => "data_science",
+            KnowledgeDomain::Systems => "systems",
+            KnowledgeDomain::Mobile => "mobile",
+            KnowledgeDomain::DevOps => "devops",
+            KnowledgeDomain::Security => "security",
+            KnowledgeDomain::Database => "database",
+            KnowledgeDomain::GameDev => "gamedev",
+            KnowledgeDomain::Embedded => "embedded",
+            KnowledgeDomain::General => "general",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "web_backend" | "webbackend" | "backend" => KnowledgeDomain::WebBackend,
+            "web_frontend" | "webfrontend" | "frontend" => KnowledgeDomain::WebFrontend,
+            "cli" | "command_line" => KnowledgeDomain::CLI,
+            "data_science" | "datascience" | "data" | "ml" => KnowledgeDomain::DataScience,
+            "systems" | "system" => KnowledgeDomain::Systems,
+            "mobile" | "ios" | "android" => KnowledgeDomain::Mobile,
+            "devops" | "ops" | "infra" => KnowledgeDomain::DevOps,
+            "security" | "sec" => KnowledgeDomain::Security,
+            "database" | "db" => KnowledgeDomain::Database,
+            "gamedev" | "game" | "games" => KnowledgeDomain::GameDev,
+            "embedded" | "iot" => KnowledgeDomain::Embedded,
+            _ => KnowledgeDomain::General,
+        }
+    }
+
+    /// Dominios relacionados que pueden compartir conocimiento.
+    pub fn related_domains(&self) -> Vec<KnowledgeDomain> {
+        match self {
+            KnowledgeDomain::WebBackend => vec![
+                KnowledgeDomain::Database,
+                KnowledgeDomain::Security,
+                KnowledgeDomain::DevOps,
+            ],
+            KnowledgeDomain::WebFrontend => {
+                vec![KnowledgeDomain::Mobile, KnowledgeDomain::WebBackend]
+            }
+            KnowledgeDomain::CLI => vec![KnowledgeDomain::Systems, KnowledgeDomain::DevOps],
+            KnowledgeDomain::DataScience => {
+                vec![KnowledgeDomain::Database, KnowledgeDomain::Systems]
+            }
+            KnowledgeDomain::Systems => {
+                vec![KnowledgeDomain::Embedded, KnowledgeDomain::Security]
+            }
+            KnowledgeDomain::Mobile => vec![KnowledgeDomain::WebFrontend],
+            KnowledgeDomain::DevOps => {
+                vec![KnowledgeDomain::Security, KnowledgeDomain::Systems]
+            }
+            KnowledgeDomain::Security => {
+                vec![KnowledgeDomain::WebBackend, KnowledgeDomain::Systems]
+            }
+            KnowledgeDomain::Database => {
+                vec![KnowledgeDomain::WebBackend, KnowledgeDomain::DataScience]
+            }
+            KnowledgeDomain::GameDev => {
+                vec![KnowledgeDomain::Systems, KnowledgeDomain::WebFrontend]
+            }
+            KnowledgeDomain::Embedded => vec![KnowledgeDomain::Systems],
+            KnowledgeDomain::General => vec![],
+        }
+    }
+}
+
+// ============================================================================
+// Project Context
+// ============================================================================
+
+/// Contexto del proyecto actual.
+///
+/// Define las caracteristicas del proyecto para calcular transferibilidad.
+/// Use `InstanceContext::from_project_context()` to convert to an InstanceContext.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectContext {
+    /// Nombre del proyecto
+    pub name: String,
+    /// Lenguaje principal (e.g., "rust", "python", "typescript")
+    pub language: String,
+    /// Dominio de la aplicacion
+    pub domain: KnowledgeDomain,
+    /// Frameworks y librerias principales
+    pub frameworks: Vec<String>,
+    /// Patrones arquitectonicos usados (REST, GraphQL, event-driven, etc.)
+    pub patterns: Vec<String>,
+    /// Tags adicionales para matching
+    pub tags: Vec<String>,
+}
+
+impl ProjectContext {
+    pub fn new(
+        name: impl Into<String>,
+        language: impl Into<String>,
+        domain: KnowledgeDomain,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            language: language.into(),
+            domain,
+            frameworks: Vec::new(),
+            patterns: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    pub fn with_frameworks(mut self, frameworks: Vec<String>) -> Self {
+        self.frameworks = frameworks;
+        self
+    }
+
+    pub fn with_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.patterns = patterns;
+        self
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+}
+
+// ============================================================================
+// Language Compatibility
+// ============================================================================
+
+/// Calcula compatibilidad entre lenguajes de programacion.
+pub struct LanguageCompatibility;
+
+impl LanguageCompatibility {
+    /// Grupos de lenguajes similares
+    const LANGUAGE_GROUPS: &'static [&'static [&'static str]] = &[
+        &["typescript", "javascript", "js", "ts"],
+        &["python", "ruby", "perl"],
+        &["rust", "go", "c", "cpp", "c++", "zig"],
+        &["java", "kotlin", "scala", "groovy"],
+        &["csharp", "c#", "fsharp", "f#"],
+        &["swift", "objective-c", "objc"],
+        &["haskell", "ocaml", "elm", "purescript"],
+        &["clojure", "lisp", "scheme", "racket"],
+        &["php", "hack"],
+        &["elixir", "erlang"],
+    ];
+
+    /// Calcula compatibilidad entre dos lenguajes (0.0 - 1.0)
+    pub fn compatibility(lang_a: &str, lang_b: &str) -> f32 {
+        let a = lang_a.to_lowercase();
+        let b = lang_b.to_lowercase();
+
+        if a == b {
+            return 1.0;
+        }
+
+        for group in Self::LANGUAGE_GROUPS {
+            let a_in = group.contains(&a.as_str());
+            let b_in = group.contains(&b.as_str());
+            if a_in && b_in {
+                return 0.7;
+            }
+        }
+
+        0.2
+    }
+
+    /// Describe la adaptacion necesaria entre lenguajes
+    pub fn adaptation_description(from: &str, to: &str) -> Option<String> {
+        let from_lower = from.to_lowercase();
+        let to_lower = to.to_lowercase();
+
+        if from_lower == to_lower {
+            return None;
+        }
+
+        let desc = match (from_lower.as_str(), to_lower.as_str()) {
+            ("python", "rust") => {
+                "Cambiar a tipado estatico, usar Result para errores, ownership"
+            }
+            ("javascript", "typescript") => "Anadir tipos, interfaces",
+            ("typescript", "javascript") => "Remover tipos",
+            ("java", "kotlin") => "Simplificar sintaxis, usar null-safety",
+            ("python", "javascript") | ("javascript", "python") => {
+                "Adaptar sintaxis y async model"
+            }
+            ("rust", "go") => "Simplificar ownership, usar goroutines",
+            ("go", "rust") => "Anadir ownership, Result types, macros",
+            _ => return Some(format!("Adaptar sintaxis de {} a {}", from, to)),
+        };
+
+        Some(desc.to_string())
+    }
 }
 
 // ============================================================================
@@ -652,6 +941,37 @@ impl<P: DomainPreset> GenericMemory<P> {
         })
     }
 
+    /// Crea desde un VectorDB existente.
+    ///
+    /// Util para wrapping: permite que un sistema externo (como AgentMemory)
+    /// construya su propio VectorDB con configuracion personalizada y luego
+    /// lo envuelva en GenericMemory para heredar prioridad, decay y usage stats.
+    pub fn with_db(db: VectorDB) -> Self {
+        let (domain_classifier, concept_extractor, context_matcher, priority_calculator) =
+            P::create();
+
+        Self {
+            db,
+            domain_classifier,
+            concept_extractor,
+            context_matcher,
+            priority_calculator,
+            current_context: RwLock::new(None),
+            usage_stats: RwLock::new(HashMap::new()),
+            decay_config: P::default_decay(),
+            priority_weights: P::default_weights(),
+            relevance_weight: 0.4,
+            transfer_weight: 0.3,
+            priority_weight: 0.3,
+            transfer_threshold: 0.3,
+        }
+    }
+
+    /// Acceso a la base de datos vectorial subyacente.
+    pub fn db(&self) -> &VectorDB {
+        &self.db
+    }
+
     /// Establece la configuracion de decay.
     pub fn set_decay_config(&mut self, config: DecayConfig) {
         self.decay_config = config;
@@ -695,6 +1015,13 @@ impl<P: DomainPreset> GenericMemory<P> {
         );
     }
 
+    /// Establece el contexto desde un ProjectContext.
+    ///
+    /// Converts the ProjectContext into an InstanceContext and sets it.
+    pub fn set_project_context(&self, ctx: &ProjectContext) {
+        self.set_context(InstanceContext::from_project_context(ctx));
+    }
+
     /// Obtiene el contexto actual.
     pub fn current_context(&self) -> Option<InstanceContext> {
         self.current_context.read().clone()
@@ -736,7 +1063,7 @@ impl<P: DomainPreset> GenericMemory<P> {
 
         // Crear estadisticas de uso
         let usage = UsageStats::new();
-        self.usage_stats.write().insert(id.to_string(), usage);
+        self.usage_stats.write().insert(id.to_string(), usage.clone());
 
         // Construir metadata
         let mut meta = Metadata::new();
@@ -768,14 +1095,146 @@ impl<P: DomainPreset> GenericMemory<P> {
             meta.insert("domain", domain.as_str());
         }
 
+        // Persistir UsageStats en metadata
+        usage.save_to_metadata(&mut meta);
+
+        self.db.insert(id, embedding, Some(meta))?;
+        Ok(id.to_string())
+    }
+
+    /// Aprende con metadata pre-construida y prioridad automatica.
+    ///
+    /// A diferencia de `learn()`, acepta metadata ya poblada con campos
+    /// especificos del dominio. Enriquece la metadata con campos del sistema
+    /// (priority, transfer_level, concepts, usage stats, timestamp, context).
+    ///
+    /// # Arguments
+    /// * `id` - ID del documento
+    /// * `embedding` - Vector de embedding
+    /// * `meta` - Metadata pre-construida con campos del dominio
+    /// * `content_for_analysis` - Texto para analisis de conceptos y dominio
+    pub fn learn_raw(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        meta: Metadata,
+        content_for_analysis: &str,
+    ) -> Result<VectorId> {
+        let description = meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let outcome = meta.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
+        let priority = self
+            .priority_calculator
+            .calculate(description, content_for_analysis, outcome);
+        self.learn_raw_with_priority(id, embedding, meta, content_for_analysis, priority)
+    }
+
+    /// Aprende con metadata pre-construida y prioridad manual.
+    ///
+    /// Igual que `learn_raw()` pero con prioridad explicita.
+    pub fn learn_raw_with_priority(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        mut meta: Metadata,
+        content_for_analysis: &str,
+        priority: Priority,
+    ) -> Result<VectorId> {
+        let ctx = self.current_context.read().clone();
+
+        // Extraer conceptos
+        let description = meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let concepts = self
+            .concept_extractor
+            .extract(description, content_for_analysis);
+
+        // Inferir nivel de transferencia
+        let transfer_level = self.infer_transfer_level(&concepts, content_for_analysis);
+
+        // Crear estadisticas de uso
+        let usage = UsageStats::new();
+        self.usage_stats
+            .write()
+            .insert(id.to_string(), usage.clone());
+
+        // Agregar campos del sistema (solo si no estan ya presentes)
+        if meta.get("transfer_level").is_none() {
+            meta.insert("transfer_level", transfer_level.as_str());
+        }
+        if meta.get("priority").is_none() {
+            meta.insert("priority", priority.as_str());
+        }
+        if meta.get("concepts").is_none() {
+            meta.insert("concepts", concepts.join(","));
+        }
+        if meta.get("timestamp").is_none() {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            meta.insert("timestamp", timestamp);
+        }
+
+        // Agregar contexto de instancia
+        if let Some(ref ctx) = ctx {
+            if meta.get("instance_id").is_none() && !ctx.instance_id.is_empty() {
+                meta.insert("instance_id", ctx.instance_id.as_str());
+            }
+            if meta.get("context").is_none() && !ctx.context.is_empty() {
+                meta.insert("context", ctx.context.as_str());
+            }
+            if meta.get("domain").is_none() && !ctx.domain.is_empty() {
+                meta.insert("domain", ctx.domain.as_str());
+            }
+        }
+
+        // Clasificar dominio automaticamente si no esta establecido
+        let has_domain = meta
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !has_domain {
+            let domain = self.domain_classifier.classify(content_for_analysis);
+            meta.insert("domain", domain.as_str());
+        }
+
+        // Persistir UsageStats en metadata
+        usage.save_to_metadata(&mut meta);
+
         self.db.insert(id, embedding, Some(meta))?;
         Ok(id.to_string())
     }
 
     /// Registra feedback positivo (la memoria fue util).
     pub fn mark_useful(&self, id: &str) {
-        if let Some(stats) = self.usage_stats.write().get_mut(id) {
-            stats.record_useful();
+        let mut stats_map = self.usage_stats.write();
+        let stats = if let Some(s) = stats_map.get_mut(id) {
+            s.record_useful();
+            s.clone()
+        } else {
+            // Load from metadata if not in cache
+            if let Ok(Some((_, Some(meta)))) = self.db.get(id) {
+                let mut s = UsageStats::load_from_metadata(&meta);
+                s.record_useful();
+                stats_map.insert(id.to_string(), s.clone());
+                s
+            } else {
+                return;
+            }
+        };
+        drop(stats_map);
+
+        // Persist updated stats to metadata
+        if let Ok(Some((vec_opt, meta_opt))) = self.db.get(id) {
+            if let (Some(vec), Some(mut meta)) = (vec_opt, meta_opt) {
+                stats.save_to_metadata(&mut meta);
+                let _ = self.db.update(id, &vec, Some(meta));
+            }
         }
     }
 
@@ -785,8 +1244,7 @@ impl<P: DomainPreset> GenericMemory<P> {
         if let Some((vec_opt, meta_opt)) = self.db.get(id)? {
             if let (Some(vec), Some(mut meta)) = (vec_opt, meta_opt) {
                 meta.insert("priority", priority.as_str());
-                // Re-insert with updated metadata
-                self.db.insert(id, &vec, Some(meta))?;
+                self.db.update(id, &vec, Some(meta))?;
             }
         }
         Ok(())
@@ -864,13 +1322,11 @@ impl<P: DomainPreset> GenericMemory<P> {
                     .and_then(Priority::from_str)
                     .unwrap_or(Priority::Normal);
 
-                // Obtener o crear estadisticas de uso
-                let usage = self
-                    .usage_stats
-                    .read()
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_default();
+                // Cargar estadisticas de uso desde metadata (persistentes)
+                let usage = {
+                    let cached = self.usage_stats.read().get(&id).cloned();
+                    cached.unwrap_or_else(|| UsageStats::load_from_metadata(&meta))
+                };
 
                 // Calcular score de prioridad hibrido
                 let priority_score = self.calculate_priority_score(&usage, priority);
@@ -902,12 +1358,21 @@ impl<P: DomainPreset> GenericMemory<P> {
             })
             .collect();
 
-        // Registrar acceso para todas las memorias retornadas
+        // Registrar acceso para todas las memorias retornadas y persistir en metadata
         {
             let mut stats = self.usage_stats.write();
             for recall in &recalls {
-                if let Some(s) = stats.get_mut(&recall.id) {
-                    s.record_access();
+                let entry = stats
+                    .entry(recall.id.clone())
+                    .or_insert_with(|| UsageStats::load_from_metadata(&recall.metadata));
+                entry.record_access();
+
+                // Persistir stats actualizados en metadata via db.update
+                if let Ok(Some((vec_opt, meta_opt))) = self.db.get(&recall.id) {
+                    if let (Some(vec), Some(mut meta)) = (vec_opt, meta_opt) {
+                        entry.save_to_metadata(&mut meta);
+                        let _ = self.db.update(&recall.id, &vec, Some(meta));
+                    }
                 }
             }
         }
@@ -975,12 +1440,33 @@ impl<P: DomainPreset> GenericMemory<P> {
         } else {
             0.0
         };
-        let context_compat = self
-            .context_matcher
-            .compatibility(&ctx.context, stored_context);
-        let domain_compat = self
-            .domain_classifier
-            .relatedness_score(&ctx.domain, stored_domain);
+        // Use LanguageCompatibility for richer language matching (handles language families),
+        // falling back to the context_matcher for non-language contexts
+        let context_compat = if !ctx.context.is_empty() && !stored_context.is_empty() {
+            // Take the better score between LanguageCompatibility and the preset matcher
+            let lang_compat = LanguageCompatibility::compatibility(&ctx.context, stored_context);
+            let matcher_compat = self.context_matcher.compatibility(&ctx.context, stored_context);
+            lang_compat.max(matcher_compat)
+        } else {
+            self.context_matcher
+                .compatibility(&ctx.context, stored_context)
+        };
+        // Use KnowledgeDomain relationship awareness for richer domain matching
+        let domain_compat = if !ctx.domain.is_empty() && !stored_domain.is_empty() {
+            let current_kd = KnowledgeDomain::from_str(&ctx.domain);
+            let stored_kd = KnowledgeDomain::from_str(stored_domain);
+            if current_kd == stored_kd {
+                1.0
+            } else if current_kd.related_domains().contains(&stored_kd) {
+                0.7
+            } else {
+                self.domain_classifier
+                    .relatedness_score(&ctx.domain, stored_domain)
+            }
+        } else {
+            self.domain_classifier
+                .relatedness_score(&ctx.domain, stored_domain)
+        };
 
         // Ponderar segun nivel
         match level {

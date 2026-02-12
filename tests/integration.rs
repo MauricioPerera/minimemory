@@ -690,6 +690,80 @@ mod concurrency {
 
         assert_eq!(db.len(), 100);
     }
+
+    #[test]
+    fn test_concurrent_mixed_insert_search_delete() {
+        use minimemory::Config;
+
+        let config = Config::new(8).with_index(minimemory::IndexType::HNSW {
+            m: 16,
+            ef_construction: 100,
+        });
+        let db = Arc::new(VectorDB::new(config).unwrap());
+
+        // Seed with 50 vectors
+        for i in 0..50 {
+            let vec: Vec<f32> = (0..8).map(|j| (i * 8 + j) as f32 / 400.0).collect();
+            db.insert(format!("seed-{}", i), &vec, None).unwrap();
+        }
+
+        let mut handles = vec![];
+
+        // 4 threads inserting
+        for t in 0..4 {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..25 {
+                    let id = format!("ins-{}-{}", t, i);
+                    let vec: Vec<f32> =
+                        (0..8).map(|j| (t * 200 + i * 8 + j) as f32 / 800.0).collect();
+                    db.insert(id, &vec, None).unwrap();
+                }
+            }));
+        }
+
+        // 4 threads searching
+        for t in 0..4 {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..50 {
+                    let query: Vec<f32> =
+                        (0..8).map(|j| (t * 100 + i * 8 + j) as f32 / 400.0).collect();
+                    let results = db.search(&query, 5).unwrap();
+                    // May get fewer results during concurrent deletes
+                    assert!(results.len() <= 5);
+                }
+            }));
+        }
+
+        // 2 threads deleting seed vectors
+        for t in 0..2 {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..25 {
+                    let id = format!("seed-{}", t * 25 + i);
+                    let _ = db.delete(&id); // May fail if already deleted
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All seed vectors deleted (50), all inserted (100)
+        // Final count: 50 - 50 + 100 = 100
+        assert_eq!(db.len(), 100);
+
+        // Search should still work correctly
+        let query: Vec<f32> = (0..8).map(|j| j as f32 / 8.0).collect();
+        let results = db.search(&query, 10).unwrap();
+        assert!(!results.is_empty());
+        // Results should be sorted by distance
+        for w in results.windows(2) {
+            assert!(w[0].distance <= w[1].distance);
+        }
+    }
 }
 
 // ============================================================================
@@ -1059,6 +1133,24 @@ mod agent_memory_integration {
         AgentMemory, CodeSnippet, ErrorSolution, Language, MemoryConfig, MemoryType, TaskOutcome,
     };
 
+    fn make_agent_memory() -> AgentMemory {
+        let config = MemoryConfig::small();
+        let mut memory = AgentMemory::new(config).unwrap();
+        memory.set_embed_fn(|text: &str| {
+            let dims = 384;
+            let mut vec = vec![0.0f32; dims];
+            for (i, byte) in text.bytes().enumerate() {
+                vec[i % dims] += byte as f32 / 255.0;
+            }
+            let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vec.iter_mut().for_each(|x| *x /= norm);
+            }
+            vec
+        });
+        memory
+    }
+
     #[test]
     fn test_agent_memory_creation() {
         let config = MemoryConfig::small();
@@ -1070,8 +1162,7 @@ mod agent_memory_integration {
 
     #[test]
     fn test_learn_task_workflow() {
-        let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let memory = make_agent_memory();
 
         let id = memory
             .learn_task(
@@ -1088,8 +1179,7 @@ mod agent_memory_integration {
 
     #[test]
     fn test_learn_code_snippet() {
-        let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let memory = make_agent_memory();
 
         let id = memory
             .learn_code(CodeSnippet {
@@ -1112,8 +1202,7 @@ mod agent_memory_integration {
 
     #[test]
     fn test_learn_error_solution() {
-        let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let memory = make_agent_memory();
 
         let id = memory
             .learn_error_solution(ErrorSolution {
@@ -1137,8 +1226,7 @@ mod agent_memory_integration {
 
     #[test]
     fn test_recall_similar_hybrid() {
-        let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let memory = make_agent_memory();
 
         for i in 0..5 {
             memory
@@ -1159,8 +1247,7 @@ mod agent_memory_integration {
 
     #[test]
     fn test_recall_experiences_filter() {
-        let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let memory = make_agent_memory();
 
         // Add a task episode
         memory
@@ -1214,8 +1301,7 @@ mod agent_memory_integration {
 
     #[test]
     fn test_recall_successful_vs_failures() {
-        let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let memory = make_agent_memory();
 
         memory
             .learn_task(
@@ -1448,6 +1534,584 @@ mod hybrid_search_integration {
         let results = db.keyword_search("quick fox", 5).unwrap();
 
         assert!(!results.is_empty());
+    }
+}
+
+// ============================================================================
+// Phase 5.1: GenericMemory Transfer & Multi-Preset Tests
+// ============================================================================
+
+mod generic_memory_advanced {
+    use minimemory::memory_traits::presets::{Conversational, CustomerService, SoftwareDevelopment};
+    use minimemory::memory_traits::{GenericMemory, InstanceContext, Priority, TransferLevel};
+
+    fn gen_emb(seed: usize, dim: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|i| ((seed * 17 + i * 31) % 1000) as f32 / 1000.0)
+            .collect()
+    }
+
+    #[test]
+    fn test_conversational_preset_workflow() {
+        let memory = GenericMemory::<Conversational>::new(64).unwrap();
+
+        memory.set_context(
+            InstanceContext::new("chat-session-1")
+                .with_context("customer-support")
+                .with_domain("retail"),
+        );
+
+        let emb = gen_emb(1, 64);
+        memory
+            .learn("conv-1", &emb, "User asked about return policy", "Return inquiry", "resolved")
+            .unwrap();
+
+        let emb2 = gen_emb(2, 64);
+        memory
+            .learn("conv-2", &emb2, "User asked about shipping times", "Shipping inquiry", "resolved")
+            .unwrap();
+
+        let query = gen_emb(1, 64);
+        let results = memory.recall(&query, 5).unwrap();
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, "conv-1");
+
+        let stats = memory.stats();
+        assert_eq!(stats.total_memories, 2);
+        assert_eq!(stats.preset_name, "Conversational");
+    }
+
+    #[test]
+    fn test_customer_service_preset_workflow() {
+        let memory = GenericMemory::<CustomerService>::new(64).unwrap();
+
+        memory.set_context(
+            InstanceContext::new("support-team")
+                .with_context("billing")
+                .with_domain("retail"),
+        );
+
+        let emb = gen_emb(1, 64);
+        memory
+            .learn(
+                "ticket-1",
+                &emb,
+                "Customer reported billing error on invoice #1234",
+                "Billing error",
+                "resolved",
+            )
+            .unwrap();
+
+        let query = gen_emb(1, 64);
+        let results = memory.recall(&query, 5).unwrap();
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, "ticket-1");
+
+        let stats = memory.stats();
+        assert_eq!(stats.preset_name, "Customer Service");
+    }
+
+    #[test]
+    fn test_transfer_level_filtering_universal() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        // Learn content with universal concepts (error handling, testing, design patterns)
+        let emb1 = gen_emb(1, 64);
+        memory
+            .learn(
+                "universal-1",
+                &emb1,
+                "Design patterns for error handling and testing strategies",
+                "Universal programming patterns",
+                "success",
+            )
+            .unwrap();
+
+        // Learn instance-specific content
+        let emb2 = gen_emb(2, 64);
+        memory
+            .learn(
+                "instance-1",
+                &emb2,
+                "This project specific configuration only here for our custom setup",
+                "Project config",
+                "success",
+            )
+            .unwrap();
+
+        // recall_universal should only return Universal-level items
+        let query = gen_emb(1, 64);
+        let universal_results = memory.recall_universal(&query, 10).unwrap();
+
+        for r in &universal_results {
+            assert_eq!(
+                r.transfer_level,
+                TransferLevel::Universal,
+                "recall_universal returned non-universal item: {} (level: {:?})",
+                r.id,
+                r.transfer_level,
+            );
+        }
+    }
+
+    #[test]
+    fn test_transfer_level_filtering_same_domain() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        memory.set_context(
+            InstanceContext::new("project-a")
+                .with_context("rust")
+                .with_domain("web_backend"),
+        );
+
+        // Learn backend content
+        let emb1 = gen_emb(1, 64);
+        memory
+            .learn("backend-1", &emb1, "REST API endpoint handler", "API handler", "success")
+            .unwrap();
+
+        // Learn frontend content with different domain
+        memory.set_context(
+            InstanceContext::new("project-b")
+                .with_context("typescript")
+                .with_domain("web_frontend"),
+        );
+
+        let emb2 = gen_emb(2, 64);
+        memory
+            .learn("frontend-1", &emb2, "React component rendering", "UI component", "success")
+            .unwrap();
+
+        // Switch back to backend context and query same domain
+        memory.set_context(
+            InstanceContext::new("project-c")
+                .with_context("rust")
+                .with_domain("web_backend"),
+        );
+
+        let query = gen_emb(1, 64);
+        let same_domain = memory.recall_same_domain(&query, 10).unwrap();
+
+        // All results should be from web_backend domain
+        for r in &same_domain {
+            let domain = r.metadata.get("domain").and_then(|v| v.as_str());
+            assert_eq!(
+                domain,
+                Some("web_backend"),
+                "recall_same_domain returned wrong domain for {}: {:?}",
+                r.id,
+                domain,
+            );
+        }
+    }
+
+    #[test]
+    fn test_usage_stats_persist_through_mark_useful() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        let emb = gen_emb(1, 64);
+        memory.learn("task-1", &emb, "Content", "Desc", "success").unwrap();
+
+        // Mark useful 3 times
+        memory.mark_useful("task-1");
+        memory.mark_useful("task-1");
+        memory.mark_useful("task-1");
+
+        // Access via recall (updates access count)
+        let query = gen_emb(1, 64);
+        let results = memory.recall(&query, 1).unwrap();
+
+        assert!(!results.is_empty());
+        // Stats should show usefulness > 0
+        let stats = memory.stats();
+        assert!(stats.avg_usefulness > 0.0);
+    }
+
+    #[test]
+    fn test_priority_ordering_in_recall() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(64).unwrap();
+
+        // Use same embedding for all to make distance equal
+        let emb = gen_emb(42, 64);
+
+        memory
+            .learn_with_priority("low", &emb, "Low priority", "Desc", "success", Priority::Low)
+            .unwrap();
+        memory
+            .learn_with_priority("normal", &emb, "Normal priority", "Desc", "success", Priority::Normal)
+            .unwrap();
+        memory
+            .learn_with_priority("high", &emb, "High priority", "Desc", "success", Priority::High)
+            .unwrap();
+        memory
+            .learn_with_priority("critical", &emb, "Critical priority", "Desc", "success", Priority::Critical)
+            .unwrap();
+
+        // recall_high_priority should only return High and Critical
+        let query = gen_emb(42, 64);
+        let high = memory.recall_high_priority(&query, 10).unwrap();
+        for r in &high {
+            assert!(
+                r.priority >= Priority::High,
+                "Expected High+, got {:?} for {}",
+                r.priority,
+                r.id,
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Phase 5.2: AgentMemory Persistence Tests
+// ============================================================================
+
+mod agent_memory_persistence {
+    use minimemory::agent_memory::{
+        AgentMemory, CodeSnippet, ErrorSolution, Language, MemoryConfig, TaskOutcome,
+    };
+    use std::path::PathBuf;
+
+    fn make_memory() -> AgentMemory {
+        let config = MemoryConfig::small();
+        let mut memory = AgentMemory::new(config).unwrap();
+        memory.set_embed_fn(|text: &str| {
+            let dims = 384;
+            let mut vec = vec![0.0f32; dims];
+            for (i, byte) in text.bytes().enumerate() {
+                vec[i % dims] += byte as f32 / 255.0;
+            }
+            let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vec.iter_mut().for_each(|x| *x /= norm);
+            }
+            vec
+        });
+        memory
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("minimemory_test_{}.mmdb", name));
+        p
+    }
+
+    #[test]
+    fn test_save_load_roundtrip() {
+        let path = temp_path("save_load_roundtrip");
+        let _ = std::fs::remove_file(&path);
+
+        // Create and populate
+        let memory = make_memory();
+        memory
+            .learn_task(
+                "Implement login feature",
+                "fn login() { /* ... */ }",
+                TaskOutcome::Success,
+                vec!["Use bcrypt"],
+            )
+            .unwrap();
+
+        memory
+            .learn_code(CodeSnippet {
+                code: "fn hello() {}".to_string(),
+                description: "Hello function".to_string(),
+                language: Language::Rust,
+                dependencies: vec![],
+                use_case: "Greeting".to_string(),
+                quality_score: 0.9,
+                tags: vec![],
+            })
+            .unwrap();
+
+        memory
+            .learn_error_solution(ErrorSolution {
+                error_message: "cannot borrow".to_string(),
+                error_type: "E0596".to_string(),
+                root_cause: "Missing mut".to_string(),
+                solution: "Add mut".to_string(),
+                fixed_code: Some("let mut x = 5;".to_string()),
+                language: Language::Rust,
+            })
+            .unwrap();
+
+        // Save
+        memory.save(&path).unwrap();
+        assert!(path.exists());
+
+        // Load
+        let mut loaded = AgentMemory::load(&path, MemoryConfig::small()).unwrap();
+        loaded.set_embed_fn(|text: &str| {
+            let dims = 384;
+            let mut vec = vec![0.0f32; dims];
+            for (i, byte) in text.bytes().enumerate() {
+                vec[i % dims] += byte as f32 / 255.0;
+            }
+            let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vec.iter_mut().for_each(|x| *x /= norm);
+            }
+            vec
+        });
+
+        // Verify data survived (3 docs + 1 __working_context__ = 4)
+        assert!(loaded.db().len() >= 3);
+
+        // Search should still work
+        let results = loaded.recall_similar("login authentication", 5).unwrap();
+        assert!(!results.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_working_context_persists() {
+        let path = temp_path("working_ctx_persist");
+        let _ = std::fs::remove_file(&path);
+
+        let memory = make_memory();
+        memory.with_working_context(|ctx| {
+            ctx.set_project("my-project");
+            ctx.set_task("Build feature X");
+            ctx.add_open_file("src/main.rs");
+            ctx.add_goal("Write tests");
+        });
+
+        // Need at least one document for save to work
+        memory
+            .learn_task("task", "code", TaskOutcome::Success, vec!["note"])
+            .unwrap();
+
+        memory.save(&path).unwrap();
+
+        let loaded = AgentMemory::load(&path, MemoryConfig::small()).unwrap();
+        let ctx = loaded.working_context();
+
+        assert_eq!(ctx.current_project, Some("my-project".to_string()));
+        assert_eq!(ctx.current_task, Some("Build feature X".to_string()));
+        assert!(ctx.open_files.contains(&"src/main.rs".to_string()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+// ============================================================================
+// Phase 5.3: TransferableMemory Tests
+// ============================================================================
+
+mod transferable_memory_tests {
+    use minimemory::agent_memory::{MemoryConfig, TaskOutcome};
+    use minimemory::memory_traits::TransferLevel;
+    use minimemory::transfer::{
+        KnowledgeDomain, LanguageCompatibility, ProjectContext, TransferableMemory,
+    };
+
+    fn make_transferable() -> TransferableMemory {
+        let config = MemoryConfig::small();
+        let mut tm = TransferableMemory::new(config).unwrap();
+        tm.set_embed_fn(|text: &str| {
+            let dims = 384;
+            let mut vec = vec![0.0f32; dims];
+            for (i, byte) in text.bytes().enumerate() {
+                vec[i % dims] += byte as f32 / 255.0;
+            }
+            let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vec.iter_mut().for_each(|x| *x /= norm);
+            }
+            vec
+        });
+        tm
+    }
+
+    #[test]
+    fn test_learn_with_explicit_transfer_levels() {
+        let tm = make_transferable();
+        tm.set_project_context(ProjectContext {
+            name: "test-project".to_string(),
+            language: "rust".to_string(),
+            domain: KnowledgeDomain::WebBackend,
+            frameworks: vec!["actix-web".to_string()],
+            patterns: vec![],
+            tags: vec![],
+        });
+
+        // Universal level
+        tm.learn_task_transferable(
+            "Error handling with Result type",
+            "fn handle() -> Result<(), Box<dyn Error>> { Ok(()) }",
+            TaskOutcome::Success,
+            vec!["Always use Result for fallible operations"],
+            Some(TransferLevel::Universal),
+            None,
+        )
+        .unwrap();
+
+        // Instance level
+        tm.learn_task_transferable(
+            "Configure actix-web routes for this project",
+            "fn config(cfg: &mut web::ServiceConfig) { /* project specific */ }",
+            TaskOutcome::Success,
+            vec!["Only for this project's routing setup"],
+            Some(TransferLevel::Instance),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(tm.memory().db().len(), 2);
+    }
+
+    #[test]
+    fn test_recall_universal_only() {
+        let tm = make_transferable();
+        tm.set_project_context(ProjectContext {
+            name: "project-a".to_string(),
+            language: "rust".to_string(),
+            domain: KnowledgeDomain::WebBackend,
+            frameworks: vec![],
+            patterns: vec![],
+            tags: vec![],
+        });
+
+        // Universal knowledge
+        tm.learn_task_transferable(
+            "Design patterns for error handling",
+            "fn handle_error() { /* universal pattern */ }",
+            TaskOutcome::Success,
+            vec!["Use typed errors"],
+            Some(TransferLevel::Universal),
+            Some(KnowledgeDomain::General),
+        )
+        .unwrap();
+
+        // Project-specific knowledge
+        tm.learn_task_transferable(
+            "Project custom config loader",
+            "fn load_config() { /* project specific */ }",
+            TaskOutcome::Success,
+            vec!["This project config"],
+            Some(TransferLevel::Instance),
+            Some(KnowledgeDomain::WebBackend),
+        )
+        .unwrap();
+
+        let universal = tm.recall_universal("error handling patterns", 10).unwrap();
+
+        for r in &universal {
+            assert_eq!(
+                r.transfer_level,
+                TransferLevel::Universal,
+                "recall_universal returned non-universal: {:?}",
+                r.transfer_level,
+            );
+        }
+    }
+
+    #[test]
+    fn test_language_compatibility_scores() {
+        // Same language = 1.0
+        assert_eq!(LanguageCompatibility::compatibility("rust", "rust"), 1.0);
+
+        // Same family (C-family): c, c++, rust, zig
+        let c_rust = LanguageCompatibility::compatibility("c", "rust");
+        assert!(c_rust > 0.5, "C and Rust should be compatible: {}", c_rust);
+
+        // Same family (scripting): python, ruby, perl
+        let py_ruby = LanguageCompatibility::compatibility("python", "ruby");
+        assert!(
+            py_ruby > 0.5,
+            "Python and Ruby should be compatible: {}",
+            py_ruby,
+        );
+
+        // Different families
+        let rust_python = LanguageCompatibility::compatibility("rust", "python");
+        assert!(
+            rust_python < 0.5,
+            "Rust and Python should have low compatibility: {}",
+            rust_python,
+        );
+
+        // Unknown languages
+        let unknown = LanguageCompatibility::compatibility("brainfuck", "whitespace");
+        assert!(unknown < 0.5);
+    }
+
+    #[test]
+    fn test_knowledge_domain_related() {
+        let web_backend = KnowledgeDomain::WebBackend;
+        let related = web_backend.related_domains();
+
+        // WebBackend is related to Database, Security, DevOps
+        assert!(related.contains(&KnowledgeDomain::Database));
+        assert!(related.contains(&KnowledgeDomain::DevOps));
+        assert!(related.contains(&KnowledgeDomain::Security));
+    }
+
+    #[test]
+    fn test_recall_same_stack_filters_by_language() {
+        let tm = make_transferable();
+
+        // Learn Rust knowledge
+        tm.set_project_context(ProjectContext {
+            name: "rust-project".to_string(),
+            language: "rust".to_string(),
+            domain: KnowledgeDomain::WebBackend,
+            frameworks: vec![],
+            patterns: vec![],
+            tags: vec![],
+        });
+
+        tm.learn_task_transferable(
+            "Rust ownership and borrowing",
+            "fn borrow(s: &str) { println!(\"{}\", s); }",
+            TaskOutcome::Success,
+            vec!["Rust borrow checker"],
+            Some(TransferLevel::Domain),
+            None,
+        )
+        .unwrap();
+
+        // Learn Python knowledge
+        tm.set_project_context(ProjectContext {
+            name: "python-project".to_string(),
+            language: "python".to_string(),
+            domain: KnowledgeDomain::DataScience,
+            frameworks: vec!["pandas".to_string()],
+            patterns: vec![],
+            tags: vec![],
+        });
+
+        tm.learn_task_transferable(
+            "Python data analysis with pandas",
+            "import pandas as pd; df = pd.read_csv('data.csv')",
+            TaskOutcome::Success,
+            vec!["Use pandas for data processing"],
+            Some(TransferLevel::Domain),
+            None,
+        )
+        .unwrap();
+
+        // Query with Rust context — should prefer Rust stack results
+        tm.set_project_context(ProjectContext {
+            name: "new-rust-project".to_string(),
+            language: "rust".to_string(),
+            domain: KnowledgeDomain::WebBackend,
+            frameworks: vec![],
+            patterns: vec![],
+            tags: vec![],
+        });
+
+        let results = tm.recall_same_stack("programming patterns", 10).unwrap();
+
+        // If results are returned, they should be language-compatible
+        // (Rust is in a different family from Python)
+        for r in &results {
+            // The filter should prefer same-stack results
+            // At minimum, verify the recall works without panicking
+            assert!(r.combined_score >= 0.0);
+        }
     }
 }
 

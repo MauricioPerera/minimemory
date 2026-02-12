@@ -37,6 +37,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::memory_traits::presets::SoftwareDevelopment;
+use crate::memory_traits::GenericMemory;
 use crate::partial_index::PartialIndexConfig;
 use crate::query::Filter;
 use crate::replication::ChangeLog;
@@ -237,7 +239,7 @@ pub struct ErrorSolution {
 // ============================================================================
 
 /// Contexto de trabajo actual del agente
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkingContext {
     /// Proyecto actual
     pub current_project: Option<String>,
@@ -461,16 +463,18 @@ pub struct MemoryStats {
 // Memoria Principal del Agente
 // ============================================================================
 
-/// Sistema de memoria para agentes de desarrollo de código
+/// Sistema de memoria para agentes de desarrollo de código.
+///
+/// Internamente usa `GenericMemory<SoftwareDevelopment>` para heredar
+/// prioridad automática, decay temporal, usage stats y transfer scoring.
+/// Mantiene su propia API (learn_task, learn_code, etc.) como facade.
 pub struct AgentMemory {
-    /// Base de datos de memoria
-    db: VectorDB,
+    /// Sistema de memoria genérico (provee priority, decay, usage stats)
+    inner: GenericMemory<SoftwareDevelopment>,
     /// Contexto de trabajo actual
     working: RwLock<WorkingContext>,
     /// Change log para replicación
     changelog: Option<ChangeLog>,
-    /// Configuración
-    config: MemoryConfig,
     /// Función de embedding (opcional, para uso externo)
     embed_fn: Option<Box<dyn Fn(&str) -> Vec<f32> + Send + Sync>>,
 }
@@ -488,6 +492,7 @@ impl AgentMemory {
         };
 
         let db = VectorDB::with_fulltext(db_config, config.indexed_fields.clone())?;
+        let inner = GenericMemory::<SoftwareDevelopment>::with_db(db);
 
         let changelog = if config.enable_changelog {
             Some(ChangeLog::with_instance_id("agent-memory"))
@@ -496,10 +501,9 @@ impl AgentMemory {
         };
 
         Ok(Self {
-            db,
+            inner,
             working: RwLock::new(WorkingContext::new()),
             changelog,
-            config,
             embed_fn: None,
         })
     }
@@ -507,6 +511,7 @@ impl AgentMemory {
     /// Carga memoria desde archivo
     pub fn load<P: AsRef<Path>>(path: P, config: MemoryConfig) -> Result<Self> {
         let db = VectorDB::open_with_fulltext(path, config.indexed_fields.clone())?;
+        let inner = GenericMemory::<SoftwareDevelopment>::with_db(db);
 
         let changelog = if config.enable_changelog {
             Some(ChangeLog::with_instance_id("agent-memory"))
@@ -514,18 +519,40 @@ impl AgentMemory {
             None
         };
 
+        // Restore WorkingContext from special document
+        let working = if let Some((_, Some(meta))) = inner.db().get("__working_context__")? {
+            if let Some(crate::MetadataValue::String(json)) = meta.get("__data__") {
+                serde_json::from_str(json).unwrap_or_default()
+            } else {
+                WorkingContext::new()
+            }
+        } else {
+            WorkingContext::new()
+        };
+
         Ok(Self {
-            db,
-            working: RwLock::new(WorkingContext::new()),
+            inner,
+            working: RwLock::new(working),
             changelog,
-            config,
             embed_fn: None,
         })
     }
 
     /// Guarda memoria a archivo
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        self.db.save(path)
+        // Persist WorkingContext as a special metadata-only document
+        let ctx = self.working.read().clone();
+        if let Ok(json) = serde_json::to_string(&ctx) {
+            let mut meta = Metadata::new();
+            meta.insert("__data__", json.as_str());
+            meta.insert("type", "__internal__");
+
+            // Remove old context doc if exists, then insert new one
+            let _ = self.db().delete("__working_context__");
+            let _ = self.db().insert_document("__working_context__", None, Some(meta));
+        }
+
+        self.db().save(path)
     }
 
     /// Establece la función de embedding
@@ -536,13 +563,16 @@ impl AgentMemory {
         self.embed_fn = Some(Box::new(f));
     }
 
-    /// Genera embedding (usa función externa o placeholder)
-    fn embed(&self, text: &str) -> Vec<f32> {
+    /// Genera embedding usando la función externa configurada.
+    ///
+    /// Retorna error si no se ha configurado `embed_fn` via `set_embed_fn()`.
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
         if let Some(ref f) = self.embed_fn {
-            f(text)
+            Ok(f(text))
         } else {
-            // Placeholder: vector de ceros (el usuario debe proveer embed_fn)
-            vec![0.0; self.config.embedding_dimensions]
+            Err(crate::error::Error::InvalidConfig(
+                "No embedding function set. Call set_embed_fn() first".into(),
+            ))
         }
     }
 
@@ -569,8 +599,8 @@ impl AgentMemory {
 
         // Crear índice parcial para el proyecto
         let index_name = format!("project_{}", project.replace(['/', '\\', ' '], "_"));
-        if !self.db.has_partial_index(&index_name) {
-            self.db.create_partial_index(
+        if !self.db().has_partial_index(&index_name) {
+            self.db().create_partial_index(
                 &index_name,
                 PartialIndexConfig::new(Filter::eq("project", project)),
             )?;
@@ -616,7 +646,7 @@ impl AgentMemory {
         meta.insert("outcome", episode.outcome.as_str());
         meta.insert("language", episode.language.as_str());
         meta.insert("learnings", episode.learnings.join("\n"));
-        meta.insert("timestamp", current_timestamp() as i64);
+        meta.insert("description", episode.task.as_str());
 
         if let Some(ref project) = episode.project {
             meta.insert("project", project.as_str());
@@ -635,9 +665,10 @@ impl AgentMemory {
             episode.code,
             episode.learnings.join("\n")
         );
-        let embedding = self.embed(&embed_text);
+        let embedding = self.embed(&embed_text)?;
 
-        self.db.insert(&id, &embedding, Some(meta))?;
+        // Delegate to GenericMemory for priority, decay, usage stats, transfer level
+        self.inner.learn_raw(&id, &embedding, meta, &embed_text)?;
 
         if let Some(ref log) = self.changelog {
             log.track_insert(&id, &embedding, None);
@@ -657,7 +688,6 @@ impl AgentMemory {
         meta.insert("language", snippet.language.as_str());
         meta.insert("use_case", snippet.use_case.as_str());
         meta.insert("quality", snippet.quality_score as f64);
-        meta.insert("timestamp", current_timestamp() as i64);
 
         if !snippet.dependencies.is_empty() {
             meta.insert("dependencies", snippet.dependencies.join(","));
@@ -674,9 +704,9 @@ impl AgentMemory {
             "{}\n{}\n{}",
             snippet.description, snippet.code, snippet.use_case
         );
-        let embedding = self.embed(&embed_text);
+        let embedding = self.embed(&embed_text)?;
 
-        self.db.insert(&id, &embedding, Some(meta))?;
+        self.inner.learn_raw(&id, &embedding, meta, &embed_text)?;
 
         if let Some(ref log) = self.changelog {
             log.track_insert(&id, &embedding, None);
@@ -695,7 +725,6 @@ impl AgentMemory {
         meta.insert("function", api.function.as_str());
         meta.insert("description", api.description.as_str());
         meta.insert("code", api.example.as_str());
-        meta.insert("timestamp", current_timestamp() as i64);
 
         if let Some(ref version) = api.version {
             meta.insert("version", version.as_str());
@@ -705,9 +734,9 @@ impl AgentMemory {
             "{} {} {}\n{}",
             api.library, api.function, api.description, api.example
         );
-        let embedding = self.embed(&embed_text);
+        let embedding = self.embed(&embed_text)?;
 
-        self.db.insert(&id, &embedding, Some(meta))?;
+        self.inner.learn_raw(&id, &embedding, meta, &embed_text)?;
 
         if let Some(ref log) = self.changelog {
             log.track_insert(&id, &embedding, None);
@@ -724,9 +753,9 @@ impl AgentMemory {
         meta.insert("type", MemoryType::ErrorSolution.as_str());
         meta.insert("error_message", error.error_message.as_str());
         meta.insert("error_type", error.error_type.as_str());
+        meta.insert("description", error.error_message.as_str());
         meta.insert("solution", error.solution.as_str());
         meta.insert("language", error.language.as_str());
-        meta.insert("timestamp", current_timestamp() as i64);
 
         if let Some(ref code) = error.fixed_code {
             meta.insert("code", code.as_str());
@@ -740,9 +769,9 @@ impl AgentMemory {
             "{}\n{}\n{}",
             error.error_message, error.root_cause, error.solution
         );
-        let embedding = self.embed(&embed_text);
+        let embedding = self.embed(&embed_text)?;
 
-        self.db.insert(&id, &embedding, Some(meta))?;
+        self.inner.learn_raw(&id, &embedding, meta, &embed_text)?;
 
         if let Some(ref log) = self.changelog {
             log.track_insert(&id, &embedding, None);
@@ -757,18 +786,18 @@ impl AgentMemory {
 
     /// Busca memorias similares por texto
     pub fn recall_similar(&self, query: &str, k: usize) -> Result<Vec<MemoryRecall>> {
-        let embedding = self.embed(query);
+        let embedding = self.embed(query)?;
 
         // Búsqueda híbrida: vector + keywords
         let params = HybridSearchParams::hybrid(embedding, query, k);
-        let results = self.db.hybrid_search(params)?;
+        let results = self.db().hybrid_search(params)?;
 
         Ok(results.into_iter().map(|r| self.to_recall(r)).collect())
     }
 
     /// Busca memorias similares con embedding externo
     pub fn recall_by_embedding(&self, embedding: &[f32], k: usize) -> Result<Vec<MemoryRecall>> {
-        let results = self.db.search(embedding, k)?;
+        let results = self.db().search(embedding, k)?;
         Ok(results
             .into_iter()
             .map(|r| self.to_recall_from_search(r))
@@ -777,9 +806,9 @@ impl AgentMemory {
 
     /// Busca experiencias similares (solo episodios)
     pub fn recall_experiences(&self, query: &str, k: usize) -> Result<Vec<MemoryRecall>> {
-        let embedding = self.embed(query);
+        let embedding = self.embed(query)?;
 
-        let results = self.db.search_with_filter(
+        let results = self.db().search_with_filter(
             &embedding,
             k,
             Filter::eq("type", MemoryType::Episode.as_str()),
@@ -793,9 +822,9 @@ impl AgentMemory {
 
     /// Busca código similar
     pub fn recall_code(&self, query: &str, k: usize) -> Result<Vec<MemoryRecall>> {
-        let embedding = self.embed(query);
+        let embedding = self.embed(query)?;
 
-        let results = self.db.search_with_filter(
+        let results = self.db().search_with_filter(
             &embedding,
             k,
             Filter::eq("type", MemoryType::CodeSnippet.as_str()),
@@ -813,9 +842,9 @@ impl AgentMemory {
         error_message: &str,
         k: usize,
     ) -> Result<Vec<MemoryRecall>> {
-        let embedding = self.embed(error_message);
+        let embedding = self.embed(error_message)?;
 
-        let results = self.db.search_with_filter(
+        let results = self.db().search_with_filter(
             &embedding,
             k,
             Filter::eq("type", MemoryType::ErrorSolution.as_str()),
@@ -829,7 +858,7 @@ impl AgentMemory {
 
     /// Busca por keywords exactos
     pub fn recall_by_keywords(&self, keywords: &str, k: usize) -> Result<Vec<MemoryRecall>> {
-        let results = self.db.keyword_search(keywords, k)?;
+        let results = self.db().keyword_search(keywords, k)?;
         Ok(results.into_iter().map(|r| self.to_recall(r)).collect())
     }
 
@@ -840,9 +869,9 @@ impl AgentMemory {
         if let Some(project) = project {
             let index_name = format!("project_{}", project.replace(['/', '\\', ' '], "_"));
 
-            if self.db.has_partial_index(&index_name) {
-                let embedding = self.embed(query);
-                let results = self.db.search_partial(&index_name, &embedding, k)?;
+            if self.db().has_partial_index(&index_name) {
+                let embedding = self.embed(query)?;
+                let results = self.db().search_partial(&index_name, &embedding, k)?;
                 return Ok(results
                     .into_iter()
                     .map(|r| self.to_recall_from_search(r))
@@ -852,8 +881,8 @@ impl AgentMemory {
 
         // Fallback a búsqueda general con filtro
         if let Some(ref project) = self.working.read().current_project {
-            let embedding = self.embed(query);
-            let results = self.db.search_with_filter(
+            let embedding = self.embed(query)?;
+            let results = self.db().search_with_filter(
                 &embedding,
                 k,
                 Filter::eq("project", project.as_str()),
@@ -869,9 +898,9 @@ impl AgentMemory {
 
     /// Busca experiencias exitosas similares
     pub fn recall_successful(&self, query: &str, k: usize) -> Result<Vec<MemoryRecall>> {
-        let embedding = self.embed(query);
+        let embedding = self.embed(query)?;
 
-        let results = self.db.search_with_filter(
+        let results = self.db().search_with_filter(
             &embedding,
             k,
             Filter::all(vec![
@@ -888,9 +917,9 @@ impl AgentMemory {
 
     /// Busca experiencias fallidas para evitar errores
     pub fn recall_failures(&self, query: &str, k: usize) -> Result<Vec<MemoryRecall>> {
-        let embedding = self.embed(query);
+        let embedding = self.embed(query)?;
 
-        let results = self.db.search_with_filter(
+        let results = self.db().search_with_filter(
             &embedding,
             k,
             Filter::all(vec![
@@ -985,33 +1014,31 @@ impl AgentMemory {
 
     /// Obtiene estadísticas de la memoria
     pub fn stats(&self) -> Result<MemoryStats> {
-        let total = self.db.len();
+        // Single pass: count types by iterating all IDs and reading metadata
+        let mut episodes = 0usize;
+        let mut code_snippets = 0usize;
+        let mut api_knowledge = 0usize;
+        let mut error_solutions = 0usize;
+        let mut patterns = 0usize;
+        let mut internal = 0usize;
 
-        // Contar por tipo (simplificado)
-        let episodes = self
-            .db
-            .filter_search(Filter::eq("type", "episode"), total)?
-            .len();
+        for id in self.db().list_ids()? {
+            if let Some((_, Some(meta))) = self.db().get(&id)? {
+                if let Some(crate::MetadataValue::String(t)) = meta.get("type") {
+                    match t.as_str() {
+                        "episode" => episodes += 1,
+                        "code_snippet" => code_snippets += 1,
+                        "api_knowledge" => api_knowledge += 1,
+                        "error_solution" => error_solutions += 1,
+                        "pattern" => patterns += 1,
+                        "__internal__" => internal += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
 
-        let code_snippets = self
-            .db
-            .filter_search(Filter::eq("type", "code_snippet"), total)?
-            .len();
-
-        let api_knowledge = self
-            .db
-            .filter_search(Filter::eq("type", "api_knowledge"), total)?
-            .len();
-
-        let error_solutions = self
-            .db
-            .filter_search(Filter::eq("type", "error_solution"), total)?
-            .len();
-
-        let patterns = self
-            .db
-            .filter_search(Filter::eq("type", "pattern"), total)?
-            .len();
+        let total = self.db().len() - internal;
 
         Ok(MemoryStats {
             total_entries: total,
@@ -1021,7 +1048,7 @@ impl AgentMemory {
             error_solutions,
             patterns,
             projects: self
-                .db
+                .db()
                 .list_partial_indexes()
                 .iter()
                 .filter_map(|idx| idx.name.strip_prefix("project_").map(String::from))
@@ -1031,7 +1058,7 @@ impl AgentMemory {
 
     /// Elimina una entrada de memoria
     pub fn forget(&self, id: &str) -> Result<bool> {
-        let deleted = self.db.delete(id)?;
+        let deleted = self.db().delete(id)?;
         if deleted {
             if let Some(ref log) = self.changelog {
                 log.track_delete(id);
@@ -1042,14 +1069,14 @@ impl AgentMemory {
 
     /// Limpia memorias antiguas
     pub fn cleanup_old(&self, max_age_days: u32) -> Result<usize> {
-        let cutoff = current_timestamp() - (max_age_days as u64 * 24 * 60 * 60 * 1000);
+        let cutoff = current_timestamp() - (max_age_days as u64 * 24 * 60 * 60);
         let mut deleted = 0;
 
-        let all_ids = self.db.list_ids()?;
+        let all_ids = self.db().list_ids()?;
         for id in all_ids {
-            if let Some((_, Some(meta))) = self.db.get(&id)? {
+            if let Some((_, Some(meta))) = self.db().get(&id)? {
                 if let Some(crate::MetadataValue::Int(ts)) = meta.get("timestamp") {
-                    if (*ts as u64) < cutoff && self.db.delete(&id)? {
+                    if (*ts as u64) < cutoff && self.db().delete(&id)? {
                         deleted += 1;
                     }
                 }
@@ -1061,7 +1088,12 @@ impl AgentMemory {
 
     /// Acceso a la base de datos subyacente
     pub fn db(&self) -> &VectorDB {
-        &self.db
+        self.inner.db()
+    }
+
+    /// Acceso al GenericMemory subyacente (para features avanzadas de prioridad/transfer)
+    pub fn generic_memory(&self) -> &GenericMemory<SoftwareDevelopment> {
+        &self.inner
     }
 
     /// Acceso al changelog
@@ -1078,7 +1110,7 @@ fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_secs()
 }
 
 fn generate_id() -> String {
@@ -1116,10 +1148,42 @@ mod tests {
         assert_eq!(stats.total_entries, 0);
     }
 
+    fn dummy_embed(dims: usize) -> impl Fn(&str) -> Vec<f32> + Send + Sync {
+        move |text: &str| {
+            // Simple deterministic hash-based embedding for tests
+            let mut vec = vec![0.0f32; dims];
+            for (i, byte) in text.bytes().enumerate() {
+                vec[i % dims] += byte as f32 / 255.0;
+            }
+            // Normalize
+            let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vec.iter_mut().for_each(|x| *x /= norm);
+            }
+            vec
+        }
+    }
+
+    #[test]
+    fn test_learn_task_requires_embed_fn() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        // Without embed_fn, learn_task should fail
+        let result = memory.learn_task(
+            "Implement login",
+            "fn login() { ... }",
+            TaskOutcome::Success,
+            vec!["Use bcrypt for passwords"],
+        );
+        assert!(result.is_err());
+    }
+
     #[test]
     fn test_learn_task() {
         let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let mut memory = AgentMemory::new(config).unwrap();
+        memory.set_embed_fn(dummy_embed(384));
 
         let id = memory
             .learn_task(
@@ -1131,13 +1195,14 @@ mod tests {
             .unwrap();
 
         assert!(id.starts_with("episode-"));
-        assert_eq!(memory.db.len(), 1);
+        assert_eq!(memory.db().len(), 1);
     }
 
     #[test]
     fn test_learn_code_snippet() {
         let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let mut memory = AgentMemory::new(config).unwrap();
+        memory.set_embed_fn(dummy_embed(384));
 
         let id = memory
             .learn_code(CodeSnippet {
@@ -1157,7 +1222,8 @@ mod tests {
     #[test]
     fn test_learn_error_solution() {
         let config = MemoryConfig::small();
-        let memory = AgentMemory::new(config).unwrap();
+        let mut memory = AgentMemory::new(config).unwrap();
+        memory.set_embed_fn(dummy_embed(384));
 
         let id = memory
             .learn_error_solution(ErrorSolution {
@@ -1184,6 +1250,6 @@ mod tests {
             memory.working_context().current_project,
             Some("test-project".to_string())
         );
-        assert!(memory.db.has_partial_index("project_test-project"));
+        assert!(memory.db().has_partial_index("project_test-project"));
     }
 }

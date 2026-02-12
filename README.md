@@ -357,10 +357,10 @@ println!("Has fulltext: {}", db.has_fulltext());
 ### Persistencia
 
 ```rust
-// Guardar a disco
+// Guardar a disco (escritura atómica con CRC32)
 db.save("my_database.mmdb")?;
 
-// Cargar desde disco
+// Cargar desde disco (verifica CRC32)
 let db = VectorDB::open("my_database.mmdb")?;
 
 // Con full-text search
@@ -370,17 +370,26 @@ let db = VectorDB::open_with_fulltext(
 )?;
 ```
 
+El formato `.mmdb` v2 incluye:
+- **Vectores + metadata** serializados con bincode
+- **HNSW index** persistido (tagged block "HNSW") - no necesita reconstruir el grafo al cargar
+- **BM25 index** persistido (tagged block "BM25") - keywords listos inmediatamente
+- **CRC32 checksum** para detectar corrupción
+- **Escritura atómica** (escribe a `.tmp`, luego renombra) para crash safety
+- Compatible con archivos v1 (lectura backward-compatible)
+
 ## Arquitectura
 
 ```
 minimemory
 ├── VectorDB              # Interfaz principal
 ├── Storage               # Capa de almacenamiento
-│   └── MemoryStorage     # HashMap thread-safe
+│   ├── MemoryStorage     # HashMap thread-safe
+│   └── DiskStorage       # .mmdb con CRC32 + escritura atómica
 ├── Index                 # Indexación vectorial
 │   ├── FlatIndex         # Búsqueda exacta O(n)
-│   └── HNSWIndex         # Búsqueda aproximada O(log n)
-├── BM25Index             # Full-text search
+│   └── HNSWIndex         # Búsqueda aproximada O(log n) (persistido)
+├── BM25Index             # Full-text search (persistido)
 ├── Query                 # Sistema de filtros
 │   └── Filter            # Operadores de filtrado
 ├── Search                # Búsqueda híbrida
@@ -398,24 +407,25 @@ minimemory
 ├── Replication           # Sincronización entre instancias
 │   ├── ChangeLog         # Registro de operaciones
 │   └── ReplicationManager # Gestor de sync
-├── AgentMemory           # Memoria para agentes de código
-│   ├── WorkingContext    # Contexto actual
-│   ├── TaskEpisode       # Experiencias de tareas
-│   └── CodeSnippet       # Código aprendido
-├── Transfer              # Transferencia de conocimiento
-│   ├── TransferableMemory # Memoria transferible
-│   ├── KnowledgeDomain   # Dominios de conocimiento
-│   └── ProjectContext    # Contexto de proyecto
-├── MemoryTraits          # Sistema domain-agnostic
+├── MemoryTraits          # Sistema domain-agnostic (core)
 │   ├── GenericMemory<P>  # Memoria genérica parametrizada
 │   ├── DomainPreset      # Configuración de dominio
-│   ├── TransferLevel     # Niveles de transferibilidad
+│   ├── TransferLevel     # Niveles de transferibilidad (unificado)
 │   ├── Priority          # Sistema de prioridad híbrida
 │   ├── DecayConfig       # Decay temporal exponencial
+│   ├── UsageStats        # Estadísticas persistentes de uso
 │   └── Presets           # Presets predefinidos
 │       ├── SoftwareDevelopment
 │       ├── Conversational
 │       └── CustomerService
+├── AgentMemory           # Facade sobre GenericMemory<SoftwareDev>
+│   ├── WorkingContext    # Contexto actual (persistido)
+│   ├── TaskEpisode       # Experiencias de tareas
+│   └── CodeSnippet       # Código aprendido
+├── Transfer              # Transferencia de conocimiento
+│   ├── TransferableMemory # Wrapper sobre AgentMemory
+│   ├── KnowledgeDomain   # Dominios de conocimiento
+│   └── ProjectContext    # Contexto de proyecto
 └── Distance              # Métricas
     ├── Cosine
     ├── Euclidean
@@ -1191,6 +1201,17 @@ const results = db.search(new Array(384).fill(0.1), 10);
 - [x] **Prioridad híbrida (manual + automática + uso + recencia)**
 - [x] **Decay temporal exponencial configurable**
 - [x] **Presets: SoftwareDevelopment, Conversational, CustomerService**
+- [x] **HNSW index persistence** (serialized to .mmdb)
+- [x] **BM25 index persistence** (serialized to .mmdb)
+- [x] **CRC32 checksum** verification on .mmdb files
+- [x] **Atomic writes** (.tmp + rename) for crash safety
+- [x] **AgentMemory unified as GenericMemory facade** (inherits priority, decay, usage stats)
+- [x] **UsageStats persistence** across save/load cycles
+- [x] **WorkingContext persistence** across save/load cycles
+- [x] **Unified TransferLevel** (eliminated duplicate enum)
+- [x] **HNSW entry point recovery** after node deletion
+- [x] **HNSW index defragmentation** (free indices pool)
+- [x] **272 total tests** (159 unit + 83 integration + 30 doc-tests)
 
 ## Licencia
 
