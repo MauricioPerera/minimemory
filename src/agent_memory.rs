@@ -419,6 +419,43 @@ impl MemoryConfig {
             ..Default::default()
         }
     }
+
+    /// Configuración para all-MiniLM-L6-v2 (384 dims, ligero).
+    ///
+    /// Requiere feature `embeddings`.
+    #[cfg(feature = "embeddings")]
+    pub fn minilm() -> Self {
+        Self {
+            embedding_dimensions: 384,
+            ..Default::default()
+        }
+    }
+
+    /// Configuración para BGE-small-en-v1.5 (384 dims, alta calidad inglés).
+    ///
+    /// Requiere feature `embeddings`.
+    #[cfg(feature = "embeddings")]
+    pub fn bge_small() -> Self {
+        Self {
+            embedding_dimensions: 384,
+            ..Default::default()
+        }
+    }
+
+    /// Configuración para EmbeddingGemma (multilingüe, Matryoshka).
+    ///
+    /// # Argumentos
+    ///
+    /// * `dimensions` - Dimensiones de salida: 768 (full), 512, 256, o 128
+    ///
+    /// Requiere feature `embeddings`.
+    #[cfg(feature = "embeddings")]
+    pub fn gemma(dimensions: usize) -> Self {
+        Self {
+            embedding_dimensions: dimensions,
+            ..Default::default()
+        }
+    }
 }
 
 // ============================================================================
@@ -553,6 +590,53 @@ impl AgentMemory {
         }
 
         self.db().save(path)
+    }
+
+    /// Crea AgentMemory con embeddings locales usando un modelo de HuggingFace.
+    ///
+    /// Descarga el modelo automáticamente (cacheado en `~/.cache/huggingface/`).
+    /// No requiere API key ni conexión después de la primera descarga.
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust,ignore
+    /// use minimemory::agent_memory::AgentMemory;
+    /// use minimemory::embeddings::EmbeddingModel;
+    ///
+    /// // Modelo ligero para inglés
+    /// let memory = AgentMemory::with_local_embeddings(EmbeddingModel::MiniLM)?;
+    ///
+    /// // Modelo multilingüe con dimensiones reducidas
+    /// let memory = AgentMemory::with_local_embeddings(
+    ///     EmbeddingModel::Gemma { dimensions: 256 }
+    /// )?;
+    /// ```
+    #[cfg(feature = "embeddings")]
+    pub fn with_local_embeddings(
+        model: crate::embeddings::EmbeddingModel,
+    ) -> Result<Self> {
+        let config = MemoryConfig::new(model.dimensions());
+        let mut memory = Self::new(config)?;
+
+        let embedder = crate::embeddings::Embedder::new(model)?;
+        memory.embed_fn = Some(Box::new(embedder.into_embed_fn()));
+
+        Ok(memory)
+    }
+
+    /// Crea AgentMemory con embeddings locales y configuración personalizada.
+    #[cfg(feature = "embeddings")]
+    pub fn with_local_embeddings_config(
+        model: crate::embeddings::EmbeddingModel,
+        mut config: MemoryConfig,
+    ) -> Result<Self> {
+        config.embedding_dimensions = model.dimensions();
+        let mut memory = Self::new(config)?;
+
+        let embedder = crate::embeddings::Embedder::new(model)?;
+        memory.embed_fn = Some(Box::new(embedder.into_embed_fn()));
+
+        Ok(memory)
     }
 
     /// Establece la función de embedding

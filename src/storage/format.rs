@@ -106,7 +106,7 @@ impl FileHeader {
 
         // Reserved (padding to 64 bytes)
         // 4 + 4 + 4 + 8 + 1 + 1 + 2 + 2 + 8 + 8 = 42 bytes used
-        let padding = vec![0u8; HEADER_SIZE - 42];
+        let padding = [0u8; HEADER_SIZE - 42];
         writer.write_all(&padding)?;
 
         Ok(())
@@ -170,7 +170,7 @@ impl FileHeader {
         let index_offset = u64::from_le_bytes(buf8);
 
         // Skip reserved bytes
-        let mut reserved = vec![0u8; HEADER_SIZE - 42];
+        let mut reserved = [0u8; HEADER_SIZE - 42];
         reader.read_exact(&mut reserved)?;
 
         Ok(Self {

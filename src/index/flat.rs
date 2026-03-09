@@ -1,5 +1,11 @@
+//! Flat index: búsqueda exacta por fuerza bruta.
+//!
+//! Usa heap selection O(n log k) para top-k en vez de sort completo O(n log n),
+//! lo que mejora significativamente el rendimiento cuando k << n.
+
 use parking_lot::RwLock;
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashSet};
+use std::cmp::Ordering;
 
 use crate::distance::Distance;
 use crate::error::Result;
@@ -7,6 +13,31 @@ use crate::storage::Storage;
 use crate::types::SearchResult;
 
 use super::Index;
+
+/// Wrapper for max-heap top-k selection (largest distance = highest priority to evict)
+struct MaxSearchResult(SearchResult);
+
+impl PartialEq for MaxSearchResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.distance == other.0.distance
+    }
+}
+impl Eq for MaxSearchResult {}
+
+impl PartialOrd for MaxSearchResult {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MaxSearchResult {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0
+            .distance
+            .partial_cmp(&other.0.distance)
+            .unwrap_or(Ordering::Equal)
+    }
+}
 
 /// Flat index that performs brute-force exact search
 pub struct FlatIndex {
@@ -52,27 +83,36 @@ impl Index for FlatIndex {
         storage: &dyn Storage,
         distance: Distance,
     ) -> Result<Vec<SearchResult>> {
-        // Collect distances only from documents that have vectors
-        let mut results: Vec<SearchResult> = storage
-            .iter_with_vectors()
-            .filter_map(|stored| {
-                // Only process documents with vectors
-                stored.vector.as_ref().map(|vec| {
-                    let dist = distance.calculate(query, vec);
-                    SearchResult {
+        // Use a max-heap of size k for O(n log k) top-k selection
+        // instead of O(n log n) full sort
+        let mut heap: BinaryHeap<MaxSearchResult> = BinaryHeap::with_capacity(k + 1);
+
+        for stored in storage.iter_with_vectors() {
+            if let Some(vec) = stored.vector.as_ref() {
+                let dist = distance.calculate(query, vec);
+
+                if heap.len() < k {
+                    heap.push(MaxSearchResult(SearchResult {
                         id: stored.id,
                         distance: dist,
                         metadata: stored.metadata,
+                    }));
+                } else if let Some(worst) = heap.peek() {
+                    if dist < worst.0.distance {
+                        heap.pop();
+                        heap.push(MaxSearchResult(SearchResult {
+                            id: stored.id,
+                            distance: dist,
+                            metadata: stored.metadata,
+                        }));
                     }
-                })
-            })
-            .collect();
+                }
+            }
+        }
 
-        // Sort by distance (ascending - smaller is better)
-        results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
-
-        // Take top k
-        results.truncate(k);
+        // Extract and sort the top-k results by distance (ascending)
+        let mut results: Vec<SearchResult> = heap.into_iter().map(|m| m.0).collect();
+        results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
 
         Ok(results)
     }

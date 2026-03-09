@@ -2,6 +2,11 @@
 //!
 //! Proporciona persistencia para la base de datos vectorial.
 //! Soporta escrituras atómicas (write to .tmp + rename) y CRC32 checksums.
+//!
+//! ## Optimizaciones de I/O:
+//! - BufWriter/BufReader de 256KB (vs 8KB default) para reducir syscalls
+//! - Reutilización de buffer en carga de vectores (1 alloc vs N allocs)
+//! - Header padding en stack (evita alloc heap para 22 bytes)
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
@@ -90,10 +95,10 @@ fn write_vectors_to_file(
     index_blocks: &IndexBlocks<'_>,
 ) -> Result<()> {
     let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::with_capacity(256 * 1024, file);
 
     // Reservar espacio para el header (lo escribiremos al final con offsets correctos)
-    let placeholder = vec![0u8; HEADER_SIZE];
+    let placeholder = [0u8; HEADER_SIZE];
     writer.write_all(&placeholder)?;
 
     // CRC32 hasher for all data after header
@@ -175,7 +180,7 @@ pub fn load_vectors<P: AsRef<Path>>(
 ) -> Result<(FileHeader, Vec<StoredVector>, LoadedIndexBlocks)> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
 
     // Leer header
     let header = FileHeader::read_from(&mut reader)?;
@@ -186,6 +191,8 @@ pub fn load_vectors<P: AsRef<Path>>(
     // Leer vectores
     let mut vectors = Vec::with_capacity(header.num_vectors as usize);
     let mut buf4 = [0u8; 4];
+    // Reuse a single buffer across iterations to avoid per-vector heap allocations
+    let mut data: Vec<u8> = Vec::with_capacity(4096);
 
     for _ in 0..header.num_vectors {
         // Leer longitud
@@ -196,11 +203,11 @@ pub fn load_vectors<P: AsRef<Path>>(
 
         hasher.update(&buf4);
 
-        // Leer datos
-        let mut data = vec![0u8; len];
-        reader.read_exact(&mut data)?;
+        // Leer datos (reuse buffer, only grows if needed)
+        data.resize(len, 0);
+        reader.read_exact(&mut data[..len])?;
 
-        hasher.update(&data);
+        hasher.update(&data[..len]);
 
         // Deserializar
         let entry: VectorEntry = bincode::deserialize(&data)?;

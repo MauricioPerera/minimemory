@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.5.0] - 2025
 
 ### Added
+- **Local embeddings** feature (`embeddings`): generate embeddings in pure Rust without external APIs
+  - **BERT/Sentence-Transformer** backend for MiniLM and BGE models (384 dims)
+  - **EmbeddingGemma** backend: Google's multilingual embedding model (768 dims, Matryoshka)
+    - Bidirectional attention (encoder-only, no causal mask)
+    - **RoPE** (Rotary Position Embeddings) for relative position encoding — precomputes sin/cos frequencies and rotates Q, K tensors so attention depends on relative distance `m-n` rather than absolute positions
+    - **GQA** (Grouped Query Attention) for memory-efficient multi-head attention
+    - RMSNorm, GeGLU feed-forward, mean pooling, and MLP projection
+    - Matryoshka truncation: 768 → 512/256/128 with minimal quality loss
+  - `Embedder::into_embed_fn()` for seamless `AgentMemory` integration
+  - Automatic model download and caching via HuggingFace Hub
 - `GenericMemory::with_db()` constructor to wrap an existing `VectorDB` instance
 - `GenericMemory::learn_raw()` and `learn_raw_with_priority()` for pre-built metadata ingestion
 - `GenericMemory::db()` accessor for direct `VectorDB` access
@@ -21,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HNSW `free_indices` pool for reusing deleted node slots without index fragmentation
 - 83 integration tests (up from 69) covering memory systems, persistence round-trips, and concurrency
 - 30 doc-tests across public API
+
+### Performance
+- **FlatIndex heap selection**: top-k search uses `BinaryHeap` O(n log k) instead of full sort O(n log n) — significant speedup when k << n
+- **HNSW `Candidate` Copy**: 12-byte struct (usize + f32) derives `Copy`, eliminating unnecessary heap clones in search hot path
+- **HNSW quickselect**: `select_nth_unstable_by` O(n) replaces full `sort_by` O(n log n) in `select_neighbors` and neighbor pruning
+- **HNSW zero-alloc traversal**: `search_layer` takes `&[usize]` instead of `Vec<usize>`, and `current_nearest` is reused with `clear()+push()` across levels — eliminates heap allocations per layer during search and insertion
+- **I/O buffers**: `BufWriter`/`BufReader` sized to 256KB (vs default 8KB), reducing syscalls on large `.mmdb` files
+- **Disk load buffer reuse**: single read buffer reused across all vectors during `.mmdb` load (1 alloc vs N allocs)
+- **Stack-allocated padding**: `.mmdb` header padding uses `[0u8; 22]` on stack instead of `Vec` heap allocation
 
 ### Changed
 - **AgentMemory now wraps `GenericMemory<SoftwareDevelopment>`** instead of raw `VectorDB`, inheriting priority scoring, temporal decay, usage stats, transfer level inference, and concept extraction automatically

@@ -7,6 +7,11 @@
 //! - Prefetch de vecinos para mejor cache hit rate
 //! - ef_search configurable para trade-off precisión/velocidad
 //! - Batch processing de candidatos
+//! - **Candidate `Copy`**: struct de 12 bytes (usize + f32) evita clones en heap
+//! - **Quickselect**: `select_nth_unstable_by` O(n) en neighbor selection y pruning
+//!   en vez de sort completo O(n log n)
+//! - **Zero-alloc layer traversal**: `search_layer` recibe `&[usize]` y reutiliza
+//!   el Vec `current_nearest` con `clear()+push()` entre niveles
 
 use parking_lot::RwLock;
 use rand::Rng;
@@ -72,7 +77,7 @@ struct Level {
 }
 
 /// Elemento para el heap de búsqueda
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Candidate {
     idx: usize,
     distance: f32,
@@ -194,7 +199,7 @@ impl HNSWIndex {
         &self,
         inner: &HNSWInner,
         query: &[f32],
-        entry_points: Vec<usize>,
+        entry_points: &[usize],
         ef: usize,
         level: usize,
         storage: &dyn Storage,
@@ -205,7 +210,7 @@ impl HNSWIndex {
         let mut result: BinaryHeap<MaxCandidate> = BinaryHeap::with_capacity(ef + 1);
 
         // Inicializar con puntos de entrada
-        for ep in entry_points {
+        for &ep in entry_points {
             if visited.insert(ep) {
                 let id = &inner.idx_to_id[ep];
                 if let Ok(Some(stored)) = storage.get(id) {
@@ -215,7 +220,7 @@ impl HNSWIndex {
                             idx: ep,
                             distance: dist,
                         };
-                        candidates.push(candidate.clone());
+                        candidates.push(candidate);
                         result.push(MaxCandidate(candidate));
                     }
                 }
@@ -269,7 +274,7 @@ impl HNSWIndex {
                                         idx: neighbor_idx,
                                         distance: dist,
                                     };
-                                    candidates.push(candidate.clone());
+                                    candidates.push(candidate);
                                     result.push(MaxCandidate(candidate));
 
                                     // Mantener solo ef elementos
@@ -291,12 +296,15 @@ impl HNSWIndex {
     /// Selecciona los mejores vecinos usando heurística simple
     fn select_neighbors(&self, candidates: Vec<Candidate>, m: usize) -> Vec<usize> {
         let mut sorted: Vec<_> = candidates;
-        sorted.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(Ordering::Equal)
-        });
-        sorted.truncate(m);
+        if sorted.len() > m {
+            // O(n) partial sort instead of O(n log n) full sort
+            sorted.select_nth_unstable_by(m - 1, |a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(Ordering::Equal)
+            });
+            sorted.truncate(m);
+        }
         sorted.into_iter().map(|c| c.idx).collect()
     }
 
@@ -351,10 +359,12 @@ impl HNSWIndex {
                                     Some((n_idx, distance_fn.calculate(neighbor_vec, vec)))
                                 })
                                 .collect();
-                            scored.sort_by(|a, b| {
-                                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-                            });
-                            scored.truncate(m_max);
+                            if scored.len() > m_max {
+                                scored.select_nth_unstable_by(m_max - 1, |a, b| {
+                                    a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
+                                });
+                                scored.truncate(m_max);
+                            }
                             *neighbor_neighbors = scored.into_iter().map(|(idx, _)| idx).collect();
                         }
                     }
@@ -436,14 +446,15 @@ impl Index for HNSWIndex {
             let candidates = self.search_layer(
                 &inner,
                 vector,
-                current_nearest.clone(),
+                &current_nearest,
                 1, // ef=1 para niveles superiores
                 level,
                 storage,
                 distance,
             );
             if !candidates.is_empty() {
-                current_nearest = vec![candidates[0].idx];
+                current_nearest.clear();
+                current_nearest.push(candidates[0].idx);
             }
         }
 
@@ -453,7 +464,7 @@ impl Index for HNSWIndex {
             let candidates = self.search_layer(
                 &inner,
                 vector,
-                current_nearest.clone(),
+                &current_nearest,
                 self.ef_construction,
                 level,
                 storage,
@@ -462,15 +473,14 @@ impl Index for HNSWIndex {
 
             // Seleccionar mejores vecinos
             let m_limit = if level == 0 { self.m_max0 } else { self.m };
-            let neighbors = self.select_neighbors(candidates.clone(), m_limit);
+            let neighbors = self.select_neighbors(candidates.iter().copied().collect(), m_limit);
 
             // Conectar bidireccional
             self.connect_neighbors(&mut inner, new_idx, &neighbors, level, m_limit, storage, distance);
 
             // Usar los mejores candidatos como entrada para el siguiente nivel
-            if !candidates.is_empty() {
-                current_nearest = candidates.iter().map(|c| c.idx).collect();
-            }
+            current_nearest.clear();
+            current_nearest.extend(candidates.iter().map(|c| c.idx));
         }
 
         // Track node level
@@ -550,14 +560,15 @@ impl Index for HNSWIndex {
             let candidates = self.search_layer(
                 &inner,
                 query,
-                current_nearest.clone(),
+                &current_nearest,
                 1, // ef=1 para niveles superiores
                 level,
                 storage,
                 distance,
             );
             if !candidates.is_empty() {
-                current_nearest = vec![candidates[0].idx];
+                current_nearest.clear();
+                current_nearest.push(candidates[0].idx);
             }
         }
 
@@ -568,7 +579,7 @@ impl Index for HNSWIndex {
         let candidates = self.search_layer(
             &inner,
             query,
-            current_nearest,
+            &current_nearest,
             ef_search,
             0,
             storage,

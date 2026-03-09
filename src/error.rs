@@ -35,4 +35,7 @@ pub enum Error {
 
     #[error("Invalid filter: {0}")]
     InvalidFilter(String),
+
+    #[error("Embedding error: {0}")]
+    Embedding(String),
 }
