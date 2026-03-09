@@ -517,12 +517,34 @@ impl VectorDB {
         metadata: Option<Metadata>,
     ) -> Result<()> {
         let id = id.into();
+
+        // Backup old data for rollback if insert fails
+        let backup = self.storage.get(&id)?;
         self.delete(&id)?;
 
-        self.storage
-            .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        self.index
-            .add(&id, vector, &*self.storage, self.config.distance)?;
+        // Try to insert new data; rollback on failure
+        if let Err(e) = self
+            .storage
+            .insert(id.clone(), Some(vector.to_vec()), metadata.clone())
+        {
+            // Restore old data
+            if let Some(old) = backup {
+                let _ = self.storage.insert(old.id, old.vector, old.metadata);
+            }
+            return Err(e);
+        }
+
+        if let Err(e) = self
+            .index
+            .add(&id, vector, &*self.storage, self.config.distance)
+        {
+            // Restore old data
+            let _ = self.storage.delete(&id);
+            if let Some(old) = backup {
+                let _ = self.storage.insert(old.id, old.vector, old.metadata);
+            }
+            return Err(e);
+        }
 
         // Re-indexar en BM25 si está habilitado
         if let Some(ref bm25) = self.bm25_index {
@@ -546,8 +568,20 @@ impl VectorDB {
         metadata: Option<Metadata>,
     ) -> Result<()> {
         let id = id.into();
+
+        // Backup old data for rollback if insert fails
+        let backup = self.storage.get(&id)?;
         self.delete(&id)?;
-        self.insert_document(id, vector, metadata)
+
+        if let Err(e) = self.insert_document(id, vector, metadata) {
+            // Restore old data
+            if let Some(old) = backup {
+                let _ = self.storage.insert(old.id, old.vector, old.metadata);
+            }
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     /// Verifica si un vector existe en la base de datos.

@@ -41,9 +41,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::error::{Error, Result};
 use crate::types::Metadata;
+
+/// Compiled heading regex (cached for reuse across calls)
+static HEADING_PATTERN: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"^(#{1,6})\s+(.+)$").unwrap());
 
 /// Estrategia de chunking para dividir documentos.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,10 +370,8 @@ impl BasicMarkdownParser {
         let mut start_pos = 0;
         let mut chunk_index = 0;
 
-        let heading_pattern = regex_lite::Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
-
         for line in content.lines() {
-            if let Some(caps) = heading_pattern.captures(line) {
+            if let Some(caps) = HEADING_PATTERN.captures(line) {
                 let level = caps.get(1).unwrap().as_str().len() as u8;
                 let heading_text = caps.get(2).unwrap().as_str().to_string();
 
@@ -386,8 +389,8 @@ impl BasicMarkdownParser {
                     );
                     chunks.push(chunk);
                     chunk_index += 1;
-                    current_content.clear();
                     start_pos += current_content.len();
+                    current_content.clear();
                 }
 
                 if level <= max_level {

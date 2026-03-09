@@ -46,11 +46,8 @@ pub struct ScalarQuantParams {
 
 impl Default for ScalarQuantParams {
     fn default() -> Self {
-        Self {
-            min_val: -1.0,
-            max_val: 1.0,
-            scale: 127.0,
-        }
+        // Use Self::new() to ensure consistent scale calculation
+        Self::new(-1.0, 1.0)
     }
 }
 

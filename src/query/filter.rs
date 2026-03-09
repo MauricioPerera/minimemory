@@ -272,9 +272,7 @@ impl FilterEvaluator {
             }
             Filter::And(filters) => filters.iter().all(|f| Self::evaluate(f, metadata)),
             Filter::Or(filters) => {
-                if filters.is_empty() {
-                    return true; // Empty OR is vacuously true
-                }
+                // Empty OR is false (identity element of disjunction)
                 filters.iter().any(|f| Self::evaluate(f, metadata))
             }
             Filter::Not(filter) => !Self::evaluate(filter, metadata),

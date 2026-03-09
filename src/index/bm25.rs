@@ -282,7 +282,7 @@ impl BM25Index {
     fn tokenize(&self, text: &str) -> Vec<String> {
         text.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| !s.is_empty() && s.len() > 1)
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect()
     }

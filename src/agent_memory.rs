@@ -1153,7 +1153,7 @@ impl AgentMemory {
 
     /// Limpia memorias antiguas
     pub fn cleanup_old(&self, max_age_days: u32) -> Result<usize> {
-        let cutoff = current_timestamp() - (max_age_days as u64 * 24 * 60 * 60);
+        let cutoff = current_timestamp().saturating_sub(max_age_days as u64 * 24 * 60 * 60);
         let mut deleted = 0;
 
         let all_ids = self.db().list_ids()?;

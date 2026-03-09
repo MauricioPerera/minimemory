@@ -194,12 +194,20 @@ pub fn load_vectors<P: AsRef<Path>>(
     // Reuse a single buffer across iterations to avoid per-vector heap allocations
     let mut data: Vec<u8> = Vec::with_capacity(4096);
 
+    /// Maximum allowed size for a single serialized vector entry (16MB)
+    const MAX_ENTRY_SIZE: usize = 16 * 1024 * 1024;
+
     for _ in 0..header.num_vectors {
         // Leer longitud
-        if reader.read_exact(&mut buf4).is_err() {
-            break;
-        }
+        reader.read_exact(&mut buf4)?;
         let len = u32::from_le_bytes(buf4) as usize;
+
+        if len > MAX_ENTRY_SIZE {
+            return Err(Error::InvalidConfig(format!(
+                "Vector entry size {} exceeds maximum {} — file may be corrupted",
+                len, MAX_ENTRY_SIZE
+            )));
+        }
 
         hasher.update(&buf4);
 
@@ -223,9 +231,11 @@ pub fn load_vectors<P: AsRef<Path>>(
     let mut index_blocks = LoadedIndexBlocks::default();
     if header.index_offset > 0 {
         loop {
-            // Read 4-byte tag
-            if reader.read_exact(&mut buf4).is_err() {
-                break;
+            // Read 4-byte tag (EOF here is expected — end of file)
+            match reader.read_exact(&mut buf4) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Error::Io(e)),
             }
             hasher.update(&buf4);
 
@@ -235,17 +245,19 @@ pub fn load_vectors<P: AsRef<Path>>(
             }
             // Read block length
             let mut len_buf = [0u8; 4];
-            if reader.read_exact(&mut len_buf).is_err() {
-                break;
-            }
+            reader.read_exact(&mut len_buf)?;
             hasher.update(&len_buf);
 
             let block_len = u32::from_le_bytes(len_buf) as usize;
+            if block_len > MAX_ENTRY_SIZE {
+                return Err(Error::InvalidConfig(format!(
+                    "Index block size {} exceeds maximum {} — file may be corrupted",
+                    block_len, MAX_ENTRY_SIZE
+                )));
+            }
             // Read block data
             let mut block_data = vec![0u8; block_len];
-            if reader.read_exact(&mut block_data).is_err() {
-                break;
-            }
+            reader.read_exact(&mut block_data)?;
             hasher.update(&block_data);
 
             match &buf4 {
@@ -258,7 +270,7 @@ pub fn load_vectors<P: AsRef<Path>>(
 
     // Verify CRC32 checksum (footer: 4 bytes checksum + 4 bytes "END!")
     // Only verify if we have enough bytes remaining for the footer
-    let current_pos = reader.stream_position().unwrap_or(0);
+    let current_pos = reader.stream_position().map_err(Error::Io)?;
     if current_pos + 8 <= file_len {
         let mut checksum_buf = [0u8; 4];
         let mut end_marker = [0u8; 4];
