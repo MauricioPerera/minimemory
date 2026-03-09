@@ -186,6 +186,8 @@ pub fn load_vectors<P: AsRef<Path>>(
     // Leer vectores
     let mut vectors = Vec::with_capacity(header.num_vectors as usize);
     let mut buf4 = [0u8; 4];
+    // Reuse a single buffer across iterations to avoid per-vector heap allocations
+    let mut data: Vec<u8> = Vec::with_capacity(4096);
 
     for _ in 0..header.num_vectors {
         // Leer longitud
@@ -196,11 +198,11 @@ pub fn load_vectors<P: AsRef<Path>>(
 
         hasher.update(&buf4);
 
-        // Leer datos
-        let mut data = vec![0u8; len];
-        reader.read_exact(&mut data)?;
+        // Leer datos (reuse buffer, only grows if needed)
+        data.resize(len, 0);
+        reader.read_exact(&mut data[..len])?;
 
-        hasher.update(&data);
+        hasher.update(&data[..len]);
 
         // Deserializar
         let entry: VectorEntry = bincode::deserialize(&data)?;

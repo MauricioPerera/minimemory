@@ -194,7 +194,7 @@ impl HNSWIndex {
         &self,
         inner: &HNSWInner,
         query: &[f32],
-        entry_points: Vec<usize>,
+        entry_points: &[usize],
         ef: usize,
         level: usize,
         storage: &dyn Storage,
@@ -205,7 +205,7 @@ impl HNSWIndex {
         let mut result: BinaryHeap<MaxCandidate> = BinaryHeap::with_capacity(ef + 1);
 
         // Inicializar con puntos de entrada
-        for ep in entry_points {
+        for &ep in entry_points {
             if visited.insert(ep) {
                 let id = &inner.idx_to_id[ep];
                 if let Ok(Some(stored)) = storage.get(id) {
@@ -441,14 +441,15 @@ impl Index for HNSWIndex {
             let candidates = self.search_layer(
                 &inner,
                 vector,
-                current_nearest.clone(),
+                &current_nearest,
                 1, // ef=1 para niveles superiores
                 level,
                 storage,
                 distance,
             );
             if !candidates.is_empty() {
-                current_nearest = vec![candidates[0].idx];
+                current_nearest.clear();
+                current_nearest.push(candidates[0].idx);
             }
         }
 
@@ -458,7 +459,7 @@ impl Index for HNSWIndex {
             let candidates = self.search_layer(
                 &inner,
                 vector,
-                current_nearest.clone(),
+                &current_nearest,
                 self.ef_construction,
                 level,
                 storage,
@@ -467,15 +468,14 @@ impl Index for HNSWIndex {
 
             // Seleccionar mejores vecinos
             let m_limit = if level == 0 { self.m_max0 } else { self.m };
-            let neighbors = self.select_neighbors(candidates.clone(), m_limit);
+            let neighbors = self.select_neighbors(candidates.iter().copied().collect(), m_limit);
 
             // Conectar bidireccional
             self.connect_neighbors(&mut inner, new_idx, &neighbors, level, m_limit, storage, distance);
 
             // Usar los mejores candidatos como entrada para el siguiente nivel
-            if !candidates.is_empty() {
-                current_nearest = candidates.iter().map(|c| c.idx).collect();
-            }
+            current_nearest.clear();
+            current_nearest.extend(candidates.iter().map(|c| c.idx));
         }
 
         // Track node level
@@ -555,14 +555,15 @@ impl Index for HNSWIndex {
             let candidates = self.search_layer(
                 &inner,
                 query,
-                current_nearest.clone(),
+                &current_nearest,
                 1, // ef=1 para niveles superiores
                 level,
                 storage,
                 distance,
             );
             if !candidates.is_empty() {
-                current_nearest = vec![candidates[0].idx];
+                current_nearest.clear();
+                current_nearest.push(candidates[0].idx);
             }
         }
 
@@ -573,7 +574,7 @@ impl Index for HNSWIndex {
         let candidates = self.search_layer(
             &inner,
             query,
-            current_nearest,
+            &current_nearest,
             ef_search,
             0,
             storage,
