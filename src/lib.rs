@@ -155,6 +155,10 @@ mod storage;
 pub mod transfer;
 mod types;
 
+// Local embeddings (optional)
+#[cfg(feature = "embeddings")]
+pub mod embeddings;
+
 // Bindings para otros lenguajes
 #[cfg(any(feature = "python", feature = "nodejs", feature = "ffi"))]
 pub mod bindings;
