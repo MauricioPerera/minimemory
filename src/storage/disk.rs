@@ -2,6 +2,11 @@
 //!
 //! Proporciona persistencia para la base de datos vectorial.
 //! Soporta escrituras atómicas (write to .tmp + rename) y CRC32 checksums.
+//!
+//! ## Optimizaciones de I/O:
+//! - BufWriter/BufReader de 256KB (vs 8KB default) para reducir syscalls
+//! - Reutilización de buffer en carga de vectores (1 alloc vs N allocs)
+//! - Header padding en stack (evita alloc heap para 22 bytes)
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};

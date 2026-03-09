@@ -7,6 +7,11 @@
 //! - Prefetch de vecinos para mejor cache hit rate
 //! - ef_search configurable para trade-off precisión/velocidad
 //! - Batch processing de candidatos
+//! - **Candidate `Copy`**: struct de 12 bytes (usize + f32) evita clones en heap
+//! - **Quickselect**: `select_nth_unstable_by` O(n) en neighbor selection y pruning
+//!   en vez de sort completo O(n log n)
+//! - **Zero-alloc layer traversal**: `search_layer` recibe `&[usize]` y reutiliza
+//!   el Vec `current_nearest` con `clear()+push()` entre niveles
 
 use parking_lot::RwLock;
 use rand::Rng;

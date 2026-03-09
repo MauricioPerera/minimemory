@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 83 integration tests (up from 69) covering memory systems, persistence round-trips, and concurrency
 - 30 doc-tests across public API
 
+### Performance
+- **FlatIndex heap selection**: top-k search uses `BinaryHeap` O(n log k) instead of full sort O(n log n) — significant speedup when k << n
+- **HNSW `Candidate` Copy**: 12-byte struct (usize + f32) derives `Copy`, eliminating unnecessary heap clones in search hot path
+- **HNSW quickselect**: `select_nth_unstable_by` O(n) replaces full `sort_by` O(n log n) in `select_neighbors` and neighbor pruning
+- **HNSW zero-alloc traversal**: `search_layer` takes `&[usize]` instead of `Vec<usize>`, and `current_nearest` is reused with `clear()+push()` across levels — eliminates heap allocations per layer during search and insertion
+- **I/O buffers**: `BufWriter`/`BufReader` sized to 256KB (vs default 8KB), reducing syscalls on large `.mmdb` files
+- **Disk load buffer reuse**: single read buffer reused across all vectors during `.mmdb` load (1 alloc vs N allocs)
+- **Stack-allocated padding**: `.mmdb` header padding uses `[0u8; 22]` on stack instead of `Vec` heap allocation
+
 ### Changed
 - **AgentMemory now wraps `GenericMemory<SoftwareDevelopment>`** instead of raw `VectorDB`, inheriting priority scoring, temporal decay, usage stats, transfer level inference, and concept extraction automatically
 - `AgentMemory::learn_*` methods delegate to `GenericMemory::learn_raw()`, which auto-enriches metadata with `timestamp`, `priority`, `transfer_level`, `concepts`, `domain`, `usage_stats`

@@ -1,3 +1,8 @@
+//! Flat index: búsqueda exacta por fuerza bruta.
+//!
+//! Usa heap selection O(n log k) para top-k en vez de sort completo O(n log n),
+//! lo que mejora significativamente el rendimiento cuando k << n.
+
 use parking_lot::RwLock;
 use std::collections::{BinaryHeap, HashSet};
 use std::cmp::Ordering;

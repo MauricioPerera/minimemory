@@ -385,10 +385,10 @@ minimemory
 ├── VectorDB              # Interfaz principal
 ├── Storage               # Capa de almacenamiento
 │   ├── MemoryStorage     # HashMap thread-safe
-│   └── DiskStorage       # .mmdb con CRC32 + escritura atómica
+│   └── DiskStorage       # .mmdb con CRC32 + escritura atómica + I/O 256KB
 ├── Index                 # Indexación vectorial
-│   ├── FlatIndex         # Búsqueda exacta O(n)
-│   └── HNSWIndex         # Búsqueda aproximada O(log n) (persistido)
+│   ├── FlatIndex         # Búsqueda exacta O(n), heap top-k O(n log k)
+│   └── HNSWIndex         # Búsqueda aproximada O(log n) (persistido, zero-alloc traversal)
 ├── BM25Index             # Full-text search (persistido)
 ├── Query                 # Sistema de filtros
 │   └── Filter            # Operadores de filtrado
@@ -968,6 +968,20 @@ let memory = GenericMemory::<FinancePreset>::new(768)?;
 | Filtrar | O(n) | O(n) |
 
 *n = número de documentos, d = dimensiones*
+
+### Optimizaciones Internas
+
+minimemory aplica optimizaciones algorítmicas y de memoria en los hot paths:
+
+| Componente | Optimización | Complejidad |
+|-----------|-------------|-------------|
+| **FlatIndex** | Heap selection top-k con `BinaryHeap` | O(n log k) vs O(n log n) |
+| **HNSWIndex** | Quickselect (`select_nth_unstable`) en pruning | O(n) vs O(n log n) |
+| **HNSWIndex** | `Candidate` Copy (12 bytes), zero clones en heap | Sin allocaciones |
+| **HNSWIndex** | `search_layer(&[usize])` + reutilización de Vec | Sin allocaciones por capa |
+| **DiskStorage** | BufWriter/BufReader 256KB | ~32x menos syscalls |
+| **DiskStorage** | Buffer reutilizado en carga de vectores | 1 alloc vs N allocs |
+| **Distancias** | SIMD auto-detect: AVX-512, AVX2+FMA, SSE, NEON | Hasta 16 floats/op |
 
 ## Benchmarks
 
