@@ -90,10 +90,10 @@ fn write_vectors_to_file(
     index_blocks: &IndexBlocks<'_>,
 ) -> Result<()> {
     let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::with_capacity(256 * 1024, file);
 
     // Reservar espacio para el header (lo escribiremos al final con offsets correctos)
-    let placeholder = vec![0u8; HEADER_SIZE];
+    let placeholder = [0u8; HEADER_SIZE];
     writer.write_all(&placeholder)?;
 
     // CRC32 hasher for all data after header
@@ -175,7 +175,7 @@ pub fn load_vectors<P: AsRef<Path>>(
 ) -> Result<(FileHeader, Vec<StoredVector>, LoadedIndexBlocks)> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
 
     // Leer header
     let header = FileHeader::read_from(&mut reader)?;

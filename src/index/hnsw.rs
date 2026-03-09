@@ -72,7 +72,7 @@ struct Level {
 }
 
 /// Elemento para el heap de búsqueda
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Candidate {
     idx: usize,
     distance: f32,
@@ -215,7 +215,7 @@ impl HNSWIndex {
                             idx: ep,
                             distance: dist,
                         };
-                        candidates.push(candidate.clone());
+                        candidates.push(candidate);
                         result.push(MaxCandidate(candidate));
                     }
                 }
@@ -269,7 +269,7 @@ impl HNSWIndex {
                                         idx: neighbor_idx,
                                         distance: dist,
                                     };
-                                    candidates.push(candidate.clone());
+                                    candidates.push(candidate);
                                     result.push(MaxCandidate(candidate));
 
                                     // Mantener solo ef elementos
@@ -291,12 +291,15 @@ impl HNSWIndex {
     /// Selecciona los mejores vecinos usando heurística simple
     fn select_neighbors(&self, candidates: Vec<Candidate>, m: usize) -> Vec<usize> {
         let mut sorted: Vec<_> = candidates;
-        sorted.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(Ordering::Equal)
-        });
-        sorted.truncate(m);
+        if sorted.len() > m {
+            // O(n) partial sort instead of O(n log n) full sort
+            sorted.select_nth_unstable_by(m - 1, |a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(Ordering::Equal)
+            });
+            sorted.truncate(m);
+        }
         sorted.into_iter().map(|c| c.idx).collect()
     }
 
@@ -351,10 +354,12 @@ impl HNSWIndex {
                                     Some((n_idx, distance_fn.calculate(neighbor_vec, vec)))
                                 })
                                 .collect();
-                            scored.sort_by(|a, b| {
-                                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-                            });
-                            scored.truncate(m_max);
+                            if scored.len() > m_max {
+                                scored.select_nth_unstable_by(m_max - 1, |a, b| {
+                                    a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
+                                });
+                                scored.truncate(m_max);
+                            }
                             *neighbor_neighbors = scored.into_iter().map(|(idx, _)| idx).collect();
                         }
                     }
