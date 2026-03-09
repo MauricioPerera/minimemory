@@ -117,17 +117,10 @@ impl BertEmbedder {
             let type_ids = encoding.get_type_ids();
             let attention = encoding.get_attention_mask();
 
-            let len = ids.len();
+            // Tokenizer with PaddingStrategy::BatchLongest handles padding
             all_ids.extend_from_slice(ids);
             all_type_ids.extend_from_slice(type_ids);
             all_attention_mask.extend_from_slice(attention);
-
-            // Padding (ya debería estar hecho por el tokenizer, pero por seguridad)
-            for _ in len..max_len {
-                all_ids.push(0);
-                all_type_ids.push(0);
-                all_attention_mask.push(0);
-            }
         }
 
         let input_ids = Tensor::new(all_ids.as_slice(), &self.device)
@@ -178,22 +171,4 @@ impl BertEmbedder {
 /// Mean pooling: promedio ponderado por attention mask.
 ///
 /// Para cada secuencia, promedia los token embeddings ignorando los tokens de padding.
-fn mean_pooling(output: &Tensor, attention_mask: &Tensor) -> candle_core::Result<Tensor> {
-    let (_batch, _seq_len, _hidden) = output.dims3()?;
-
-    // Expandir attention_mask de [batch, seq] a [batch, seq, hidden]
-    let mask = attention_mask
-        .to_dtype(DType::F32)?
-        .unsqueeze(2)?
-        .broadcast_as(output.shape())?;
-
-    // Multiplicar output por mask y sumar sobre la dimensión de secuencia
-    let masked = output.mul(&mask)?;
-    let sum = masked.sum(1)?; // [batch, hidden]
-
-    // Contar tokens válidos por secuencia
-    let count = mask.sum(1)?; // [batch, hidden]
-    let count = count.clamp(1e-9, f64::MAX)?; // Evitar división por cero
-
-    sum.div(&count)
-}
+use super::mean_pooling;

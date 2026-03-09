@@ -497,14 +497,9 @@ impl GemmaEmbedder {
             let ids = encoding.get_ids();
             let attention = encoding.get_attention_mask();
 
+            // Tokenizer with PaddingStrategy::BatchLongest handles padding
             all_ids.extend_from_slice(ids);
             all_attention_mask.extend_from_slice(attention);
-
-            let len = ids.len();
-            for _ in len..max_len {
-                all_ids.push(0);
-                all_attention_mask.push(0);
-            }
         }
 
         let input_ids = Tensor::new(all_ids.as_slice(), &self.device)
@@ -596,17 +591,4 @@ impl GemmaEmbedder {
     }
 }
 
-/// Mean pooling: promedio ponderado por attention mask.
-fn mean_pooling(output: &Tensor, attention_mask: &Tensor) -> candle_core::Result<Tensor> {
-    let mask = attention_mask
-        .to_dtype(DType::F32)?
-        .unsqueeze(2)?
-        .broadcast_as(output.shape())?;
-
-    let masked = output.mul(&mask)?;
-    let sum = masked.sum(1)?;
-    let count = mask.sum(1)?;
-    let count = count.clamp(1e-9, f64::MAX)?;
-
-    sum.div(&count)
-}
+use super::mean_pooling;

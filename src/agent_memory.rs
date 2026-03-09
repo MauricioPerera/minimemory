@@ -616,12 +616,7 @@ impl AgentMemory {
         model: crate::embeddings::EmbeddingModel,
     ) -> Result<Self> {
         let config = MemoryConfig::new(model.dimensions());
-        let mut memory = Self::new(config)?;
-
-        let embedder = crate::embeddings::Embedder::new(model)?;
-        memory.embed_fn = Some(Box::new(embedder.into_embed_fn()));
-
-        Ok(memory)
+        Self::with_local_embeddings_config(model, config)
     }
 
     /// Crea AgentMemory con embeddings locales y configuración personalizada.

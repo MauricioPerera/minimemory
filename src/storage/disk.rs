@@ -202,10 +202,11 @@ pub fn load_vectors<P: AsRef<Path>>(
         reader.read_exact(&mut buf4)?;
         let len = u32::from_le_bytes(buf4) as usize;
 
-        if len > MAX_ENTRY_SIZE {
+        let remaining = file_len.saturating_sub(reader.stream_position().map_err(Error::Io)?);
+        if len > MAX_ENTRY_SIZE || len as u64 > remaining {
             return Err(Error::InvalidConfig(format!(
-                "Vector entry size {} exceeds maximum {} — file may be corrupted",
-                len, MAX_ENTRY_SIZE
+                "Vector entry size {} exceeds maximum or remaining file size — file may be corrupted",
+                len
             )));
         }
 

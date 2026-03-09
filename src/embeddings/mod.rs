@@ -242,9 +242,10 @@ impl Embedder {
         use std::sync::Arc;
         let embedder = Arc::new(self);
         move |text: &str| -> Vec<f32> {
-            embedder
-                .embed(text)
-                .unwrap_or_else(|_| vec![0.0; embedder.dimensions()])
+            embedder.embed(text).unwrap_or_else(|e| {
+                eprintln!("[minimemory] Embedding failed: {}", e);
+                vec![0.0; embedder.dimensions()]
+            })
         }
     }
 }
@@ -289,6 +290,27 @@ pub(crate) fn download_model_files(
 
         Ok(paths)
     })
+}
+
+/// Mean pooling: promedio ponderado por attention mask.
+///
+/// Multiplica la salida del modelo por la máscara de atención expandida,
+/// suma sobre la dimensión de secuencia, y divide por el conteo de tokens válidos.
+pub(crate) fn mean_pooling(
+    output: &candle_core::Tensor,
+    attention_mask: &candle_core::Tensor,
+) -> candle_core::Result<candle_core::Tensor> {
+    let mask = attention_mask
+        .to_dtype(candle_core::DType::F32)?
+        .unsqueeze(2)?
+        .broadcast_as(output.shape())?;
+
+    let masked = output.mul(&mask)?;
+    let sum = masked.sum(1)?;
+    let count = mask.sum(1)?;
+    let count = count.clamp(1e-9, f64::MAX)?;
+
+    sum.div(&count)
 }
 
 /// Normaliza un vector con L2.
