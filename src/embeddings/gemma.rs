@@ -8,7 +8,7 @@
 //!
 //! Referencia: https://huggingface.co/google/embeddinggemma-300m
 
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{linear_no_bias, Linear, VarBuilder};
 use serde::Deserialize;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
@@ -27,10 +27,8 @@ struct GemmaConfig {
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
-    #[allow(dead_code)]
     max_position_embeddings: usize,
     rms_norm_eps: f64,
-    #[allow(dead_code)]
     #[serde(default = "default_rope_theta")]
     rope_theta: f64,
     /// Dimensiones de la proyección final (768 para EmbeddingGemma)
@@ -67,12 +65,13 @@ struct GemmaLayer {
     post_attention_layernorm: RmsNorm,
 }
 
-/// Atención multi-head con Grouped Query Attention (GQA).
+/// Atención multi-head con Grouped Query Attention (GQA) y RoPE.
 struct GemmaAttention {
     q_proj: Linear,
     k_proj: Linear,
     v_proj: Linear,
     o_proj: Linear,
+    rotary_emb: RotaryEmbedding,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -107,6 +106,63 @@ impl RmsNorm {
     }
 }
 
+/// Rotary Position Embeddings (RoPE).
+///
+/// Aplica rotaciones basadas en la posición a los tensores Q y K,
+/// permitiendo que el modelo capture información posicional relativa
+/// incluso en atención bidireccional.
+struct RotaryEmbedding {
+    cos: Tensor,
+    sin: Tensor,
+}
+
+impl RotaryEmbedding {
+    fn new(head_dim: usize, max_seq_len: usize, theta: f64, device: &Device) -> candle_core::Result<Self> {
+        let half_dim = head_dim / 2;
+        // Frecuencias inversas: theta^(-2i/d) para i en [0, d/2)
+        let inv_freq: Vec<f32> = (0..half_dim)
+            .map(|i| 1.0 / theta.powf(i as f64 * 2.0 / head_dim as f64) as f32)
+            .collect();
+        let inv_freq = Tensor::new(inv_freq.as_slice(), device)?; // [half_dim]
+
+        // Posiciones: [0, 1, 2, ..., max_seq_len-1]
+        let positions: Vec<f32> = (0..max_seq_len).map(|p| p as f32).collect();
+        let positions = Tensor::new(positions.as_slice(), device)?; // [max_seq_len]
+
+        // Outer product: positions * inv_freq -> [max_seq_len, half_dim]
+        let freqs = positions
+            .unsqueeze(1)?
+            .matmul(&inv_freq.unsqueeze(0)?)?;
+
+        // Duplicar frecuencias para cubrir head_dim completo: [max_seq_len, head_dim]
+        let emb = Tensor::cat(&[&freqs, &freqs], 1)?;
+
+        let cos = emb.cos()?;
+        let sin = emb.sin()?;
+
+        Ok(Self { cos, sin })
+    }
+
+    /// Aplica RoPE a un tensor de shape [batch, heads, seq_len, head_dim].
+    fn apply(&self, x: &Tensor, seq_len: usize) -> candle_core::Result<Tensor> {
+        let cos = self.cos.i(..seq_len)?; // [seq_len, head_dim]
+        let sin = self.sin.i(..seq_len)?;
+
+        // Reshape para broadcast: [1, 1, seq_len, head_dim]
+        let cos = cos.unsqueeze(0)?.unsqueeze(0)?;
+        let sin = sin.unsqueeze(0)?.unsqueeze(0)?;
+
+        // rotate_half: [-x2, x1] donde x = [x1, x2] dividido a la mitad
+        let half_dim = x.dim(3)? / 2;
+        let x1 = x.narrow(3, 0, half_dim)?;
+        let x2 = x.narrow(3, half_dim, half_dim)?;
+        let rotated = Tensor::cat(&[&x2.neg()?, &x1], 3)?;
+
+        // x * cos + rotate_half(x) * sin
+        x.broadcast_mul(&cos)?.add(&rotated.broadcast_mul(&sin)?)
+    }
+}
+
 impl GemmaMlp {
     fn load(vb: &VarBuilder, config: &GemmaConfig) -> candle_core::Result<Self> {
         let gate_proj = linear_no_bias(config.hidden_size, config.intermediate_size, vb.pp("gate_proj"))?;
@@ -127,7 +183,7 @@ impl GemmaMlp {
 }
 
 impl GemmaAttention {
-    fn load(vb: &VarBuilder, config: &GemmaConfig) -> candle_core::Result<Self> {
+    fn load(vb: &VarBuilder, config: &GemmaConfig, device: &Device) -> candle_core::Result<Self> {
         let hidden = config.hidden_size;
         let head_dim = config.head_dim;
         let num_heads = config.num_attention_heads;
@@ -138,18 +194,26 @@ impl GemmaAttention {
         let v_proj = linear_no_bias(hidden, num_kv_heads * head_dim, vb.pp("v_proj"))?;
         let o_proj = linear_no_bias(num_heads * head_dim, hidden, vb.pp("o_proj"))?;
 
+        let rotary_emb = RotaryEmbedding::new(
+            head_dim,
+            config.max_position_embeddings,
+            config.rope_theta,
+            device,
+        )?;
+
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
+            rotary_emb,
             num_heads,
             num_kv_heads,
             head_dim,
         })
     }
 
-    /// Atención bidireccional (sin máscara causal).
+    /// Atención bidireccional con RoPE (sin máscara causal).
     fn forward(&self, x: &Tensor, attention_mask: Option<&Tensor>) -> candle_core::Result<Tensor> {
         let (batch, seq_len, _) = x.dims3()?;
 
@@ -168,6 +232,10 @@ impl GemmaAttention {
         let v = v
             .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
+
+        // Aplicar RoPE a Q y K (inyecta información posicional relativa)
+        let q = self.rotary_emb.apply(&q, seq_len)?;
+        let k = self.rotary_emb.apply(&k, seq_len)?;
 
         // GQA: expandir K, V si num_kv_heads < num_heads
         let (k, v) = if self.num_kv_heads < self.num_heads {
@@ -214,8 +282,8 @@ impl GemmaAttention {
 }
 
 impl GemmaLayer {
-    fn load(vb: &VarBuilder, config: &GemmaConfig) -> candle_core::Result<Self> {
-        let self_attn = GemmaAttention::load(&vb.pp("self_attn"), config)?;
+    fn load(vb: &VarBuilder, config: &GemmaConfig, device: &Device) -> candle_core::Result<Self> {
+        let self_attn = GemmaAttention::load(&vb.pp("self_attn"), config, device)?;
         let mlp = GemmaMlp::load(&vb.pp("mlp"), config)?;
         let input_layernorm =
             RmsNorm::load(&vb.pp("input_layernorm"), config.hidden_size, config.rms_norm_eps)?;
@@ -311,7 +379,7 @@ impl GemmaEmbedder {
         // Transformer layers
         let mut layers = Vec::with_capacity(gemma_config.num_hidden_layers);
         for i in 0..gemma_config.num_hidden_layers {
-            let layer = GemmaLayer::load(&model_vb.pp(format!("layers.{}", i)), &gemma_config)
+            let layer = GemmaLayer::load(&model_vb.pp(format!("layers.{}", i)), &gemma_config, &device)
                 .map_err(|e| {
                     Error::InvalidConfig(format!("Failed to load layer {}: {}", i, e))
                 })?;
