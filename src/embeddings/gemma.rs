@@ -3,10 +3,36 @@
 //! Basado en Gemma 3 pero con atención bidireccional (encoder),
 //! mean pooling, y capas de proyección para generar embeddings de 768 dims.
 //!
-//! Soporta Matryoshka Representation Learning: las dimensiones se pueden
-//! truncar a 512, 256, o 128 con mínima pérdida de calidad.
+//! ## Arquitectura
 //!
-//! Referencia: https://huggingface.co/google/embeddinggemma-300m
+//! - **Atención bidireccional** con Grouped Query Attention (GQA)
+//! - **RoPE** (Rotary Position Embeddings) para codificación posicional relativa
+//! - **RMSNorm** para normalización eficiente
+//! - **GeGLU** feed-forward con gate projection
+//! - **Mean pooling** sobre tokens válidos (excluye padding)
+//! - **Proyección MLP** (hidden → 768 dims con ReLU)
+//!
+//! ## RoPE (Rotary Position Embeddings)
+//!
+//! RoPE inyecta información posicional relativa rotando los vectores Q y K
+//! en el espacio complejo. Para dos posiciones `m` y `n`, el producto punto
+//! entre Q_m y K_n depende únicamente de la distancia relativa `m - n`,
+//! no de las posiciones absolutas. Esto permite:
+//!
+//! - Generalización a secuencias más largas que las vistas en entrenamiento
+//! - Decaimiento natural de la atención con la distancia
+//! - Compatibilidad con atención bidireccional (no requiere causal mask)
+//!
+//! La implementación precomputa `cos(m·θ_i)` y `sin(m·θ_i)` para todas las
+//! posiciones hasta `max_position_embeddings`, donde `θ_i = rope_theta^(-2i/d)`.
+//!
+//! ## Matryoshka Representation Learning
+//!
+//! Soporta truncación dimensional: las dimensiones se pueden truncar
+//! a 512, 256, o 128 con mínima pérdida de calidad. Los primeros N
+//! componentes del embedding capturan la información más importante.
+//!
+//! Referencia: <https://huggingface.co/google/embeddinggemma-300m>
 
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{linear_no_bias, Linear, VarBuilder};

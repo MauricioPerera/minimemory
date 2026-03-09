@@ -397,6 +397,9 @@ minimemory
 ├── Chunking              # Procesamiento de Markdown
 │   ├── ChunkStrategy     # Estrategias de división
 │   └── Chunk             # Unidad de contenido
+├── Embeddings            # Generación local de embeddings
+│   ├── BertEmbedder      # MiniLM, BGE (BERT architecture)
+│   └── GemmaEmbedder     # EmbeddingGemma (RoPE + GQA + Matryoshka)
 ├── Quantization          # Compresión de vectores
 │   ├── Quantizer         # Motor de quantización
 │   ├── Int8              # Scalar 4x compression
@@ -1146,6 +1149,64 @@ Total accesos: 24
 Utilidad promedio: 50.00%
 ```
 
+## Embeddings Locales
+
+minimemory incluye generación de embeddings directamente en Rust, sin APIs externas.
+
+### Habilitando el Feature
+
+```toml
+[dependencies]
+minimemory = { git = "...", features = ["embeddings"] }
+```
+
+### Modelos Disponibles
+
+| Modelo | Params | Dims | Idiomas | Características |
+|--------|--------|------|---------|-----------------|
+| `MiniLM` | 22.7M | 384 | Inglés | Rápido, ligero |
+| `BgeSmall` | 33.4M | 384 | Inglés | Alta calidad |
+| `Gemma` | 308M | 768 | Multilingüe | RoPE, GQA, Matryoshka |
+
+### Uso Básico
+
+```rust
+use minimemory::embeddings::{Embedder, EmbeddingModel};
+
+// Modelo ligero (inglés)
+let embedder = Embedder::new(EmbeddingModel::MiniLM)?;
+let vector = embedder.embed("Hello, world!")?;
+assert_eq!(vector.len(), 384);
+
+// Modelo multilingüe con Matryoshka (dimensiones truncables)
+let embedder = Embedder::new(EmbeddingModel::Gemma { dimensions: 256 })?;
+let vector = embedder.embed("Texto en español")?;
+assert_eq!(vector.len(), 256);
+
+// Batch
+let vectors = embedder.embed_batch(&["text 1", "text 2"])?;
+```
+
+### Integración con AgentMemory
+
+```rust
+use minimemory::embeddings::{Embedder, EmbeddingModel};
+use minimemory::agent_memory::{AgentMemory, MemoryConfig};
+
+let embedder = Embedder::new(EmbeddingModel::MiniLM)?;
+let mut memory = AgentMemory::new(MemoryConfig::small())?;
+memory.set_embed_fn(embedder.into_embed_fn());
+```
+
+### Arquitectura de EmbeddingGemma
+
+EmbeddingGemma está basado en Gemma 3 adaptado como encoder bidireccional:
+
+- **RoPE** (Rotary Position Embeddings): codifica distancia relativa entre tokens rotando Q y K en espacio complejo. El producto punto Q·K depende solo de la distancia `m-n`, mejorando la calidad en secuencias largas.
+- **GQA** (Grouped Query Attention): usa menos K/V heads que Q heads, reduciendo memoria sin perder calidad.
+- **RMSNorm**: normalización eficiente sin centrado de media.
+- **Matryoshka**: las primeras N dimensiones capturan la información más importante, permitiendo truncar de 768 a 512/256/128.
+
 ## Bindings
 
 ### Python
@@ -1211,6 +1272,7 @@ const results = db.search(new Array(384).fill(0.1), 10);
 - [x] **Unified TransferLevel** (eliminated duplicate enum)
 - [x] **HNSW entry point recovery** after node deletion
 - [x] **HNSW index defragmentation** (free indices pool)
+- [x] **Local embeddings** (BERT + EmbeddingGemma with RoPE, GQA, Matryoshka)
 - [x] **272 total tests** (159 unit + 83 integration + 30 doc-tests)
 
 ## Licencia

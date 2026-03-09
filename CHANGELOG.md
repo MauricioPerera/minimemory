@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.5.0] - 2025
 
 ### Added
+- **Local embeddings** feature (`embeddings`): generate embeddings in pure Rust without external APIs
+  - **BERT/Sentence-Transformer** backend for MiniLM and BGE models (384 dims)
+  - **EmbeddingGemma** backend: Google's multilingual embedding model (768 dims, Matryoshka)
+    - Bidirectional attention (encoder-only, no causal mask)
+    - **RoPE** (Rotary Position Embeddings) for relative position encoding — precomputes sin/cos frequencies and rotates Q, K tensors so attention depends on relative distance `m-n` rather than absolute positions
+    - **GQA** (Grouped Query Attention) for memory-efficient multi-head attention
+    - RMSNorm, GeGLU feed-forward, mean pooling, and MLP projection
+    - Matryoshka truncation: 768 → 512/256/128 with minimal quality loss
+  - `Embedder::into_embed_fn()` for seamless `AgentMemory` integration
+  - Automatic model download and caching via HuggingFace Hub
 - `GenericMemory::with_db()` constructor to wrap an existing `VectorDB` instance
 - `GenericMemory::learn_raw()` and `learn_raw_with_priority()` for pre-built metadata ingestion
 - `GenericMemory::db()` accessor for direct `VectorDB` access

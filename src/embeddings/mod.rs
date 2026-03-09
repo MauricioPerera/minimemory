@@ -7,7 +7,7 @@
 //!
 //! - **MiniLM-L6-v2**: Modelo ligero (22.7M params, 384 dims). Rápido y eficiente.
 //! - **BGE-small-en-v1.5**: Modelo de BAAI (33.4M params, 384 dims). Buena calidad para inglés.
-//! - **EmbeddingGemma**: Modelo de Google (308M params, 768 dims). Multilingüe, Matryoshka.
+//! - **EmbeddingGemma**: Modelo de Google (308M params, 768 dims). Multilingüe, Matryoshka, RoPE.
 //!
 //! ## Ejemplo
 //!
