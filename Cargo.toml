@@ -1,12 +1,18 @@
 [package]
 name = "minimemory"
-version = "2.5.0"
+version = "3.0.0"
 edition = "2021"
 description = "Embedded vector database library for Rust - like SQLite for vectors"
 license = "MIT"
 repository = "https://github.com/MauricioPerera/minimemory"
+homepage = "https://github.com/MauricioPerera/minimemory"
 keywords = ["vector", "database", "embeddings", "similarity", "hnsw"]
 categories = ["database", "data-structures"]
+exclude = [
+    "pkg/", "examples/", "demo-data/", "minimemory-dashboard/",
+    "minimemory-service/", "minimemory-mcp/", "npm-src/",
+    "npm-readme.md", "vectorpass-search/",
+]
 
 [lib]
 name = "minimemory"
@@ -24,8 +30,9 @@ rayon = "1.10"
 regex-lite = "0.1"
 crc32fast = "1.4"
 
-# Markdown processing (optional - for chunking)
-mq-markdown = { git = "https://github.com/harehare/mq", optional = true, features = ["json"] }
+# Markdown processing — git-only, excluded from crates.io publish
+# mq-markdown = { git = "https://github.com/harehare/mq", optional = true, features = ["json"] }
+
 
 # Python bindings (optional)
 pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
@@ -55,7 +62,7 @@ default = []
 python = ["pyo3"]
 nodejs = ["napi", "napi-derive"]
 ffi = []
-chunking = ["mq-markdown"]
+# chunking = ["mq-markdown"]  # git-only, not on crates.io
 wasm = ["wasm-bindgen", "js-sys", "getrandom"]
 embeddings = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "hf-hub", "tokio"]
 
