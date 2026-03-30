@@ -111,6 +111,7 @@ fn write_vectors_to_file(
             id: stored.id,
             vector: stored.vector,
             metadata: stored.metadata,
+            quantized: stored.quantized,
         };
 
         let encoded = bincode::serialize(&entry)?;
@@ -216,6 +217,7 @@ pub fn load_vectors<P: AsRef<Path>>(
             id: entry.id,
             vector: entry.vector,
             metadata: entry.metadata,
+            quantized: entry.quantized,
         });
     }
 
@@ -317,11 +319,13 @@ mod tests {
                 id: "a".to_string(),
                 vector: Some(vec![1.0, 2.0, 3.0]),
                 metadata: None,
+                quantized: None,
             },
             StoredVector {
                 id: "b".to_string(),
                 vector: Some(vec![4.0, 5.0, 6.0]),
                 metadata: Some(Metadata::new()),
+                quantized: None,
             },
         ];
 
@@ -355,6 +359,7 @@ mod tests {
             id: "x".to_string(),
             vector: Some(vec![1.0]),
             metadata: Some(meta),
+                quantized: None,
         }];
 
         let mut header = FileHeader::new(1, 1, Distance::Euclidean, &IndexType::Flat);
@@ -381,11 +386,13 @@ mod tests {
                 id: "doc-1".to_string(),
                 vector: None, // No vector, metadata only
                 metadata: Some(meta),
+                quantized: None,
             },
             StoredVector {
                 id: "vec-1".to_string(),
                 vector: Some(vec![1.0, 2.0]),
                 metadata: None,
+                quantized: None,
             },
         ];
 
@@ -410,6 +417,7 @@ mod tests {
             id: "a".to_string(),
             vector: Some(vec![1.0, 2.0, 3.0]),
             metadata: None,
+                quantized: None,
         }];
 
         let mut header = FileHeader::new(3, 1, Distance::Cosine, &IndexType::Flat);
@@ -459,6 +467,7 @@ mod tests {
             id: "a".to_string(),
             vector: Some(vec![1.0]),
             metadata: None,
+                quantized: None,
         }];
 
         let mut header = FileHeader::new(1, 1, Distance::Cosine, &IndexType::Flat);
@@ -480,6 +489,7 @@ mod tests {
             id: "original".to_string(),
             vector: Some(vec![1.0]),
             metadata: None,
+                quantized: None,
         }];
         let mut header = FileHeader::new(1, 1, Distance::Cosine, &IndexType::Flat);
         save_vectors(&path, &mut header, vectors1.into_iter(), &IndexBlocks::none()).unwrap();
@@ -489,6 +499,7 @@ mod tests {
             id: "updated".to_string(),
             vector: Some(vec![2.0]),
             metadata: None,
+                quantized: None,
         }];
         let mut header2 = FileHeader::new(1, 1, Distance::Cosine, &IndexType::Flat);
         save_vectors(&path, &mut header2, vectors2.into_iter(), &IndexBlocks::none()).unwrap();
@@ -509,6 +520,7 @@ mod tests {
             id: "v1".to_string(),
             vector: Some(vec![1.0, 2.0]),
             metadata: None,
+                quantized: None,
         }];
 
         let hnsw_bytes = b"fake-hnsw-index-data-for-testing";

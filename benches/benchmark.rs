@@ -503,6 +503,62 @@ fn bench_filters(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Benchmarks de cuantización
+// ============================================================================
+
+fn bench_quantization(c: &mut Criterion) {
+    use minimemory::quantization::QuantizationType;
+
+    let dim = 384;
+    let n = 500;
+
+    let mut group = c.benchmark_group("quantization_search");
+
+    for (name, quant) in [
+        ("none", QuantizationType::None),
+        ("int8", QuantizationType::Int8),
+        ("int3", QuantizationType::Int3),
+        ("binary", QuantizationType::Binary),
+    ] {
+        group.bench_function(BenchmarkId::new("insert_500", name), |b| {
+            b.iter_with_setup(
+                || {
+                    let config = Config::new(dim)
+                        .with_distance(Distance::Cosine)
+                        .with_index(IndexType::Flat)
+                        .with_quantization(quant);
+                    VectorDB::new(config).unwrap()
+                },
+                |db| {
+                    for i in 0..n {
+                        let v = generate_normalized_vector(dim, i);
+                        db.insert(format!("v{}", i), &v, None).unwrap();
+                    }
+                },
+            )
+        });
+
+        group.bench_function(BenchmarkId::new("search_top10", name), |b| {
+            let config = Config::new(dim)
+                .with_distance(Distance::Cosine)
+                .with_index(IndexType::Flat)
+                .with_quantization(quant);
+            let db = VectorDB::new(config).unwrap();
+            for i in 0..n {
+                let v = generate_normalized_vector(dim, i);
+                db.insert(format!("v{}", i), &v, None).unwrap();
+            }
+            let query = generate_normalized_vector(dim, 999);
+            b.iter(|| {
+                black_box(db.search(&query, 10).unwrap());
+            })
+        });
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Configuración de criterion
 // ============================================================================
 
@@ -516,6 +572,7 @@ criterion_group!(
     bench_hybrid,
     bench_memory_traits,
     bench_filters,
+    bench_quantization,
 );
 
 criterion_main!(benches);

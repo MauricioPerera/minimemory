@@ -19,8 +19,8 @@ use crate::index::IndexType;
 /// Magic bytes para identificar archivos .mmdb
 pub const MAGIC: &[u8; 4] = b"MMDB";
 
-/// Versión actual del formato (v2 adds serialized index section)
-pub const VERSION: u32 = 2;
+/// Versión actual del formato (v3 adds quantization support)
+pub const VERSION: u32 = 3;
 
 /// Minimum supported version for reading
 pub const MIN_VERSION: u32 = 1;
@@ -47,6 +47,8 @@ pub struct FileHeader {
     pub data_offset: u64,
     /// Offset donde comienza el índice
     pub index_offset: u64,
+    /// Tipo de cuantización (0=None, 1=Int8, 2=Int3, 3=Binary) [v3+]
+    pub quantization_type: u8,
 }
 
 impl FileHeader {
@@ -60,6 +62,10 @@ impl FileHeader {
         let (index_type, hnsw_m, hnsw_ef) = match index {
             IndexType::Flat => (0, 0, 0),
             IndexType::HNSW { m, ef_construction } => (1, *m as u16, *ef_construction as u16),
+            IndexType::IVF {
+                num_clusters,
+                num_probes,
+            } => (2, *num_clusters as u16, *num_probes as u16),
         };
 
         Self {
@@ -71,7 +77,14 @@ impl FileHeader {
             hnsw_ef,
             data_offset: HEADER_SIZE as u64,
             index_offset: 0, // Se actualiza después
+            quantization_type: 0, // None by default
         }
+    }
+
+    /// Crea un nuevo header con tipo de cuantización
+    pub fn with_quantization(mut self, quant: crate::quantization::QuantizationType) -> Self {
+        self.quantization_type = quant.to_u8();
+        self
     }
 
     /// Escribe el header a un writer
@@ -104,9 +117,12 @@ impl FileHeader {
         // Index offset
         writer.write_all(&self.index_offset.to_le_bytes())?;
 
+        // Quantization type (v3+)
+        writer.write_all(&[self.quantization_type])?;
+
         // Reserved (padding to 64 bytes)
-        // 4 + 4 + 4 + 8 + 1 + 1 + 2 + 2 + 8 + 8 = 42 bytes used
-        let padding = [0u8; HEADER_SIZE - 42];
+        // 4 + 4 + 4 + 8 + 1 + 1 + 2 + 2 + 8 + 8 + 1 = 43 bytes used
+        let padding = [0u8; HEADER_SIZE - 43];
         writer.write_all(&padding)?;
 
         Ok(())
@@ -169,8 +185,21 @@ impl FileHeader {
         reader.read_exact(&mut buf8)?;
         let index_offset = u64::from_le_bytes(buf8);
 
+        // Quantization type (v3+, default 0=None for older files)
+        let quantization_type = if version >= 3 {
+            reader.read_exact(&mut buf1)?;
+            buf1[0]
+        } else {
+            0 // None
+        };
+
         // Skip reserved bytes
-        let mut reserved = [0u8; HEADER_SIZE - 42];
+        let reserved_size = if version >= 3 {
+            HEADER_SIZE - 43
+        } else {
+            HEADER_SIZE - 42
+        };
+        let mut reserved = vec![0u8; reserved_size];
         reader.read_exact(&mut reserved)?;
 
         Ok(Self {
@@ -182,6 +211,7 @@ impl FileHeader {
             hnsw_ef,
             data_offset,
             index_offset,
+            quantization_type,
         })
     }
 
@@ -190,12 +220,21 @@ impl FileHeader {
         Distance::from_u8(self.distance_type)
     }
 
+    /// Obtiene el tipo de cuantización
+    pub fn get_quantization_type(&self) -> crate::quantization::QuantizationType {
+        crate::quantization::QuantizationType::from_u8(self.quantization_type)
+    }
+
     /// Obtiene el tipo de índice
     pub fn get_index_type(&self) -> IndexType {
         match self.index_type {
             1 => IndexType::HNSW {
                 m: self.hnsw_m as usize,
                 ef_construction: self.hnsw_ef as usize,
+            },
+            2 => IndexType::IVF {
+                num_clusters: self.hnsw_m as usize,
+                num_probes: self.hnsw_ef as usize,
             },
             _ => IndexType::Flat,
         }
@@ -206,9 +245,13 @@ impl FileHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorEntry {
     pub id: String,
-    /// Vector embedding (None for metadata-only documents)
+    /// Vector embedding (None for metadata-only documents or quantized docs)
     pub vector: Option<Vec<f32>>,
     pub metadata: Option<crate::types::Metadata>,
+    /// Quantized vector (v3+, None for unquantized docs)
+    /// Note: no skip_serializing_if — bincode is positional and skipping breaks deserialization
+    #[serde(default)]
+    pub quantized: Option<crate::quantization::QuantizedVector>,
 }
 
 impl Distance {
@@ -218,6 +261,7 @@ impl Distance {
             Distance::Cosine => 0,
             Distance::Euclidean => 1,
             Distance::DotProduct => 2,
+            Distance::Manhattan => 3,
         }
     }
 
@@ -226,6 +270,7 @@ impl Distance {
         match v {
             1 => Distance::Euclidean,
             2 => Distance::DotProduct,
+            3 => Distance::Manhattan,
             _ => Distance::Cosine,
         }
     }

@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use crate::distance::Distance;
 use crate::error::{Error, Result};
-use crate::index::{BM25Index, FlatIndex, HNSWIndex, Index, IndexType};
+use crate::index::{BM25Index, FlatIndex, HNSWIndex, IVFIndex, Index, IndexType};
 use crate::partial_index::{PartialIndexConfig, PartialIndexManager, PartialIndexStats};
-use crate::query::Filter;
+use crate::quantization::{QuantizationType, Quantizer};
+use crate::query::{Filter, OrderBy};
 use crate::search::{HybridSearch, HybridSearchParams};
 use crate::storage::{disk, format::FileHeader, MemoryStorage, Storage};
-use crate::types::{Config, HybridSearchResult, Metadata, SearchResult, VectorId};
+use crate::types::{Config, HybridSearchResult, Metadata, PagedResult, SearchResult, VectorId};
 
 /// Base de datos vectorial embebida.
 ///
@@ -48,6 +49,8 @@ pub struct VectorDB {
     bm25_fields: Vec<String>,
     /// Gestor de índices parciales
     partial_indexes: PartialIndexManager,
+    /// Quantizer for vector compression (None when QuantizationType::None)
+    quantizer: Option<Quantizer>,
 }
 
 impl VectorDB {
@@ -67,6 +70,7 @@ impl VectorDB {
     pub fn new(config: Config) -> Result<Self> {
         let storage = Arc::new(MemoryStorage::new());
         let index = Self::create_index(&config.index)?;
+        let quantizer = Self::create_quantizer(&config);
 
         Ok(Self {
             config,
@@ -75,6 +79,7 @@ impl VectorDB {
             bm25_index: None,
             bm25_fields: Vec::new(),
             partial_indexes: PartialIndexManager::new(),
+            quantizer,
         })
     }
 
@@ -99,6 +104,7 @@ impl VectorDB {
         let storage = Arc::new(MemoryStorage::new());
         let index = Self::create_index(&config.index)?;
         let bm25_index = Arc::new(BM25Index::new(indexed_fields.clone()));
+        let quantizer = Self::create_quantizer(&config);
 
         Ok(Self {
             config,
@@ -107,6 +113,7 @@ impl VectorDB {
             bm25_index: Some(bm25_index),
             bm25_fields: indexed_fields,
             partial_indexes: PartialIndexManager::new(),
+            quantizer,
         })
     }
 
@@ -132,36 +139,48 @@ impl VectorDB {
             dimensions: header.dimensions as usize,
             distance: header.get_distance(),
             index: header.get_index_type(),
-            quantization: crate::quantization::QuantizationType::None, // Legacy files don't have quantization
+            quantization: header.get_quantization_type(),
         };
 
         let storage = Arc::new(MemoryStorage::new());
         let index = Self::create_index(&config.index)?;
+        let quantizer = Self::create_quantizer(&config);
 
-        // Load documents into storage
+        // Load documents into storage (preserving quantized vectors)
         for stored in &vectors {
-            storage.insert(
-                stored.id.clone(),
-                stored.vector.clone(),
-                stored.metadata.clone(),
-            )?;
+            if stored.quantized.is_some() {
+                storage.insert_quantized(
+                    stored.id.clone(),
+                    stored.quantized.clone().unwrap(),
+                    stored.metadata.clone(),
+                )?;
+            } else {
+                storage.insert(
+                    stored.id.clone(),
+                    stored.vector.clone(),
+                    stored.metadata.clone(),
+                )?;
+            }
         }
 
         // Try to load serialized HNSW index (v2+), fall back to rebuilding
-        if let Some(data) = index_blocks.hnsw {
-            if index.load_index(&data).is_err() {
-                // Fallback: rebuild index from vectors
-                for stored in &vectors {
-                    if let Some(ref vec) = stored.vector {
-                        index.add(&stored.id, vec, &*storage, config.distance)?;
-                    }
-                }
-            }
+        let need_rebuild = if let Some(data) = index_blocks.hnsw {
+            index.load_index(&data).is_err()
         } else {
-            // v1 file or no HNSW data: rebuild index from vectors
+            true
+        };
+
+        if need_rebuild {
+            // Rebuild index from vectors (dequantizing if needed)
             for stored in &vectors {
-                if let Some(ref vec) = stored.vector {
-                    index.add(&stored.id, vec, &*storage, config.distance)?;
+                let vec_data = stored
+                    .vector
+                    .as_ref()
+                    .or_else(|| None)
+                    .cloned()
+                    .or_else(|| stored.quantized.as_ref().map(|q| q.to_f32()));
+                if let Some(vec) = vec_data {
+                    index.add(&stored.id, &vec, &*storage, config.distance)?;
                 }
             }
         }
@@ -173,6 +192,7 @@ impl VectorDB {
             bm25_index: None,
             bm25_fields: Vec::new(),
             partial_indexes: PartialIndexManager::new(),
+            quantizer,
         })
     }
 
@@ -194,34 +214,46 @@ impl VectorDB {
             dimensions: header.dimensions as usize,
             distance: header.get_distance(),
             index: header.get_index_type(),
-            quantization: crate::quantization::QuantizationType::None, // Legacy files don't have quantization
+            quantization: header.get_quantization_type(),
         };
 
         let storage = Arc::new(MemoryStorage::new());
         let index = Self::create_index(&config.index)?;
+        let quantizer = Self::create_quantizer(&config);
 
-        // Load documents into storage
+        // Load documents into storage (preserving quantized vectors)
         for stored in &vectors {
-            storage.insert(
-                stored.id.clone(),
-                stored.vector.clone(),
-                stored.metadata.clone(),
-            )?;
+            if stored.quantized.is_some() {
+                storage.insert_quantized(
+                    stored.id.clone(),
+                    stored.quantized.clone().unwrap(),
+                    stored.metadata.clone(),
+                )?;
+            } else {
+                storage.insert(
+                    stored.id.clone(),
+                    stored.vector.clone(),
+                    stored.metadata.clone(),
+                )?;
+            }
         }
 
         // Try to load serialized HNSW index, fall back to rebuilding
-        if let Some(data) = index_blocks.hnsw {
-            if index.load_index(&data).is_err() {
-                for stored in &vectors {
-                    if let Some(ref vec) = stored.vector {
-                        index.add(&stored.id, vec, &*storage, config.distance)?;
-                    }
-                }
-            }
+        let need_rebuild = if let Some(data) = index_blocks.hnsw {
+            index.load_index(&data).is_err()
         } else {
+            true
+        };
+
+        if need_rebuild {
             for stored in &vectors {
-                if let Some(ref vec) = stored.vector {
-                    index.add(&stored.id, vec, &*storage, config.distance)?;
+                let vec_data = stored
+                    .vector
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| stored.quantized.as_ref().map(|q| q.to_f32()));
+                if let Some(vec) = vec_data {
+                    index.add(&stored.id, &vec, &*storage, config.distance)?;
                 }
             }
         }
@@ -231,7 +263,6 @@ impl VectorDB {
             match BM25Index::deserialize(indexed_fields.clone(), &data) {
                 Ok(idx) => Arc::new(idx),
                 Err(_) => {
-                    // Fallback: rebuild BM25 from metadata
                     let idx = Arc::new(BM25Index::new(indexed_fields.clone()));
                     for stored in &vectors {
                         idx.add(&stored.id, stored.metadata.as_ref())?;
@@ -240,7 +271,6 @@ impl VectorDB {
                 }
             }
         } else {
-            // No persisted BM25: rebuild from metadata
             let idx = Arc::new(BM25Index::new(indexed_fields.clone()));
             for stored in &vectors {
                 idx.add(&stored.id, stored.metadata.as_ref())?;
@@ -255,6 +285,7 @@ impl VectorDB {
             bm25_index: Some(bm25_index),
             bm25_fields: indexed_fields,
             partial_indexes: PartialIndexManager::new(),
+            quantizer,
         })
     }
 
@@ -265,6 +296,21 @@ impl VectorDB {
             IndexType::HNSW { m, ef_construction } => {
                 Ok(Arc::new(HNSWIndex::new(*m, *ef_construction)))
             }
+            IndexType::IVF {
+                num_clusters,
+                num_probes,
+            } => Ok(Arc::new(IVFIndex::new(*num_clusters, *num_probes))),
+        }
+    }
+
+    /// Creates a quantizer from config (None if no quantization).
+    fn create_quantizer(config: &Config) -> Option<Quantizer> {
+        match config.quantization {
+            QuantizationType::None => None,
+            QuantizationType::Int8 => Some(Quantizer::int8(config.dimensions)),
+            QuantizationType::Int3 => Some(Quantizer::int3(config.dimensions)),
+            QuantizationType::Binary => Some(Quantizer::binary(config.dimensions)),
+            QuantizationType::Polar => Some(Quantizer::polar(config.dimensions)),
         }
     }
 
@@ -315,8 +361,17 @@ impl VectorDB {
             return Err(Error::AlreadyExists(id));
         }
 
-        self.storage
-            .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
+        // Store quantized or full vector
+        if let Some(ref quantizer) = self.quantizer {
+            let qvec = quantizer.quantize(vector)?;
+            self.storage
+                .insert_quantized(id.clone(), qvec, metadata.clone())?;
+        } else {
+            self.storage
+                .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
+        }
+
+        // Index always uses f32 for graph construction (HNSW needs precise distances)
         self.index
             .add(&id, vector, &*self.storage, self.config.distance)?;
 
@@ -387,9 +442,16 @@ impl VectorDB {
             return Err(Error::AlreadyExists(id));
         }
 
-        let vec_data = vector.map(|v| v.to_vec());
-        self.storage
-            .insert(id.clone(), vec_data, metadata.clone())?;
+        // Store with quantization if vector present and quantizer active
+        if let (Some(vec), Some(ref quantizer)) = (vector, &self.quantizer) {
+            let qvec = quantizer.quantize(vec)?;
+            self.storage
+                .insert_quantized(id.clone(), qvec, metadata.clone())?;
+        } else {
+            let vec_data = vector.map(|v| v.to_vec());
+            self.storage
+                .insert(id.clone(), vec_data, metadata.clone())?;
+        }
 
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
@@ -477,7 +539,13 @@ impl VectorDB {
     /// El vector puede ser `None` para documentos metadata-only.
     pub fn get(&self, id: &str) -> Result<Option<(Option<Vec<f32>>, Option<Metadata>)>> {
         match self.storage.get(id)? {
-            Some(stored) => Ok(Some((stored.vector, stored.metadata))),
+            Some(stored) => {
+                // If vector is stored quantized, dequantize for the caller
+                let vector = stored.vector.or_else(|| {
+                    stored.quantized.as_ref().map(|q| q.to_f32())
+                });
+                Ok(Some((vector, stored.metadata)))
+            }
             None => Ok(None),
         }
     }
@@ -517,17 +585,35 @@ impl VectorDB {
         metadata: Option<Metadata>,
     ) -> Result<()> {
         let id = id.into();
-        self.delete(&id)?;
 
-        self.storage
-            .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
+        // Step 1: Update storage in-place (overwrite, no gap)
+        // First delete old entry, then immediately insert new one
+        self.storage.delete(&id)?;
+        if let Some(ref quantizer) = self.quantizer {
+            let qvec = quantizer.quantize(vector)?;
+            self.storage
+                .insert_quantized(id.clone(), qvec, metadata.clone())?;
+        } else {
+            self.storage
+                .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
+        }
+
+        // Step 2: Update index (remove old, add new)
+        self.index.remove(&id)?;
         self.index
             .add(&id, vector, &*self.storage, self.config.distance)?;
 
-        // Re-indexar en BM25 si está habilitado
+        // Step 3: Update BM25
         if let Some(ref bm25) = self.bm25_index {
+            bm25.remove(&id)?;
             bm25.add(&id, metadata.as_ref())?;
         }
+
+        // Step 4: Update partial indexes
+        let _ = self.partial_indexes.on_delete(&id);
+        let _ = self
+            .partial_indexes
+            .on_insert(&id, vector, metadata.as_ref());
 
         Ok(())
     }
@@ -600,7 +686,8 @@ impl VectorDB {
             self.storage.len(),
             self.config.distance,
             &self.config.index,
-        );
+        )
+        .with_quantization(self.config.quantization);
 
         // Serialize indices for persistence
         let hnsw_data = self.index.serialize_index()?;
@@ -759,7 +846,11 @@ impl VectorDB {
             .iter()
             .filter_map(|id| {
                 if let Ok(Some(sv)) = self.storage.get(id) {
-                    sv.vector.map(|vec| (id.clone(), vec, sv.metadata))
+                    // Use f32 vector, or dequantize from quantized if needed
+                    let vector = sv
+                        .vector
+                        .or_else(|| sv.quantized.as_ref().map(|q| q.to_f32()));
+                    vector.map(|vec| (id.clone(), vec, sv.metadata))
                 } else {
                     None
                 }
@@ -833,14 +924,25 @@ impl VectorDB {
         let mut metadata = chunk.metadata.to_metadata();
         metadata.insert("content", chunk.content.as_str());
 
-        let vec_data = vector.map(|v| v.to_vec());
-        self.storage
-            .insert(chunk.id.clone(), vec_data, Some(metadata.clone()))?;
+        // Store with quantization if vector present and quantizer active
+        if let (Some(vec), Some(ref quantizer)) = (vector, &self.quantizer) {
+            let qvec = quantizer.quantize(vec)?;
+            self.storage
+                .insert_quantized(chunk.id.clone(), qvec, Some(metadata.clone()))?;
+        } else {
+            let vec_data = vector.map(|v| v.to_vec());
+            self.storage
+                .insert(chunk.id.clone(), vec_data, Some(metadata.clone()))?;
+        }
 
         // Solo indexar en índice vectorial si hay vector
         if let Some(vec) = vector {
             self.index
                 .add(&chunk.id, vec, &*self.storage, self.config.distance)?;
+            // Añadir a índices parciales
+            let _ = self
+                .partial_indexes
+                .on_insert(&chunk.id, vec, Some(&metadata));
         }
 
         // Indexar en BM25 si está habilitado
@@ -1100,6 +1202,168 @@ impl VectorDB {
                 metadata: hr.metadata,
             })
             .collect())
+    }
+    // ========================================================================
+    // Paged / ordered search methods
+    // ========================================================================
+
+    /// List documents with optional filter, ordering, and pagination.
+    ///
+    /// This is the most SQL-like query method: SELECT * WHERE filter ORDER BY field LIMIT k OFFSET n.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use minimemory::{VectorDB, Config, Filter, OrderBy, PagedResult};
+    ///
+    /// let db = VectorDB::with_fulltext(Config::new(3), vec!["title".into()])?;
+    ///
+    /// // SELECT * WHERE status='active' ORDER BY created_at DESC LIMIT 10 OFFSET 0
+    /// let page = db.list_documents(
+    ///     Some(Filter::eq("status", "active")),
+    ///     Some(OrderBy::desc("created_at")),
+    ///     10,
+    ///     0,
+    /// )?;
+    /// ```
+    pub fn list_documents(
+        &self,
+        filter: Option<Filter>,
+        order: Option<OrderBy>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PagedResult<HybridSearchResult>> {
+        // Collect all matching documents
+        let all: Vec<HybridSearchResult> = self
+            .storage
+            .iter()
+            .filter(|doc| {
+                // Skip soft-deleted if metadata has deleted flag
+                if let Some(ref meta) = doc.metadata {
+                    if let Some(crate::types::MetadataValue::Bool(true)) = meta.get("deleted") {
+                        return false;
+                    }
+                }
+                // Apply filter if provided
+                match &filter {
+                    Some(f) => crate::query::FilterEvaluator::evaluate(f, doc.metadata.as_ref()),
+                    None => true,
+                }
+            })
+            .map(|doc| HybridSearchResult {
+                id: doc.id,
+                score: 0.0,
+                vector_distance: None,
+                bm25_score: None,
+                vector_rank: None,
+                keyword_rank: None,
+                metadata: doc.metadata,
+            })
+            .collect();
+
+        let total = all.len();
+
+        // Apply ORDER BY
+        let mut sorted = all;
+        if let Some(ref order) = order {
+            let field = &order.field;
+            sorted.sort_by(|a, b| {
+                let val_a = a.metadata.as_ref().and_then(|m| m.get(field));
+                let val_b = b.metadata.as_ref().and_then(|m| m.get(field));
+                let cmp = crate::query::compare_metadata_values(val_a, val_b);
+                match order.direction {
+                    crate::query::SortDirection::Asc => cmp,
+                    crate::query::SortDirection::Desc => cmp.reverse(),
+                }
+            });
+        }
+
+        // Apply OFFSET + LIMIT
+        let items: Vec<_> = sorted.into_iter().skip(offset).take(limit).collect();
+
+        Ok(PagedResult {
+            items,
+            total,
+            offset,
+            limit,
+        })
+    }
+
+    /// Filter search with ordering and pagination.
+    ///
+    /// Like `filter_search` but with ORDER BY and OFFSET support.
+    pub fn filter_search_ordered(
+        &self,
+        filter: Filter,
+        order: OrderBy,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PagedResult<HybridSearchResult>> {
+        // Don't pass offset to hybrid_search — we need total count first
+        let params = HybridSearchParams::filter_only(filter, usize::MAX)
+            .with_order_by(order);
+
+        // Get ALL matching results (ordered, no pagination yet)
+        let all_results = self.hybrid_search(params)?;
+        let total = all_results.len();
+
+        // Apply offset + limit here
+        let items: Vec<_> = all_results
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        Ok(PagedResult {
+            items,
+            total,
+            offset,
+            limit,
+        })
+    }
+
+    /// Vector search with pagination.
+    ///
+    /// Like `search` but returns PagedResult with total count.
+    pub fn search_paged(
+        &self,
+        query: &[f32],
+        limit: usize,
+        offset: usize,
+    ) -> Result<PagedResult<SearchResult>> {
+        if query.len() != self.config.dimensions {
+            return Err(Error::DimensionMismatch {
+                expected: self.config.dimensions,
+                got: query.len(),
+            });
+        }
+
+        if self.storage.is_empty() {
+            return Ok(PagedResult {
+                items: vec![],
+                total: 0,
+                offset,
+                limit,
+            });
+        }
+
+        // Total is all documents with vectors (the searchable set)
+        let total = self.storage.iter_with_vectors().count();
+
+        // Fetch enough results for offset + limit
+        let fetch_k = offset + limit;
+        let all_results = self
+            .index
+            .search(query, fetch_k, self.storage.as_ref(), self.config.distance)?;
+
+        let items: Vec<_> = all_results.into_iter().skip(offset).take(limit).collect();
+
+        Ok(PagedResult {
+            items,
+            total,
+            offset,
+            limit,
+        })
     }
 }
 
@@ -1375,5 +1639,400 @@ mod tests {
         let keyword_results = db.keyword_search("without vector", 10).unwrap();
         assert!(!keyword_results.is_empty());
         assert_eq!(keyword_results[0].id, "doc-2");
+    }
+
+    // ========================================================================
+    // Quantization integration tests
+    // ========================================================================
+
+    fn create_quantized_db(quant: crate::quantization::QuantizationType) -> VectorDB {
+        let config = Config::new(64)
+            .with_distance(Distance::Cosine)
+            .with_index(IndexType::Flat)
+            .with_quantization(quant);
+        VectorDB::new(config).unwrap()
+    }
+
+    fn generate_test_vector(dim: usize, seed: usize) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim)
+            .map(|i| ((seed * dim + i) % 1000) as f32 / 1000.0 - 0.5)
+            .collect();
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn test_int3_quantized_insert_and_search() {
+        let db = create_quantized_db(crate::quantization::QuantizationType::Int3);
+
+        // Use more distinct vectors so quantization doesn't confuse rankings
+        let mut v1 = vec![0.0f32; 64];
+        v1[0] = 1.0; // mostly in dim 0
+        let mut v2 = vec![0.0f32; 64];
+        v2[32] = 1.0; // mostly in dim 32
+        let mut v3 = vec![0.0f32; 64];
+        v3[63] = 1.0; // mostly in dim 63
+
+        db.insert("a", &v1, None).unwrap();
+        db.insert("b", &v2, None).unwrap();
+        db.insert("c", &v3, None).unwrap();
+
+        assert_eq!(db.len(), 3);
+
+        // Query near v1 should find "a" closest
+        let mut query = vec![0.0f32; 64];
+        query[0] = 0.9;
+        query[1] = 0.1;
+        let results = db.search(&query, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn test_int8_quantized_insert_and_search() {
+        let db = create_quantized_db(crate::quantization::QuantizationType::Int8);
+
+        let v1 = generate_test_vector(64, 10);
+        let v2 = generate_test_vector(64, 20);
+
+        db.insert("x", &v1, None).unwrap();
+        db.insert("y", &v2, None).unwrap();
+
+        let results = db.search(&v1, 1).unwrap();
+        assert_eq!(results[0].id, "x");
+    }
+
+    #[test]
+    fn test_binary_quantized_insert_and_search() {
+        let db = create_quantized_db(crate::quantization::QuantizationType::Binary);
+
+        let v1 = generate_test_vector(64, 100);
+        let v2 = generate_test_vector(64, 200);
+
+        db.insert("p", &v1, None).unwrap();
+        db.insert("q", &v2, None).unwrap();
+
+        let results = db.search(&v1, 1).unwrap();
+        assert_eq!(results[0].id, "p");
+    }
+
+    #[test]
+    fn test_quantized_get_dequantizes() {
+        let db = create_quantized_db(crate::quantization::QuantizationType::Int3);
+
+        let v = generate_test_vector(64, 42);
+        db.insert("doc", &v, None).unwrap();
+
+        let (vector, _meta) = db.get("doc").unwrap().unwrap();
+        let restored = vector.unwrap();
+        assert_eq!(restored.len(), 64);
+
+        // Dequantized vector should be approximately correct
+        let error: f32 = v
+            .iter()
+            .zip(restored.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / 64.0;
+        assert!(
+            error < 0.15,
+            "Average dequantization error too large: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn test_quantized_update() {
+        let db = create_quantized_db(crate::quantization::QuantizationType::Int3);
+
+        let v1 = generate_test_vector(64, 1);
+        let v2 = generate_test_vector(64, 2);
+
+        db.insert("doc", &v1, None).unwrap();
+        db.update("doc", &v2, None).unwrap();
+
+        // Search should now match v2
+        let results = db.search(&v2, 1).unwrap();
+        assert_eq!(results[0].id, "doc");
+    }
+
+    #[test]
+    fn test_quantized_with_metadata() {
+        let db = create_quantized_db(crate::quantization::QuantizationType::Int3);
+
+        let v = generate_test_vector(64, 5);
+        let mut meta = Metadata::new();
+        meta.insert("title", "Test Document");
+        meta.insert("score", 42i64);
+
+        db.insert("doc", &v, Some(meta)).unwrap();
+
+        let (_, metadata) = db.get("doc").unwrap().unwrap();
+        let meta = metadata.unwrap();
+        assert_eq!(
+            meta.get("title").unwrap().as_str().unwrap(),
+            "Test Document"
+        );
+        assert_eq!(meta.get("score").unwrap().as_i64().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_no_quantization_unchanged() {
+        // Ensure None quantization works exactly as before
+        let db = create_quantized_db(crate::quantization::QuantizationType::None);
+
+        let v = vec![0.1f32; 64];
+        db.insert("doc", &v, None).unwrap();
+
+        let (vector, _) = db.get("doc").unwrap().unwrap();
+        let restored = vector.unwrap();
+
+        // With no quantization, vector should be exactly the same
+        for (a, b) in v.iter().zip(restored.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn test_quantized_save_and_load() {
+        let path = {
+            let mut p = std::env::temp_dir();
+            p.push(format!(
+                "minimemory_quant_test_{}.mmdb",
+                std::process::id()
+            ));
+            p
+        };
+
+        // Create DB with Int3 quantization, insert data, save
+        {
+            let config = Config::new(64)
+                .with_distance(Distance::Cosine)
+                .with_index(IndexType::Flat)
+                .with_quantization(crate::quantization::QuantizationType::Int3);
+            let db = VectorDB::new(config).unwrap();
+
+            let mut v1 = vec![0.0f32; 64];
+            v1[0] = 1.0;
+            let mut v2 = vec![0.0f32; 64];
+            v2[32] = 1.0;
+
+            let mut meta = Metadata::new();
+            meta.insert("label", "first");
+            db.insert("a", &v1, Some(meta)).unwrap();
+            db.insert("b", &v2, None).unwrap();
+
+            db.save(&path).unwrap();
+        }
+
+        // Load and verify
+        let db = VectorDB::open(&path).unwrap();
+
+        assert_eq!(db.len(), 2);
+        assert!(db.contains("a"));
+        assert!(db.contains("b"));
+
+        // Verify dequantized vector is approximately correct
+        let (vector, metadata) = db.get("a").unwrap().unwrap();
+        let v = vector.unwrap();
+        assert_eq!(v.len(), 64);
+        assert!(v[0] > 0.5, "First dim should be large: {}", v[0]);
+        let meta = metadata.unwrap();
+        assert_eq!(meta.get("label").unwrap().as_str().unwrap(), "first");
+
+        // Search should still work after reload
+        let mut query = vec![0.0f32; 64];
+        query[0] = 0.9;
+        query[1] = 0.1;
+        let results = db.search(&query, 1).unwrap();
+        assert_eq!(results[0].id, "a");
+
+        // New inserts should still use quantization
+        let mut v3 = vec![0.0f32; 64];
+        v3[63] = 1.0;
+        db.insert("c", &v3, None).unwrap();
+        assert_eq!(db.len(), 3);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ========================================================================
+    // Pagination and ORDER BY tests
+    // ========================================================================
+
+    fn create_articles_db() -> VectorDB {
+        let db = VectorDB::with_fulltext(
+            Config::new(3),
+            vec!["title".into(), "content".into()],
+        )
+        .unwrap();
+
+        let articles = vec![
+            ("art-1", "Rust Guide", "programming", 3i64),
+            ("art-2", "Alpha Basics", "science", 1i64),
+            ("art-3", "Zebra Facts", "nature", 2i64),
+            ("art-4", "AI Revolution", "tech", 5i64),
+            ("art-5", "Cooking Tips", "lifestyle", 4i64),
+        ];
+
+        for (id, title, category, priority) in articles {
+            let mut meta = Metadata::new();
+            meta.insert("title", title);
+            meta.insert("category", category);
+            meta.insert("priority", priority);
+            db.insert_document(id, None, Some(meta)).unwrap();
+        }
+
+        db
+    }
+
+    #[test]
+    fn test_list_documents_order_by_string_asc() {
+        let db = create_articles_db();
+
+        let page = db
+            .list_documents(None, Some(crate::query::OrderBy::asc("title")), 10, 0)
+            .unwrap();
+
+        assert_eq!(page.total, 5);
+        assert_eq!(page.items.len(), 5);
+        // Alphabetical order by title
+        assert_eq!(page.items[0].id, "art-4"); // AI Revolution
+        assert_eq!(page.items[1].id, "art-2"); // Alpha Basics
+        assert_eq!(page.items[2].id, "art-5"); // Cooking Tips
+        assert_eq!(page.items[3].id, "art-1"); // Rust Guide
+        assert_eq!(page.items[4].id, "art-3"); // Zebra Facts
+    }
+
+    #[test]
+    fn test_list_documents_order_by_int_desc() {
+        let db = create_articles_db();
+
+        let page = db
+            .list_documents(None, Some(crate::query::OrderBy::desc("priority")), 10, 0)
+            .unwrap();
+
+        assert_eq!(page.total, 5);
+        // Descending by priority: 5, 4, 3, 2, 1
+        assert_eq!(page.items[0].id, "art-4"); // priority 5
+        assert_eq!(page.items[1].id, "art-5"); // priority 4
+        assert_eq!(page.items[2].id, "art-1"); // priority 3
+        assert_eq!(page.items[3].id, "art-3"); // priority 2
+        assert_eq!(page.items[4].id, "art-2"); // priority 1
+    }
+
+    #[test]
+    fn test_list_documents_offset_limit() {
+        let db = create_articles_db();
+
+        // Page 1: offset 0, limit 2
+        let page1 = db
+            .list_documents(
+                None,
+                Some(crate::query::OrderBy::asc("priority")),
+                2,
+                0,
+            )
+            .unwrap();
+        assert_eq!(page1.total, 5);
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page1.items[0].id, "art-2"); // priority 1
+        assert_eq!(page1.items[1].id, "art-3"); // priority 2
+        assert!(page1.has_more());
+
+        // Page 2: offset 2, limit 2
+        let page2 = db
+            .list_documents(
+                None,
+                Some(crate::query::OrderBy::asc("priority")),
+                2,
+                2,
+            )
+            .unwrap();
+        assert_eq!(page2.total, 5);
+        assert_eq!(page2.items.len(), 2);
+        assert_eq!(page2.items[0].id, "art-1"); // priority 3
+        assert_eq!(page2.items[1].id, "art-5"); // priority 4
+        assert!(page2.has_more());
+
+        // Page 3: offset 4, limit 2 → only 1 result left
+        let page3 = db
+            .list_documents(
+                None,
+                Some(crate::query::OrderBy::asc("priority")),
+                2,
+                4,
+            )
+            .unwrap();
+        assert_eq!(page3.total, 5);
+        assert_eq!(page3.items.len(), 1);
+        assert_eq!(page3.items[0].id, "art-4"); // priority 5
+        assert!(!page3.has_more());
+    }
+
+    #[test]
+    fn test_list_documents_offset_beyond_results() {
+        let db = create_articles_db();
+
+        let page = db.list_documents(None, None, 10, 100).unwrap();
+        assert_eq!(page.total, 5);
+        assert_eq!(page.items.len(), 0);
+        assert!(!page.has_more());
+    }
+
+    #[test]
+    fn test_list_documents_with_filter_and_order() {
+        let db = create_articles_db();
+
+        // Filter: only tech and programming categories, ordered by title
+        let page = db
+            .list_documents(
+                Some(
+                    Filter::eq("category", "tech")
+                        .or(Filter::eq("category", "programming")),
+                ),
+                Some(crate::query::OrderBy::asc("title")),
+                10,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].id, "art-4"); // AI Revolution
+        assert_eq!(page.items[1].id, "art-1"); // Rust Guide
+    }
+
+    #[test]
+    fn test_filter_search_ordered() {
+        let db = create_articles_db();
+
+        let page = db
+            .filter_search_ordered(
+                Filter::gt("priority", 2i64),
+                crate::query::OrderBy::desc("priority"),
+                2,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(page.total, 3); // priority 3, 4, 5
+        assert_eq!(page.items.len(), 2); // limit 2
+        assert_eq!(page.items[0].id, "art-4"); // priority 5
+        assert_eq!(page.items[1].id, "art-5"); // priority 4
+        assert!(page.has_more());
+    }
+
+    #[test]
+    fn test_paged_result_total_pages() {
+        let db = create_articles_db();
+
+        let page = db.list_documents(None, None, 2, 0).unwrap();
+        assert_eq!(page.total_pages(), 3); // 5 items / 2 per page = 3 pages
+        assert_eq!(page.current_page(), 0);
     }
 }

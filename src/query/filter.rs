@@ -178,6 +178,23 @@ impl Filter {
         }
     }
 
+    /// Crea un filtro de regex sobre un campo string.
+    ///
+    /// # Ejemplo
+    ///
+    /// ```rust
+    /// use minimemory::Filter;
+    ///
+    /// // Matches strings starting with "Hello"
+    /// Filter::regex("title", "^Hello");
+    /// ```
+    pub fn regex(field: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Filter::Condition {
+            field: field.into(),
+            op: FilterOp::Regex(pattern.into()),
+        }
+    }
+
     // ========== Constructores para existencia ==========
 
     /// Crea un filtro "campo existe".

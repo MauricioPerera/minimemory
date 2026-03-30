@@ -5,7 +5,7 @@
 use crate::distance::Distance;
 use crate::error::{Error, Result};
 use crate::index::{BM25Index, Index};
-use crate::query::{Filter, FilterEvaluator};
+use crate::query::{compare_metadata_values, Filter, FilterEvaluator, OrderBy, SortDirection};
 use crate::storage::Storage;
 use crate::types::HybridSearchResult;
 
@@ -43,6 +43,10 @@ pub struct HybridSearchParams {
     pub mode: SearchMode,
     /// Número de resultados
     pub k: usize,
+    /// Number of results to skip (for pagination)
+    pub offset: usize,
+    /// Sort results by a metadata field (overrides default score-based ordering)
+    pub order_by: Option<OrderBy>,
 }
 
 impl HybridSearchParams {
@@ -54,6 +58,8 @@ impl HybridSearchParams {
             filter: None,
             mode: SearchMode::Vector,
             k,
+            offset: 0,
+            order_by: None,
         }
     }
 
@@ -65,6 +71,8 @@ impl HybridSearchParams {
             filter: None,
             mode: SearchMode::Keyword,
             k,
+            offset: 0,
+            order_by: None,
         }
     }
 
@@ -79,6 +87,8 @@ impl HybridSearchParams {
                 keyword_weight: 0.5,
             },
             k,
+            offset: 0,
+            order_by: None,
         }
     }
 
@@ -90,12 +100,26 @@ impl HybridSearchParams {
             filter: Some(filter),
             mode: SearchMode::FilterOnly,
             k: limit,
+            offset: 0,
+            order_by: None,
         }
     }
 
     /// Añade un filtro de metadata.
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Sets the offset for pagination (skip N results).
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Sets the ordering by a metadata field (overrides default score ordering).
+    pub fn with_order_by(mut self, order: OrderBy) -> Self {
+        self.order_by = Some(order);
         self
     }
 
@@ -128,9 +152,9 @@ impl HybridSearch {
         storage: &dyn Storage,
         distance: Distance,
     ) -> Result<Vec<HybridSearchResult>> {
-        match &params.mode {
-            SearchMode::Vector => Self::vector_search(params, vector_index, storage, distance),
-            SearchMode::Keyword => Self::keyword_search(params, bm25_index, storage),
+        let mut results = match &params.mode {
+            SearchMode::Vector => Self::vector_search(params, vector_index, storage, distance)?,
+            SearchMode::Keyword => Self::keyword_search(params, bm25_index, storage)?,
             SearchMode::Hybrid {
                 vector_weight,
                 keyword_weight,
@@ -142,9 +166,47 @@ impl HybridSearch {
                 distance,
                 *vector_weight,
                 *keyword_weight,
-            ),
-            SearchMode::FilterOnly => Self::filter_only_search(params, storage),
+            )?,
+            SearchMode::FilterOnly => Self::filter_only_search(params, storage)?,
+        };
+
+        // Filter out soft-deleted documents (metadata "deleted" = true)
+        results.retain(|r| {
+            !matches!(
+                r.metadata.as_ref().and_then(|m| m.get("deleted")),
+                Some(crate::types::MetadataValue::Bool(true))
+            )
+        });
+
+        // Apply ORDER BY if specified (overrides default score ordering)
+        if let Some(ref order) = params.order_by {
+            let field = &order.field;
+            results.sort_by(|a, b| {
+                let val_a = a.metadata.as_ref().and_then(|m| m.get(field));
+                let val_b = b.metadata.as_ref().and_then(|m| m.get(field));
+                let cmp = compare_metadata_values(val_a, val_b);
+                match order.direction {
+                    SortDirection::Asc => cmp,
+                    SortDirection::Desc => cmp.reverse(),
+                }
+            });
         }
+
+        // Apply OFFSET (pagination)
+        if params.offset > 0 {
+            if params.offset >= results.len() {
+                return Ok(vec![]);
+            }
+            results = results.into_iter().skip(params.offset).collect();
+        }
+
+        // Apply LIMIT (k) — sub-methods already apply k, but after re-sorting
+        // the order may differ, so re-apply
+        if let Some(ref _order) = params.order_by {
+            results.truncate(params.k);
+        }
+
+        Ok(results)
     }
 
     fn vector_search(
@@ -355,10 +417,22 @@ impl HybridSearch {
             .as_ref()
             .ok_or_else(|| Error::InvalidConfig("Filter required for filter-only search".into()))?;
 
+        // When ORDER BY or OFFSET is used, collect all matching results
+        // so sorting and pagination can be applied in the central search() method.
+        // When ORDER BY or OFFSET is used, collect all matching results
+        // so sorting and pagination can be applied in the central search() method.
+        // Cap at 100_000 to prevent OOM on huge datasets.
+        let need_all = params.order_by.is_some() || params.offset > 0;
+        let take_limit = if need_all {
+            100_000
+        } else {
+            params.k
+        };
+
         let results: Vec<_> = storage
             .iter()
             .filter(|doc| FilterEvaluator::evaluate(filter, doc.metadata.as_ref()))
-            .take(params.k)
+            .take(take_limit)
             .map(|doc| HybridSearchResult {
                 id: doc.id,
                 score: 0.0, // Sin ranking

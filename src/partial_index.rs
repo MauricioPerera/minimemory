@@ -140,6 +140,10 @@ impl PartialIndex {
             IndexType::HNSW { m, ef_construction } => {
                 Arc::new(HNSWIndex::new(*m, *ef_construction))
             }
+            IndexType::IVF {
+                num_clusters,
+                num_probes,
+            } => Arc::new(crate::index::IVFIndex::new(*num_clusters, *num_probes)),
         };
 
         Ok(Self {
@@ -215,6 +219,12 @@ impl PartialIndex {
                 IndexType::Flat => "Flat".to_string(),
                 IndexType::HNSW { m, ef_construction } => {
                     format!("HNSW(m={}, ef={})", m, ef_construction)
+                }
+                IndexType::IVF {
+                    num_clusters,
+                    num_probes,
+                } => {
+                    format!("IVF(clusters={}, probes={})", num_clusters, num_probes)
                 }
             },
             description: self.config.description.clone(),

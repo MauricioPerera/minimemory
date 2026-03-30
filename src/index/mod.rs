@@ -1,10 +1,12 @@
 mod bm25;
 mod flat;
 mod hnsw;
+mod ivf;
 
 pub use bm25::{BM25Index, BM25SearchResult, BM25Stats};
 pub use flat::FlatIndex;
 pub use hnsw::HNSWIndex;
+pub use ivf::IVFIndex;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +28,13 @@ pub enum IndexType {
         /// Size of dynamic candidate list during construction (default: 200)
         ef_construction: usize,
     },
+    /// IVF (Inverted File) index with K-means clustering
+    IVF {
+        /// Number of clusters (default: 100)
+        num_clusters: usize,
+        /// Number of clusters to probe during search (default: 10)
+        num_probes: usize,
+    },
 }
 
 impl IndexType {
@@ -40,6 +49,22 @@ impl IndexType {
     /// Create a new HNSW index with custom parameters
     pub fn hnsw_with_params(m: usize, ef_construction: usize) -> Self {
         IndexType::HNSW { m, ef_construction }
+    }
+
+    /// Create a new IVF index with default parameters
+    pub fn ivf() -> Self {
+        IndexType::IVF {
+            num_clusters: 100,
+            num_probes: 10,
+        }
+    }
+
+    /// Create a new IVF index with custom parameters
+    pub fn ivf_with_params(num_clusters: usize, num_probes: usize) -> Self {
+        IndexType::IVF {
+            num_clusters,
+            num_probes,
+        }
     }
 }
 

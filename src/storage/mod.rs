@@ -5,6 +5,7 @@ mod memory;
 pub use memory::MemoryStorage;
 
 use crate::error::Result;
+use crate::quantization::QuantizedVector;
 use crate::types::{Metadata, StoredVector, VectorId};
 
 /// Trait for document storage backends.
@@ -53,4 +54,16 @@ pub trait Storage: Send + Sync {
 
     /// Clear all documents
     fn clear(&self);
+
+    /// Insert a document with a quantized vector (replacing the f32 vector).
+    /// The f32 vector is discarded; only the quantized form is stored.
+    fn insert_quantized(
+        &self,
+        id: VectorId,
+        quantized: QuantizedVector,
+        metadata: Option<Metadata>,
+    ) -> Result<()>;
+
+    /// Get the quantized vector for a document, if stored.
+    fn get_quantized(&self, id: &str) -> Result<Option<QuantizedVector>>;
 }

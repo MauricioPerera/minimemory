@@ -33,6 +33,8 @@ pub enum FilterOp {
     StartsWith(String),
     /// String termina con sufijo
     EndsWith(String),
+    /// String matches regex pattern
+    Regex(String),
 }
 
 impl FilterOp {
@@ -95,6 +97,13 @@ impl FilterOp {
                 Some(MetadataValue::String(s)) => {
                     s.to_lowercase().ends_with(&suffix.to_lowercase())
                 }
+                _ => false,
+            },
+
+            FilterOp::Regex(pattern) => match value {
+                Some(MetadataValue::String(s)) => regex_lite::Regex::new(pattern)
+                    .map(|re| re.is_match(s))
+                    .unwrap_or(false),
                 _ => false,
             },
         }

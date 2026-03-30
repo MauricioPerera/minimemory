@@ -19,6 +19,11 @@ pub enum Distance {
     /// Producto punto negativo
     /// - Valores más negativos = más similares
     DotProduct,
+    /// Distancia Manhattan (L1)
+    /// - Suma de diferencias absolutas
+    /// - 0 = vectores idénticos
+    /// - Rango: [0, ∞)
+    Manhattan,
 }
 
 impl Distance {
@@ -32,6 +37,7 @@ impl Distance {
             Distance::Cosine => simd::cosine_distance(a, b),
             Distance::Euclidean => simd::euclidean_distance(a, b),
             Distance::DotProduct => simd::dot_product_distance(a, b),
+            Distance::Manhattan => simd::manhattan_distance(a, b),
         }
     }
 }
@@ -70,6 +76,22 @@ mod tests {
         let b = vec![3.0, 4.0];
         let dist = Distance::Euclidean.calculate(&a, &b);
         assert!((dist - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_manhattan_identical_vectors() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let dist = Distance::Manhattan.calculate(&a, &b);
+        assert!((dist - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_manhattan_known_distance() {
+        let a = vec![0.0, 0.0];
+        let b = vec![3.0, 4.0];
+        let dist = Distance::Manhattan.calculate(&a, &b);
+        assert!((dist - 7.0).abs() < 1e-6); // |3| + |4| = 7
     }
 
     #[test]

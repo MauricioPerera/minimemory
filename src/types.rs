@@ -280,6 +280,9 @@ pub struct StoredVector {
     /// Vector embedding (None for metadata-only documents)
     pub vector: Option<Vec<f32>>,
     pub metadata: Option<Metadata>,
+    /// Quantized vector (replaces `vector` when quantization is enabled)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantized: Option<crate::quantization::QuantizedVector>,
 }
 
 /// Resultado de búsqueda híbrida (vector + keyword + filtros).
@@ -301,4 +304,49 @@ pub struct HybridSearchResult {
     pub keyword_rank: Option<usize>,
     /// Metadata asociada al documento
     pub metadata: Option<Metadata>,
+}
+
+/// Paginated result wrapper.
+///
+/// Contains a page of results plus metadata for navigation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let page = db.list_documents(None, Some(OrderBy::desc("created_at")), 10, 0)?;
+/// println!("Showing {}/{} items", page.items.len(), page.total);
+/// ```
+#[derive(Debug, Clone)]
+pub struct PagedResult<T> {
+    /// Items in this page
+    pub items: Vec<T>,
+    /// Total number of matching items (before pagination)
+    pub total: usize,
+    /// Offset used for this page
+    pub offset: usize,
+    /// Limit used for this page
+    pub limit: usize,
+}
+
+impl<T> PagedResult<T> {
+    /// Whether there are more pages after this one.
+    pub fn has_more(&self) -> bool {
+        self.offset + self.items.len() < self.total
+    }
+
+    /// Total number of pages.
+    pub fn total_pages(&self) -> usize {
+        if self.limit == 0 {
+            return 0;
+        }
+        (self.total + self.limit - 1) / self.limit
+    }
+
+    /// Current page number (0-indexed).
+    pub fn current_page(&self) -> usize {
+        if self.limit == 0 {
+            return 0;
+        }
+        self.offset / self.limit
+    }
 }

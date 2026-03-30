@@ -2,6 +2,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 
 use crate::error::Result;
+use crate::quantization::QuantizedVector;
 use crate::types::{Metadata, StoredVector, VectorId};
 
 use super::Storage;
@@ -36,6 +37,7 @@ impl Storage for MemoryStorage {
             id: id.clone(),
             vector,
             metadata,
+            quantized: None,
         };
         self.vectors.write().insert(id, doc);
         Ok(())
@@ -67,8 +69,17 @@ impl Storage for MemoryStorage {
             .vectors
             .read()
             .values()
-            .filter(|doc| doc.vector.is_some())
-            .cloned()
+            .filter(|doc| doc.vector.is_some() || doc.quantized.is_some())
+            .map(|doc| {
+                // If vector is None but quantized exists, dequantize on-the-fly
+                if doc.vector.is_none() && doc.quantized.is_some() {
+                    let mut cloned = doc.clone();
+                    cloned.vector = doc.quantized.as_ref().map(|q| q.to_f32());
+                    cloned
+                } else {
+                    doc.clone()
+                }
+            })
             .collect();
         Box::new(docs.into_iter())
     }
@@ -79,6 +90,30 @@ impl Storage for MemoryStorage {
 
     fn clear(&self) {
         self.vectors.write().clear();
+    }
+
+    fn insert_quantized(
+        &self,
+        id: VectorId,
+        quantized: QuantizedVector,
+        metadata: Option<Metadata>,
+    ) -> Result<()> {
+        let doc = StoredVector {
+            id: id.clone(),
+            vector: None, // No f32 stored — replaced by quantized
+            metadata,
+            quantized: Some(quantized),
+        };
+        self.vectors.write().insert(id, doc);
+        Ok(())
+    }
+
+    fn get_quantized(&self, id: &str) -> Result<Option<QuantizedVector>> {
+        Ok(self
+            .vectors
+            .read()
+            .get(id)
+            .and_then(|doc| doc.quantized.clone()))
     }
 }
 

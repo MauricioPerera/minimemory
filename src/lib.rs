@@ -149,6 +149,7 @@ pub mod memory_traits;
 pub mod partial_index;
 pub mod quantization;
 pub mod query;
+pub mod reranker;
 pub mod replication;
 pub mod search;
 mod storage;
@@ -160,7 +161,7 @@ mod types;
 pub mod embeddings;
 
 // Bindings para otros lenguajes
-#[cfg(any(feature = "python", feature = "nodejs", feature = "ffi"))]
+#[cfg(any(feature = "python", feature = "nodejs", feature = "ffi", feature = "wasm"))]
 pub mod bindings;
 
 pub use db::VectorDB;
@@ -168,9 +169,9 @@ pub use distance::Distance;
 pub use error::{Error, Result};
 pub use index::IndexType;
 pub use quantization::{QuantizationType, QuantizedVector, Quantizer};
-pub use query::{Filter, FilterOp};
+pub use query::{Filter, FilterOp, OrderBy, SortDirection};
 pub use search::{HybridSearchParams, SearchMode};
 pub use types::{
-    Config, HybridSearchResult, Metadata, MetadataValue, SearchResult, StoredVector, Vector,
-    VectorId,
+    Config, HybridSearchResult, Metadata, MetadataValue, PagedResult, SearchResult, StoredVector,
+    Vector, VectorId,
 };

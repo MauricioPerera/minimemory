@@ -132,6 +132,14 @@ pub fn dot_product_distance(a: &[f32], b: &[f32]) -> f32 {
     dot_scalar(a, b)
 }
 
+/// Calcula la distancia Manhattan (L1) usando SIMD si está disponible.
+#[inline]
+pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
+    // Scalar fallback for all architectures (Manhattan is simple enough
+    // that the compiler auto-vectorizes well with -C target-cpu=native)
+    manhattan_scalar(a, b)
+}
+
 // ============================================================================
 // Implementaciones escalares (fallback universal)
 // ============================================================================
@@ -188,6 +196,28 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
         dot += a[i] * b[i];
     }
     -dot
+}
+
+#[inline]
+fn manhattan_scalar(a: &[f32], b: &[f32]) -> f32 {
+    let mut sum = 0.0f32;
+    let chunks = a.len() / 4;
+    let remainder = a.len() % 4;
+
+    for i in 0..chunks {
+        let base = i * 4;
+        sum += (a[base] - b[base]).abs()
+            + (a[base + 1] - b[base + 1]).abs()
+            + (a[base + 2] - b[base + 2]).abs()
+            + (a[base + 3] - b[base + 3]).abs();
+    }
+
+    let base = chunks * 4;
+    for i in 0..remainder {
+        sum += (a[base + i] - b[base + i]).abs();
+    }
+
+    sum
 }
 
 // ============================================================================
