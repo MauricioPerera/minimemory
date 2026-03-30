@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>minimemory — Browser Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #0a0a0a; color: #e0e0e0; }
+    h1 { font-size: 1.5rem; margin-bottom: 4px; }
+    h1 span { color: #888; font-weight: normal; font-size: 0.9rem; }
+    .status { color: #4ade80; font-size: 0.85rem; margin-bottom: 16px; }
+    .section { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .section h2 { font-size: 1rem; margin-bottom: 8px; color: #93c5fd; }
+    label { display: block; font-size: 0.8rem; color: #888; margin-bottom: 2px; }
+    input, textarea, select { width: 100%; padding: 8px; background: #0a0a0a; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-family: monospace; font-size: 0.85rem; margin-bottom: 8px; }
+    textarea { height: 60px; resize: vertical; }
+    button { padding: 8px 16px; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; margin-right: 4px; margin-bottom: 4px; }
+    button:hover { background: #1d4ed8; }
+    button.danger { background: #dc2626; }
+    .results { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 10px; margin-top: 8px; font-family: monospace; font-size: 0.8rem; max-height: 300px; overflow-y: auto; white-space: pre-wrap; }
+    .stats { display: flex; gap: 16px; font-size: 0.85rem; }
+    .stats span { color: #4ade80; }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+  </style>
+</head>
+<body>
+  <h1>minimemory <span>browser demo</span></h1>
+  <div class="status" id="status">Loading WASM...</div>
+
+  <div class="section">
+    <h2>Database</h2>
+    <div class="stats" id="stats">Documents: <span>0</span> | Dims: <span>64</span></div>
+  </div>
+
+  <div class="section">
+    <h2>Insert Document</h2>
+    <div class="row">
+      <div><label>ID</label><input id="ins-id" value="doc-1"></div>
+      <div><label>Category</label><input id="ins-cat" value="tech"></div>
+    </div>
+    <label>Title</label><input id="ins-title" value="Introduction to Vector Databases">
+    <label>Content</label><textarea id="ins-content">Vector databases store embeddings for semantic search...</textarea>
+    <button onclick="insertDoc()">Insert</button>
+    <button onclick="insertSample()">Insert 100 Sample Docs</button>
+    <button onclick="clearAll()" class="danger">Clear All</button>
+  </div>
+
+  <div class="section">
+    <h2>Search</h2>
+    <div class="row">
+      <div><label>Query (text for keyword, or vector ID to use its embedding)</label><input id="search-q" value="vector database"></div>
+      <div><label>Limit</label><input id="search-k" type="number" value="5"></div>
+    </div>
+    <button onclick="keywordSearch()">Keyword Search (BM25)</button>
+    <button onclick="vectorSearch()">Vector Search</button>
+    <div class="results" id="search-results">Results will appear here...</div>
+  </div>
+
+  <div class="section">
+    <h2>Filter + List</h2>
+    <div class="row">
+      <div><label>Filter (JSON)</label><input id="filter-q" value='{"category": "tech"}'></div>
+      <div><label>Order By</label><input id="filter-order" value="title"></div>
+    </div>
+    <div class="row">
+      <div><label>Limit</label><input id="filter-limit" type="number" value="10"></div>
+      <div><label>Offset</label><input id="filter-offset" type="number" value="0"></div>
+    </div>
+    <button onclick="filterSearch()">Filter Search</button>
+    <button onclick="listDocs()">List (ORDER BY + Pagination)</button>
+    <div class="results" id="filter-results">Results will appear here...</div>
+  </div>
+
+  <div class="section">
+    <h2>Persistence</h2>
+    <button onclick="exportDb()">Export to localStorage</button>
+    <button onclick="importDb()">Import from localStorage</button>
+    <div class="results" id="persist-results"></div>
+  </div>
+
+  <script type="module">
+    import init, { WasmVectorDB } from './minimemory.js';
+
+    const DIMS = 64;
+    let db;
+
+    // Simple hash function to create pseudo-vectors from text
+    function textToVector(text, dims) {
+      const v = new Float32Array(dims);
+      for (let i = 0; i < dims; i++) {
+        let h = 0;
+        for (let j = 0; j < text.length; j++) {
+          h = ((h << 5) - h + text.charCodeAt(j) * (i + 1)) | 0;
+        }
+        v[i] = Math.sin(h * 0.0001);
+      }
+      // Normalize
+      let norm = 0;
+      for (let i = 0; i < dims; i++) norm += v[i] * v[i];
+      norm = Math.sqrt(norm);
+      if (norm > 0) for (let i = 0; i < dims; i++) v[i] /= norm;
+      return v;
+    }
+
+    async function start() {
+      await init();
+      db = new WasmVectorDB(DIMS, "cosine", "flat");
+
+      // Try restore from localStorage
+      const saved = localStorage.getItem("minimemory-demo");
+      if (saved) {
+        try {
+          db.import_snapshot(saved);
+          document.getElementById("status").textContent = `Restored ${db.len()} docs from localStorage`;
+        } catch (e) {
+          document.getElementById("status").textContent = "Ready (fresh database)";
+        }
+      } else {
+        document.getElementById("status").textContent = "Ready (fresh database)";
+      }
+      updateStats();
+    }
+
+    function updateStats() {
+      document.getElementById("stats").innerHTML =
+        `Documents: <span>${db.len()}</span> | Dims: <span>${db.dimensions()}</span>`;
+    }
+
+    window.insertDoc = function() {
+      const id = document.getElementById("ins-id").value;
+      const title = document.getElementById("ins-title").value;
+      const cat = document.getElementById("ins-cat").value;
+      const content = document.getElementById("ins-content").value;
+      const vector = textToVector(title + " " + content, DIMS);
+      try {
+        db.insert_with_metadata(id, vector, JSON.stringify({ title, category: cat, content }));
+        updateStats();
+        document.getElementById("status").textContent = `Inserted: ${id}`;
+      } catch (e) {
+        document.getElementById("status").textContent = `Error: ${e.message}`;
+      }
+    };
+
+    window.insertSample = function() {
+      const categories = ["tech", "science", "art", "news", "sports"];
+      const topics = [
+        "machine learning", "quantum computing", "web development", "databases",
+        "neural networks", "cloud computing", "cybersecurity", "blockchain",
+        "data science", "artificial intelligence", "devops", "microservices",
+        "functional programming", "rust language", "javascript frameworks",
+        "distributed systems", "graph databases", "vector search",
+        "natural language processing", "computer vision"
+      ];
+      let inserted = 0;
+      for (let i = 0; i < 100; i++) {
+        const topic = topics[i % topics.length];
+        const cat = categories[i % categories.length];
+        const title = `Article ${i}: ${topic}`;
+        const content = `This is an article about ${topic}. It covers various aspects of ${topic} in detail.`;
+        const id = `sample-${i}`;
+        try {
+          const vector = textToVector(title + " " + content, DIMS);
+          db.insert_with_metadata(id, vector, JSON.stringify({
+            title, category: cat, content, priority: i % 10
+          }));
+          inserted++;
+        } catch (_) {}
+      }
+      updateStats();
+      document.getElementById("status").textContent = `Inserted ${inserted} sample docs`;
+    };
+
+    window.clearAll = function() {
+      db.clear();
+      localStorage.removeItem("minimemory-demo");
+      updateStats();
+      document.getElementById("status").textContent = "Cleared all documents";
+    };
+
+    window.keywordSearch = function() {
+      const q = document.getElementById("search-q").value;
+      const k = parseInt(document.getElementById("search-k").value);
+      const t0 = performance.now();
+      const results = JSON.parse(db.keyword_search(q, k));
+      const ms = (performance.now() - t0).toFixed(2);
+      document.getElementById("search-results").textContent =
+        `Keyword search "${q}" (${ms}ms, ${results.length} results)\n\n` +
+        results.map((r, i) => `${i+1}. [${r.id}] score=${r.score?.toFixed(4)}`).join("\n");
+    };
+
+    window.vectorSearch = function() {
+      const q = document.getElementById("search-q").value;
+      const k = parseInt(document.getElementById("search-k").value);
+      const vector = textToVector(q, DIMS);
+      const t0 = performance.now();
+      const results = JSON.parse(db.search(vector, k));
+      const ms = (performance.now() - t0).toFixed(2);
+      document.getElementById("search-results").textContent =
+        `Vector search "${q}" (${ms}ms, ${results.length} results)\n\n` +
+        results.map((r, i) =>
+          `${i+1}. [${r.id}] dist=${r.distance?.toFixed(4)} ${r.metadata?.title || ""}`
+        ).join("\n");
+    };
+
+    window.filterSearch = function() {
+      const filterStr = document.getElementById("filter-q").value;
+      const limit = parseInt(document.getElementById("filter-limit").value);
+      try {
+        const t0 = performance.now();
+        const results = JSON.parse(db.filter_search(filterStr, limit));
+        const ms = (performance.now() - t0).toFixed(2);
+        document.getElementById("filter-results").textContent =
+          `Filter (${ms}ms, ${results.length} results)\n\n` +
+          results.map((r, i) => `${i+1}. [${r.id}] ${r.metadata?.title || ""}`).join("\n");
+      } catch (e) {
+        document.getElementById("filter-results").textContent = `Error: ${e.message}`;
+      }
+    };
+
+    window.listDocs = function() {
+      const filterStr = document.getElementById("filter-q").value;
+      const orderBy = document.getElementById("filter-order").value;
+      const limit = parseInt(document.getElementById("filter-limit").value);
+      const offset = parseInt(document.getElementById("filter-offset").value);
+      try {
+        const t0 = performance.now();
+        const page = JSON.parse(db.list_documents(filterStr, orderBy, false, limit, offset));
+        const ms = (performance.now() - t0).toFixed(2);
+        document.getElementById("filter-results").textContent =
+          `List (${ms}ms, page ${Math.floor(offset/limit)+1}, ${page.items.length}/${page.total} total, has_more=${page.has_more})\n\n` +
+          page.items.map((r, i) => `${offset+i+1}. [${r.id}] ${r.metadata?.title || ""}`).join("\n");
+      } catch (e) {
+        document.getElementById("filter-results").textContent = `Error: ${e.message}`;
+      }
+    };
+
+    window.exportDb = function() {
+      const snapshot = db.export_snapshot();
+      localStorage.setItem("minimemory-demo", snapshot);
+      const kb = (snapshot.length / 1024).toFixed(1);
+      document.getElementById("persist-results").textContent =
+        `Exported ${db.len()} docs (${kb} KB) to localStorage`;
+    };
+
+    window.importDb = function() {
+      const saved = localStorage.getItem("minimemory-demo");
+      if (!saved) {
+        document.getElementById("persist-results").textContent = "No saved data in localStorage";
+        return;
+      }
+      const count = db.import_snapshot(saved);
+      updateStats();
+      document.getElementById("persist-results").textContent = `Imported ${count} docs`;
+    };
+
+    start();
+  </script>
+</body>
+</html>

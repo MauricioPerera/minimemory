@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>minimemory — Browser Test Suite</title>
+  <style>
+    body { font-family: monospace; background: #0a0a0a; color: #e0e0e0; padding: 20px; max-width: 900px; margin: 0 auto; }
+    h1 { font-size: 1.2rem; }
+    .pass { color: #4ade80; }
+    .fail { color: #ef4444; }
+    .info { color: #93c5fd; }
+    #output { white-space: pre-wrap; line-height: 1.6; }
+    .summary { margin-top: 16px; padding: 12px; border: 1px solid #333; border-radius: 4px; font-size: 1.1rem; }
+  </style>
+</head>
+<body>
+  <h1>minimemory browser test suite</h1>
+  <div id="output"></div>
+
+  <script type="module">
+    import init, { WasmVectorDB } from './minimemory.js';
+
+    const out = document.getElementById("output");
+    let passed = 0, failed = 0;
+
+    function log(msg, cls = "") {
+      const span = document.createElement("span");
+      span.className = cls;
+      span.textContent = msg + "\n";
+      out.appendChild(span);
+    }
+
+    function assert(condition, msg) {
+      if (condition) {
+        passed++;
+        log(`  PASS  ${msg}`, "pass");
+      } else {
+        failed++;
+        log(`  FAIL  ${msg}`, "fail");
+      }
+    }
+
+    function assertEqual(a, b, msg) {
+      assert(a === b, `${msg} (got ${a}, expected ${b})`);
+    }
+
+    function section(name) {
+      log(`\n--- ${name} ---`, "info");
+    }
+
+    async function runTests() {
+      await init();
+      log("WASM initialized", "info");
+
+      // ── Constructor Tests ──────────────────────────────────────
+      section("Constructors");
+
+      const db1 = new WasmVectorDB(64, "cosine", "flat");
+      assertEqual(db1.dimensions(), 64, "Basic constructor: dims=64");
+      assertEqual(db1.len(), 0, "Empty on create");
+      assert(db1.is_empty(), "is_empty() on new DB");
+
+      const db2 = WasmVectorDB.new_int3(32, "euclidean", "flat");
+      assertEqual(db2.dimensions(), 32, "Int3 constructor: dims=32");
+
+      const db3 = WasmVectorDB.new_hnsw(128, "cosine", 16, 200);
+      assertEqual(db3.dimensions(), 128, "HNSW constructor: dims=128");
+
+      const db4 = WasmVectorDB.new_with_config(64, "cosine", "flat", "int8", null, null);
+      assertEqual(db4.dimensions(), 64, "Full config constructor");
+
+      // ── CRUD Tests ─────────────────────────────────────────────
+      section("CRUD");
+
+      const db = new WasmVectorDB(4, "cosine", "flat");
+      const v1 = new Float32Array([1, 0, 0, 0]);
+      const v2 = new Float32Array([0, 1, 0, 0]);
+      const v3 = new Float32Array([0, 0, 1, 0]);
+
+      db.insert("a", v1);
+      assertEqual(db.len(), 1, "Insert: count=1");
+      assert(db.contains("a"), "Contains after insert");
+
+      db.insert_with_metadata("b", v2, JSON.stringify({ title: "test", score: 42 }));
+      assertEqual(db.len(), 2, "Insert with metadata: count=2");
+
+      const got = db.get("b");
+      const parsed = typeof got === "string" ? JSON.parse(got) : got;
+      assertEqual(parsed.metadata.title, "test", "Get: metadata.title");
+      assertEqual(parsed.metadata.score, 42, "Get: metadata.score");
+
+      db.update("a", v3);
+      assert(db.contains("a"), "Contains after update");
+
+      const deleted = db.delete("b");
+      assert(deleted, "Delete returns true");
+      assertEqual(db.len(), 1, "Count after delete");
+      assert(!db.contains("b"), "Not contains after delete");
+
+      const ids = JSON.parse(db.ids());
+      assert(Array.isArray(ids), "ids() returns array");
+      assertEqual(ids.length, 1, "ids() length=1");
+      assertEqual(ids[0], "a", "ids()[0]='a'");
+
+      db.clear();
+      assertEqual(db.len(), 0, "Clear: count=0");
+      assert(db.is_empty(), "is_empty after clear");
+
+      // ── Search Tests ───────────────────────────────────────────
+      section("Search");
+
+      const sdb = new WasmVectorDB(4, "cosine", "flat");
+      sdb.insert_with_metadata("x", new Float32Array([1, 0, 0, 0]), JSON.stringify({ cat: "a" }));
+      sdb.insert_with_metadata("y", new Float32Array([0.9, 0.1, 0, 0]), JSON.stringify({ cat: "a" }));
+      sdb.insert_with_metadata("z", new Float32Array([0, 0, 0, 1]), JSON.stringify({ cat: "b" }));
+
+      const sr = JSON.parse(sdb.search(new Float32Array([1, 0, 0, 0]), 2));
+      assertEqual(sr.length, 2, "Search returns k results");
+      assertEqual(sr[0].id, "x", "Search: nearest is 'x'");
+      assert(sr[0].distance < sr[1].distance, "Search: sorted by distance");
+
+      // ── Filter Search ──────────────────────────────────────────
+      section("Filter Search");
+
+      const fr = JSON.parse(sdb.filter_search('{"cat": "a"}', 10));
+      assertEqual(fr.length, 2, "Filter 'cat=a': 2 results");
+      assert(fr.every(r => r.metadata?.cat === "a"), "All results have cat=a");
+
+      // ── search_with_filter ─────────────────────────────────────
+      const sfr = JSON.parse(sdb.search_with_filter(
+        new Float32Array([1, 0, 0, 0]), 5, '{"cat": "a"}'
+      ));
+      assertEqual(sfr.length, 2, "search_with_filter: 2 results (cat=a)");
+      assertEqual(sfr[0].id, "x", "search_with_filter: nearest in cat=a is x");
+
+      // ── list_documents ─────────────────────────────────────────
+      section("List Documents (ORDER BY + Pagination)");
+
+      const ldb = new WasmVectorDB(4, "cosine", "flat");
+      for (let i = 0; i < 20; i++) {
+        ldb.insert_with_metadata(
+          `item-${i}`,
+          new Float32Array([Math.sin(i), Math.cos(i), 0, 0]),
+          JSON.stringify({ name: `Item ${String(i).padStart(2, "0")}`, priority: i % 5 })
+        );
+      }
+
+      const page1 = JSON.parse(ldb.list_documents("{}", "name", false, 5, 0));
+      assertEqual(page1.total, 20, "List: total=20");
+      assertEqual(page1.items.length, 5, "List: page size=5");
+      assert(page1.has_more, "List: has_more=true");
+
+      const page2 = JSON.parse(ldb.list_documents("{}", "name", false, 5, 5));
+      assertEqual(page2.items.length, 5, "List page 2: size=5");
+      assert(page1.items[0].id !== page2.items[0].id, "Pages have different items");
+
+      const lastPage = JSON.parse(ldb.list_documents("{}", "name", false, 5, 15));
+      assertEqual(lastPage.items.length, 5, "Last page: size=5");
+      assert(!lastPage.has_more, "Last page: has_more=false");
+
+      // ── Document Store (no vector) ─────────────────────────────
+      section("Document Store");
+
+      const ddb = new WasmVectorDB(4, "cosine", "flat");
+      ddb.insert_document("user-1", null, JSON.stringify({ name: "Alice", role: "admin" }));
+      ddb.insert_document("user-2", null, JSON.stringify({ name: "Bob", role: "user" }));
+      assertEqual(ddb.len(), 2, "Document store: 2 docs");
+
+      const admins = JSON.parse(ddb.filter_search('{"role": "admin"}', 10));
+      assertEqual(admins.length, 1, "Filter role=admin: 1 result");
+      assertEqual(admins[0].id, "user-1", "Admin is user-1");
+
+      // ── Matryoshka ─────────────────────────────────────────────
+      section("Matryoshka (auto-truncation)");
+
+      const mdb = new WasmVectorDB(4, "cosine", "flat");
+      mdb.insert_auto("m1", new Float32Array([1, 0, 0, 0, 0.5, 0.5, 0.5, 0.5])); // 8d → 4d
+      assertEqual(mdb.len(), 1, "insert_auto: inserted");
+      const mr = JSON.parse(mdb.search_auto(new Float32Array([1, 0, 0, 0, 0, 0, 0, 0]), 1));
+      assertEqual(mr[0].id, "m1", "search_auto: found m1");
+
+      // ── Persistence ────────────────────────────────────────────
+      section("Persistence (export/import)");
+
+      const pdb = new WasmVectorDB(4, "cosine", "flat");
+      pdb.insert_with_metadata("p1", new Float32Array([1, 0, 0, 0]), JSON.stringify({ x: "hello" }));
+      pdb.insert_with_metadata("p2", new Float32Array([0, 1, 0, 0]), JSON.stringify({ x: "world" }));
+
+      const snapshot = pdb.export_snapshot();
+      assert(typeof snapshot === "string", "export_snapshot returns string");
+      assert(snapshot.length > 10, "Snapshot is non-trivial");
+
+      const pdb2 = new WasmVectorDB(4, "cosine", "flat");
+      const imported = pdb2.import_snapshot(snapshot);
+      assertEqual(imported, 2, "import_snapshot: 2 docs imported");
+      assertEqual(pdb2.len(), 2, "Imported DB has 2 docs");
+      assert(pdb2.contains("p1"), "Imported DB contains p1");
+
+      // ── Distance Metrics ───────────────────────────────────────
+      section("Distance Metrics");
+
+      for (const dist of ["cosine", "euclidean", "dot", "manhattan"]) {
+        const ddb = new WasmVectorDB(4, dist, "flat");
+        ddb.insert("d1", new Float32Array([1, 0, 0, 0]));
+        const r = JSON.parse(ddb.search(new Float32Array([1, 0, 0, 0]), 1));
+        assert(r.length === 1, `${dist}: search works`);
+      }
+
+      // ── Quantization ───────────────────────────────────────────
+      section("Quantization Types");
+
+      for (const [name, fn] of [
+        ["int8", () => WasmVectorDB.new_int8(16, "cosine", "flat")],
+        ["int3", () => WasmVectorDB.new_int3(16, "cosine", "flat")],
+        ["binary", () => WasmVectorDB.new_binary(16, "cosine", "flat")],
+      ]) {
+        const qdb = fn();
+        const v = new Float32Array(16);
+        v[0] = 1;
+        qdb.insert("q1", v);
+        const qr = JSON.parse(qdb.search(v, 1));
+        assert(qr.length === 1, `${name} quantization: search works`);
+      }
+
+      // ── Summary ────────────────────────────────────────────────
+      const total = passed + failed;
+      const summary = document.createElement("div");
+      summary.className = "summary " + (failed === 0 ? "pass" : "fail");
+      summary.textContent = `${passed}/${total} tests passed` + (failed > 0 ? ` (${failed} FAILED)` : " — ALL PASS");
+      out.appendChild(summary);
+    }
+
+    runTests().catch(e => log(`FATAL: ${e.message}\n${e.stack}`, "fail"));
+  </script>
+</body>
+</html>
