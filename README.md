@@ -61,7 +61,7 @@ const results = JSON.parse(db.search(new Float32Array(384), 10));
 | **Query** | ORDER BY any field, OFFSET/LIMIT pagination, PagedResult |
 | **Persistence** | .mmdb binary format v3 with CRC32 checksums, atomic writes |
 | **Durability (WAL)** | Opt-in write-ahead log; per-op append, checkpoint compaction, crash recovery (native Rust only) |
-| **Metadata indexes** | Opt-in per-field indexes; sub-linear `$eq` and range filters (Rust core, not in WASM/JS bindings) |
+| **Metadata indexes** | Opt-in per-field indexes; sub-linear `$eq` and range filters (Rust and WASM/JS) |
 | **Validation** | Rejects NaN/Inf vectors (`Error::InvalidVector`), dimension checks on insert and update |
 | **Search contract** | Returns `min(k, qualifying)`; offset applied before truncation, filters before RRF fusion |
 | **Replication** | `ConflictResolution` (LWW / KeepLocal / ApplyRemote); compaction preserves unexported log entries |
@@ -135,7 +135,7 @@ let hits = db.filter_search(
 )?;
 ```
 
-Limitations: indexes are not persisted in `.mmdb` — recreate them with one retroactive `create_metadata_index` call after `open()`. Available in the Rust core only; not exposed in the WASM/JS bindings.
+Limitations: indexes are not persisted in `.mmdb` — recreate them with one retroactive `create_metadata_index` call after `open()`. Also available from JS: `create_metadata_index` / `drop_metadata_index` / `list_metadata_indexes` on `WasmVectorDB` (not included in snapshots — recreate after `import_snapshot`).
 
 ## Pagination
 
