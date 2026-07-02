@@ -297,16 +297,35 @@ impl ChangeLog {
         self.entries.write().retain(|e| e.sequence >= sequence);
     }
 
-    /// Compacta el log si excede el límite.
+    /// Compacta el log si excede el límite, sin perder cambios no exportados.
+    ///
+    /// Descarta únicamente entradas ya exportadas (`sequence < last_checkpoint`):
+    /// las posteriores al checkpoint (`sequence >= last_checkpoint`) aún no
+    /// fueron entregadas a las réplicas y deben conservarse, ya que
+    /// `export_since_checkpoint` las devuelve. De las exportadas se conservan
+    /// las `max_entries / 2` más recientes.
+    ///
+    /// Si tras descartar las exportadas el log sigue por encima del límite, se
+    /// tolera: el exceso se debe a entradas no exportadas, y el usuario debe
+    /// avanzar el checkpoint (`checkpoint`) antes de que la compactación pueda
+    /// recortar más.
     fn maybe_compact(&self) {
         let len = self.entries.read().len();
         if len > self.max_entries {
-            // Mantener solo las últimas max_entries/2 entradas
+            let checkpoint = self.last_checkpoint.load(Ordering::SeqCst);
             let keep = self.max_entries / 2;
             let mut entries = self.entries.write();
-            if entries.len() > keep {
-                let start = entries.len() - keep;
-                *entries = entries[start..].to_vec();
+            // Separar exportadas (descartables) de no exportadas (intocables).
+            let (exported, unexported): (Vec<ChangeEntry>, Vec<ChangeEntry>) = entries
+                .iter()
+                .cloned()
+                .partition(|e| e.sequence < checkpoint);
+            if exported.len() > keep {
+                // Conservar las `keep` exportadas más recientes y todas las no
+                // exportadas; el orden por secuencia se preserva porque toda
+                // exportada es anterior a toda no exportada.
+                let kept_exported = exported[exported.len() - keep..].to_vec();
+                *entries = kept_exported.into_iter().chain(unexported).collect();
             }
         }
     }
@@ -432,7 +451,14 @@ impl ReplicationManager {
         self
     }
 
-    /// Aplica cambios a una VectorDB.
+    /// Aplica cambios a una VectorDB sin resolución de conflictos.
+    ///
+    /// Es una función de aplicación cruda: no compara timestamps ni consulta el
+    /// log local, por lo que `SyncResult.conflicts` siempre queda vacío y un
+    /// `Update` remoto pisa el dato local sin mirar nada. La vía con detección y
+    /// resolución real de conflictos es [`ReplicationManager::sync`], que tiene
+    /// acceso al log local y aplica la `conflict_strategy` antes de delegar aquí
+    /// solo los cambios que efectivamente deben aplicarse.
     pub fn apply_changes(db: &VectorDB, changes: &[ChangeEntry]) -> Result<SyncResult> {
         let mut applied = 0;
         let mut skipped = 0;
@@ -490,6 +516,22 @@ impl ReplicationManager {
     }
 
     /// Sincroniza cambios entre dos instancias.
+    ///
+    /// A diferencia de [`Self::apply_changes`], aquí hay acceso al log local,
+    /// por lo que se detectan y resuelven conflictos reales antes de aplicar.
+    /// Un conflicto ocurre cuando el documento de un cambio remoto también tiene
+    /// cambios locales en `local_log` posteriores al `last_synced_sequence` de
+    /// este remoto (es decir, cambios locales aún no sincronizados). Para cada
+    /// conflicto se aplica `self.conflict_strategy`:
+    ///
+    /// - [`ConflictResolution::KeepLocal`]: no se aplica el cambio remoto.
+    /// - [`ConflictResolution::ApplyRemote`]: se aplica el cambio remoto.
+    /// - [`ConflictResolution::LastWriteWins`]: gana el `timestamp` más nuevo
+    ///   entre el cambio remoto y el último cambio local de ese documento. En
+    ///   caso de empate se aplica el remoto.
+    ///
+    /// Cada conflicto se registra en `SyncResult.conflicts` con su
+    /// [`ConflictInfo`] completo (resolución incluida).
     pub fn sync(
         &self,
         local_db: &VectorDB,
@@ -510,22 +552,90 @@ impl ReplicationManager {
                 changes_applied: 0,
             });
 
+        let last_synced = state.last_synced_sequence;
+
         // Filtrar cambios ya sincronizados
         let new_changes: Vec<_> = remote_changes
             .iter()
-            .filter(|c| c.sequence > state.last_synced_sequence)
+            .filter(|c| c.sequence > last_synced)
             .cloned()
             .collect();
 
-        // Aplicar cambios
-        let result = Self::apply_changes(local_db, &new_changes)?;
+        // Cambios locales pendientes (posteriores al último checkpoint de sync
+        // con este remoto), quedándonos con el más reciente por documento. Su
+        // existencia sobre un doc que también toca un cambio remoto define un
+        // conflicto.
+        let local_pending: HashMap<VectorId, ChangeEntry> = local_log
+            .export_all()
+            .into_iter()
+            .filter(|e| e.sequence > last_synced)
+            .fold(HashMap::new(), |mut acc, e| {
+                match acc.get(&e.document_id) {
+                    Some(cur) if cur.sequence >= e.sequence => {}
+                    _ => {
+                        acc.insert(e.document_id.clone(), e);
+                    }
+                }
+                acc
+            });
+
+        // Aplicación selectiva: los cambios sin conflicto se aplican; los
+        // conflictivos se aplican solo si la resolución lo indica.
+        let mut to_apply: Vec<ChangeEntry> = Vec::new();
+        let mut conflicts: Vec<ConflictInfo> = Vec::new();
+
+        for change in &new_changes {
+            match local_pending.get(&change.document_id) {
+                None => to_apply.push(change.clone()),
+                Some(local_change) => {
+                    let resolution = match self.conflict_strategy {
+                        ConflictResolution::KeepLocal => ConflictResolution::KeepLocal,
+                        ConflictResolution::ApplyRemote => ConflictResolution::ApplyRemote,
+                        // Empate de timestamps → aplicar remoto.
+                        ConflictResolution::LastWriteWins => {
+                            if change.timestamp >= local_change.timestamp {
+                                ConflictResolution::ApplyRemote
+                            } else {
+                                ConflictResolution::KeepLocal
+                            }
+                        }
+                    };
+                    conflicts.push(ConflictInfo {
+                        document_id: change.document_id.clone(),
+                        local_operation: local_change.operation,
+                        remote_operation: change.operation,
+                        local_timestamp: local_change.timestamp,
+                        remote_timestamp: change.timestamp,
+                        resolution,
+                    });
+                    if resolution == ConflictResolution::ApplyRemote {
+                        to_apply.push(change.clone());
+                    }
+                }
+            }
+        }
+
+        let result = Self::apply_changes(local_db, &to_apply)?;
+
+        // Avanzar el checkpoint sobre TODOS los cambios nuevos (incluidos los
+        // omitidos por conflicto) para no reevaluarlos en la próxima sync.
+        let new_sequence = new_changes
+            .iter()
+            .map(|c| c.sequence)
+            .max()
+            .unwrap_or(last_synced);
 
         // Actualizar estado
-        state.last_synced_sequence = result.new_sequence;
+        state.last_synced_sequence = new_sequence;
         state.last_sync_time = current_timestamp();
         state.changes_applied += result.applied as u64;
 
-        Ok(result)
+        Ok(SyncResult {
+            applied: result.applied,
+            skipped: result.skipped,
+            conflicts,
+            new_sequence,
+        })
     }
 
     /// Obtiene el estado de replicación con una instancia.
@@ -739,5 +849,205 @@ mod tests {
         ReplicationManager::apply_snapshot(&replica, &snapshot).unwrap();
 
         assert_eq!(replica.len(), 2);
+    }
+
+    #[test]
+    fn test_sync_conflict_lww_local_wins() {
+        let local_db = VectorDB::new(Config::new(3)).unwrap();
+        let log = ChangeLog::with_instance_id("local");
+
+        // Cambios locales a doc1: insert (seq 0) + update (seq 1). El update
+        // (seq 1 > last_synced_sequence inicial = 0) es el cambio local pendiente.
+        local_db.insert("doc1", &[0.1, 0.1, 0.1], None).unwrap();
+        log.track_insert("doc1", &[0.1, 0.1, 0.1], None);
+        log.track_update("doc1", &[0.2, 0.2, 0.2], None);
+        local_db.update("doc1", &[0.2, 0.2, 0.2], None).unwrap();
+
+        // Timestamp del último cambio local a doc1.
+        let local_ts = log
+            .export_all()
+            .into_iter()
+            .filter(|e| e.document_id == "doc1")
+            .map(|e| e.timestamp)
+            .max()
+            .unwrap();
+
+        // Update remoto más viejo sobre el mismo doc1.
+        let mut remote = ChangeEntry::update(1, "remote", "doc1", vec![0.9, 0.9, 0.9], None);
+        remote.timestamp = local_ts - 1000;
+        let remote_changes = vec![remote];
+
+        let manager = ReplicationManager::new(); // LastWriteWins por defecto
+        let result = manager
+            .sync(&local_db, &log, &remote_changes, "remote")
+            .unwrap();
+
+        assert_eq!(result.conflicts.len(), 1);
+        let c = &result.conflicts[0];
+        assert_eq!(c.document_id, "doc1");
+        assert_eq!(c.resolution, ConflictResolution::KeepLocal);
+        assert_eq!(c.remote_operation, OperationType::Update);
+        assert_eq!(c.local_operation, OperationType::Update);
+
+        // El dato local sobrevive; el remoto no se aplicó.
+        let (vec, _) = local_db.get("doc1").unwrap().unwrap();
+        assert_eq!(vec.unwrap(), vec![0.2, 0.2, 0.2]);
+        assert_eq!(result.applied, 0);
+    }
+
+    #[test]
+    fn test_sync_conflict_lww_remote_wins() {
+        let local_db = VectorDB::new(Config::new(3)).unwrap();
+        let log = ChangeLog::with_instance_id("local");
+
+        local_db.insert("doc1", &[0.2, 0.2, 0.2], None).unwrap();
+        log.track_insert("doc1", &[0.2, 0.2, 0.2], None);
+        log.track_update("doc1", &[0.3, 0.3, 0.3], None);
+        local_db.update("doc1", &[0.3, 0.3, 0.3], None).unwrap();
+
+        let local_ts = log
+            .export_all()
+            .into_iter()
+            .filter(|e| e.document_id == "doc1")
+            .map(|e| e.timestamp)
+            .max()
+            .unwrap();
+
+        // Update remoto más nuevo sobre el mismo doc1.
+        let mut remote = ChangeEntry::update(1, "remote", "doc1", vec![0.9, 0.9, 0.9], None);
+        remote.timestamp = local_ts + 1_000_000;
+        let remote_changes = vec![remote];
+
+        let manager = ReplicationManager::new(); // LastWriteWins
+        let result = manager
+            .sync(&local_db, &log, &remote_changes, "remote")
+            .unwrap();
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].resolution, ConflictResolution::ApplyRemote);
+        assert_eq!(result.applied, 1);
+
+        let (vec, _) = local_db.get("doc1").unwrap().unwrap();
+        assert_eq!(vec.unwrap(), vec![0.9, 0.9, 0.9]);
+    }
+
+    #[test]
+    fn test_sync_conflict_keep_local() {
+        let local_db = VectorDB::new(Config::new(3)).unwrap();
+        let log = ChangeLog::with_instance_id("local");
+
+        local_db.insert("doc1", &[0.3, 0.3, 0.3], None).unwrap();
+        log.track_insert("doc1", &[0.3, 0.3, 0.3], None);
+        log.track_update("doc1", &[0.3, 0.3, 0.3], None);
+        local_db.update("doc1", &[0.3, 0.3, 0.3], None).unwrap();
+
+        // Remoto más nuevo: con KeepLocal no se aplica igual.
+        let mut remote = ChangeEntry::update(1, "remote", "doc1", vec![0.9, 0.9, 0.9], None);
+        remote.timestamp = current_timestamp() + 1_000_000;
+        let remote_changes = vec![remote];
+
+        let manager = ReplicationManager::new()
+            .with_conflict_strategy(ConflictResolution::KeepLocal);
+        let result = manager
+            .sync(&local_db, &log, &remote_changes, "remote")
+            .unwrap();
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].resolution, ConflictResolution::KeepLocal);
+        assert_eq!(result.applied, 0);
+
+        let (vec, _) = local_db.get("doc1").unwrap().unwrap();
+        assert_eq!(vec.unwrap(), vec![0.3, 0.3, 0.3]);
+    }
+
+    #[test]
+    fn test_sync_conflict_apply_remote() {
+        let local_db = VectorDB::new(Config::new(3)).unwrap();
+        let log = ChangeLog::with_instance_id("local");
+
+        local_db.insert("doc1", &[0.3, 0.3, 0.3], None).unwrap();
+        log.track_insert("doc1", &[0.3, 0.3, 0.3], None);
+        log.track_update("doc1", &[0.3, 0.3, 0.3], None);
+        local_db.update("doc1", &[0.3, 0.3, 0.3], None).unwrap();
+
+        let local_ts = log
+            .export_all()
+            .into_iter()
+            .filter(|e| e.document_id == "doc1")
+            .map(|e| e.timestamp)
+            .max()
+            .unwrap();
+
+        // Remoto más viejo: con ApplyRemote se aplica igual.
+        let mut remote = ChangeEntry::update(1, "remote", "doc1", vec![0.9, 0.9, 0.9], None);
+        remote.timestamp = local_ts - 1000;
+        let remote_changes = vec![remote];
+
+        let manager = ReplicationManager::new()
+            .with_conflict_strategy(ConflictResolution::ApplyRemote);
+        let result = manager
+            .sync(&local_db, &log, &remote_changes, "remote")
+            .unwrap();
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].resolution, ConflictResolution::ApplyRemote);
+        assert_eq!(result.applied, 1);
+
+        let (vec, _) = local_db.get("doc1").unwrap().unwrap();
+        assert_eq!(vec.unwrap(), vec![0.9, 0.9, 0.9]);
+    }
+
+    #[test]
+    fn test_sync_no_conflict_no_overlap() {
+        let local_db = VectorDB::new(Config::new(3)).unwrap();
+        let log = ChangeLog::with_instance_id("local");
+
+        // Cambio local a docA (seq 0). El remoto toca docB, sin cambio local.
+        log.track_insert("docA", &[0.1, 0.1, 0.1], None);
+
+        let remote_changes = vec![ChangeEntry::insert(
+            1,
+            "remote",
+            "docB",
+            vec![0.5, 0.5, 0.5],
+            None,
+        )];
+
+        let manager = ReplicationManager::new();
+        let result = manager
+            .sync(&local_db, &log, &remote_changes, "remote")
+            .unwrap();
+
+        assert!(result.conflicts.is_empty());
+        assert_eq!(result.applied, 1);
+        assert!(local_db.contains("docB"));
+    }
+
+    #[test]
+    fn test_maybe_compact_preserves_unexported() {
+        let mut log = ChangeLog::new();
+        log.max_entries = 10; // límite pequeño para forzar la compactación
+
+        // 8 entradas (seq 0..7), todas exportadas tras el checkpoint.
+        for i in 0..8 {
+            log.track_insert(format!("doc-{i}"), &[0.1, 0.1, 0.1], None);
+        }
+        log.checkpoint(); // last_checkpoint = 8 → seq 0..7 exportadas
+
+        // 5 entradas más (seq 8..12), no exportadas → deben sobrevivir.
+        for i in 8..13 {
+            log.track_insert(format!("doc-{i}"), &[0.1, 0.1, 0.1], None);
+        }
+
+        // Las entradas post-checkpoint sobreviven a la compactación.
+        let unexported = log.export_since_checkpoint();
+        assert_eq!(unexported.len(), 5);
+        assert!(unexported.iter().all(|e| e.sequence >= 8 && e.sequence <= 12));
+
+        // Las exportadas más viejas sí se descartaron (seq 0..2), pero ninguna
+        // no exportada: el log arranca en seq 3.
+        let all = log.export_all();
+        assert!(all.iter().all(|e| e.sequence >= 3));
+        assert!(all.iter().all(|e| e.sequence <= 12));
     }
 }

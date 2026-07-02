@@ -31,6 +31,9 @@ pub const HEADER_SIZE: usize = 64;
 /// Header del archivo .mmdb
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileHeader {
+    /// Versión del formato con la que se escribió el archivo (leído, no escrito por `write_to`)
+    #[serde(default)]
+    pub version: u32,
     /// Número de dimensiones
     pub dimensions: u32,
     /// Número de vectores
@@ -69,6 +72,7 @@ impl FileHeader {
         };
 
         Self {
+            version: VERSION,
             dimensions: dimensions as u32,
             num_vectors: num_vectors as u64,
             distance_type: distance.to_u8(),
@@ -203,6 +207,7 @@ impl FileHeader {
         reader.read_exact(&mut reserved)?;
 
         Ok(Self {
+            version,
             dimensions,
             num_vectors,
             distance_type,

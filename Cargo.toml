@@ -35,7 +35,7 @@ crc32fast = "1.4"
 
 
 # Python bindings (optional)
-pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.26", features = ["extension-module"], optional = true }
 
 # Node.js bindings (optional)
 napi = { version = "2", features = ["napi4"], optional = true }

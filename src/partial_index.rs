@@ -187,6 +187,20 @@ impl PartialIndex {
         Ok(())
     }
 
+    /// Vacía el índice parcial conservando su definición y filtro.
+    ///
+    /// A diferencia de `drop_index`, el índice sigue registrado y capturará
+    /// inserciones futuras que coincidan con el filtro.
+    pub fn clear(&self) -> Result<()> {
+        let old_ids = self.document_ids.read().clone();
+        for id in &old_ids {
+            let _ = self.index.remove(id);
+            let _ = self.storage.delete(id);
+        }
+        self.document_ids.write().clear();
+        Ok(())
+    }
+
     /// Busca los k vectores más cercanos en este índice parcial.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(VectorId, f32)>> {
         let results = self
@@ -349,6 +363,19 @@ impl PartialIndexManager {
             let _ = index.remove(id); // Ignorar si no está en el índice
         }
 
+        Ok(())
+    }
+
+    /// Vacía todos los índices parciales conservando sus definiciones y filtros.
+    ///
+    /// Los índices siguen registrados y capturarán inserciones futuras que
+    /// coincidan con sus filtros, de forma análoga a `clear` sobre el índice
+    /// BM25.
+    pub fn clear_all(&self) -> Result<()> {
+        let indexes = self.indexes.read();
+        for index in indexes.values() {
+            index.clear()?;
+        }
         Ok(())
     }
 

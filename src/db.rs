@@ -54,6 +54,16 @@ pub struct VectorDB {
 }
 
 impl VectorDB {
+    fn validate_vector(vector: &[f32]) -> Result<()> {
+        match vector.iter().position(|v| !v.is_finite()) {
+            Some(idx) => Err(Error::InvalidVector(format!(
+                "non-finite value at index {}",
+                idx
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Crea una nueva base de datos vectorial en memoria.
     ///
     /// # Argumentos
@@ -356,6 +366,7 @@ impl VectorDB {
                 got: vector.len(),
             });
         }
+        Self::validate_vector(vector)?;
 
         if self.storage.contains(&id) {
             return Err(Error::AlreadyExists(id));
@@ -436,6 +447,7 @@ impl VectorDB {
                     got: vec.len(),
                 });
             }
+            Self::validate_vector(vec)?;
         }
 
         if self.storage.contains(&id) {
@@ -522,6 +534,7 @@ impl VectorDB {
                 got: query.len(),
             });
         }
+        Self::validate_vector(query)?;
 
         if self.storage.is_empty() {
             return Ok(vec![]);
@@ -586,6 +599,14 @@ impl VectorDB {
     ) -> Result<()> {
         let id = id.into();
 
+        if vector.len() != self.config.dimensions {
+            return Err(Error::DimensionMismatch {
+                expected: self.config.dimensions,
+                got: vector.len(),
+            });
+        }
+        Self::validate_vector(vector)?;
+
         // Step 1: Update storage in-place (overwrite, no gap)
         // First delete old entry, then immediately insert new one
         self.storage.delete(&id)?;
@@ -632,6 +653,17 @@ impl VectorDB {
         metadata: Option<Metadata>,
     ) -> Result<()> {
         let id = id.into();
+
+        if let Some(vec) = vector {
+            if vec.len() != self.config.dimensions {
+                return Err(Error::DimensionMismatch {
+                    expected: self.config.dimensions,
+                    got: vec.len(),
+                });
+            }
+            Self::validate_vector(vec)?;
+        }
+
         self.delete(&id)?;
         self.insert_document(id, vector, metadata)
     }
@@ -663,6 +695,37 @@ impl VectorDB {
         if let Some(ref bm25) = self.bm25_index {
             bm25.clear();
         }
+        let _ = self.partial_indexes.clear_all();
+    }
+
+    /// Reconstruye el índice principal a partir del storage completo.
+    ///
+    /// Reentrena o reconstruye el índice principal usando todos los vectores
+    /// almacenados (dequantizándolos si la cuantización está activa). El
+    /// comportamiento depende del tipo de índice configurado:
+    ///
+    /// - **IVF**: ejecuta K-means sobre todos los vectores para calcular los
+    ///   centroides y asignar cada vector a su cluster. Sin este paso, IVF
+    ///   cae a búsqueda brute-force para siempre (el clustering y `num_probes`
+    ///   nunca se activan).
+    /// - **HNSW**: reconstruye el grafo desde cero reinsertando todos los
+    ///   vectores.
+    /// - **Flat**: recarga el conjunto de IDs indexados (no-op efectivo).
+    ///
+    /// # Cuándo llamarlo
+    ///
+    /// **Obligatorio para IVF tras una carga masiva**: `rebuild_index()` debe
+    /// llamarse después de insertar un conjunto grande de vectores para activar
+    /// el clustering; de lo contrario la búsqueda opera por fuerza bruta sobre
+    /// todos los vectores y `num_probes` no tiene efecto. Para HNSW y Flat es
+    /// opcional (sirve para compactar/reorganizar el índice tras borrados
+    /// masivos).
+    ///
+    /// # Errores
+    ///
+    /// Retorna un error si el índice subyacente falla la reconstrucción.
+    pub fn rebuild_index(&self) -> Result<()> {
+        self.index.rebuild(self.storage.as_ref())
     }
 
     /// Guarda la base de datos a un archivo .mmdb.
@@ -759,7 +822,10 @@ impl VectorDB {
     /// ).unwrap();
     /// ```
     pub fn create_partial_index(&self, name: &str, config: PartialIndexConfig) -> Result<()> {
-        self.partial_indexes.create_index(name, config)
+        self.partial_indexes.create_index(name, config)?;
+        // Poblar retroactivamente con los documentos existentes que matchean
+        // el filtro. Reusa el patrón de rebuild_partial_index.
+        self.rebuild_partial_index(name).map(|_| ())
     }
 
     /// Elimina un índice parcial.
@@ -810,6 +876,7 @@ impl VectorDB {
                 got: query.len(),
             });
         }
+        Self::validate_vector(query)?;
 
         let results = self.partial_indexes.search(index_name, query, k)?;
 
@@ -914,6 +981,7 @@ impl VectorDB {
                     got: vec.len(),
                 });
             }
+            Self::validate_vector(vec)?;
         }
 
         if self.storage.contains(&chunk.id) {
@@ -1091,6 +1159,7 @@ impl VectorDB {
                     got: vec.len(),
                 });
             }
+            Self::validate_vector(vec)?;
         }
 
         HybridSearch::search(
@@ -1189,6 +1258,7 @@ impl VectorDB {
                 got: query.len(),
             });
         }
+        Self::validate_vector(query)?;
 
         let params = HybridSearchParams::vector(query.to_vec(), k).with_filter(filter);
         let hybrid_results = self.hybrid_search(params)?;
@@ -1337,6 +1407,7 @@ impl VectorDB {
                 got: query.len(),
             });
         }
+        Self::validate_vector(query)?;
 
         if self.storage.is_empty() {
             return Ok(PagedResult {
@@ -1431,6 +1502,38 @@ mod tests {
 
         let (vector, _) = db.get("a").unwrap().unwrap();
         assert_eq!(vector, Some(vec![0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn test_update_dimension_mismatch() {
+        let db = create_test_db();
+
+        db.insert("a", &[1.0, 0.0, 0.0], None).unwrap();
+        let result = db.update("a", &[0.0, 1.0], None);
+        assert!(matches!(result, Err(Error::DimensionMismatch { .. })));
+
+        let (vector, _) = db.get("a").unwrap().unwrap();
+        assert_eq!(vector, Some(vec![1.0, 0.0, 0.0]));
+
+        let results = db.search(&[1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn test_update_document_dimension_mismatch() {
+        let db = create_test_db();
+
+        db.insert("a", &[1.0, 0.0, 0.0], None).unwrap();
+        let result = db.update_document("a", Some(&[0.0, 1.0]), None);
+        assert!(matches!(result, Err(Error::DimensionMismatch { .. })));
+
+        let (vector, _) = db.get("a").unwrap().unwrap();
+        assert_eq!(vector, Some(vec![1.0, 0.0, 0.0]));
+
+        let results = db.search(&[1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
     }
 
     #[test]
@@ -2034,5 +2137,197 @@ mod tests {
         let page = db.list_documents(None, None, 2, 0).unwrap();
         assert_eq!(page.total_pages(), 3); // 5 items / 2 per page = 3 pages
         assert_eq!(page.current_page(), 0);
+    }
+
+    // ========================================================================
+    // rebuild_index tests
+    // ========================================================================
+
+    #[test]
+    fn test_rebuild_index_ivf_activates_clustering() {
+        let config = Config::new(4)
+            .with_distance(Distance::Euclidean)
+            .with_index(IndexType::IVF {
+                num_clusters: 2,
+                num_probes: 1,
+            });
+        let db = VectorDB::new(config).unwrap();
+
+        // 2 clusters bien separados, 100 vectores cada uno
+        let insert_cluster = |prefix: &str, base: f32| {
+            for i in 0..100 {
+                let id = format!("{}{}", prefix, i);
+                // Offset estrictamente creciente (sin wrap) => a0 == base exacto y único
+                let v = [base + i as f32 * 0.001; 4];
+                db.insert(&id, &v, None).unwrap();
+            }
+        };
+        insert_cluster("a", 10.0); // cluster A alrededor de [10,10,10,10]
+        insert_cluster("b", -10.0); // cluster B alrededor de [-10,-10,-10,-10]
+        assert_eq!(db.len(), 200);
+
+        let query = [10.0, 10.0, 10.0, 10.0]; // == a0
+
+        // Antes de rebuild, IVF no está entrenado -> brute force sobre los 200
+        let before = db.search(&query, 200).unwrap();
+        assert_eq!(before.len(), 200);
+
+        // rebuild_index entrena k-means y activa nprobe=1
+        db.rebuild_index().unwrap();
+
+        // Con nprobe=1 solo se explora el cluster más cercano (A) -> 100 candidatos
+        let after = db.search(&query, 200).unwrap();
+        assert_eq!(
+            after.len(),
+            100,
+            "nprobe=1 debería restringir la búsqueda a un solo cluster"
+        );
+        // El vecino más cercano es el match exacto a0
+        assert_eq!(after[0].id, "a0");
+        assert!(after[0].distance < 1e-6);
+        // Todos los resultados pertenecen al cluster A
+        for r in &after {
+            assert!(
+                r.id.starts_with('a'),
+                "resultado inesperado del cluster B: {}",
+                r.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_rebuild_index_empty_db() {
+        let config = Config::new(4).with_index(IndexType::IVF {
+            num_clusters: 4,
+            num_probes: 2,
+        });
+        let db = VectorDB::new(config).unwrap();
+
+        // DB vacía: rebuild no falla
+        db.rebuild_index().unwrap();
+        assert_eq!(db.len(), 0);
+
+        let results = db.search(&[1.0, 1.0, 1.0, 1.0], 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_rebuild_index_with_int8_quantization() {
+        let config = Config::new(64)
+            .with_distance(Distance::Cosine)
+            .with_index(IndexType::Flat)
+            .with_quantization(crate::quantization::QuantizationType::Int8);
+        let db = VectorDB::new(config).unwrap();
+
+        let v1 = generate_test_vector(64, 10);
+        let v2 = generate_test_vector(64, 20);
+        let v3 = generate_test_vector(64, 30);
+
+        db.insert("a", &v1, None).unwrap();
+        db.insert("b", &v2, None).unwrap();
+        db.insert("c", &v3, None).unwrap();
+
+        // Búsqueda antes de rebuild
+        let before = db.search(&v1, 1).unwrap();
+        assert_eq!(before[0].id, "a");
+
+        // rebuild_index con cuantización activa no rompe la búsqueda
+        db.rebuild_index().unwrap();
+
+        let after = db.search(&v1, 1).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "a");
+    }
+
+    #[test]
+    fn test_rebuild_index_hnsw_preserves_search() {
+        // HNSW es aproximado: "no rompe la búsqueda" se verifica como recall
+        // contra brute-force, no como match exacto del vecino más cercano.
+        let dim = 16;
+        let config = Config::new(dim)
+            .with_distance(Distance::Euclidean)
+            .with_index(IndexType::hnsw_with_params(16, 200));
+        let db = VectorDB::new(config).unwrap();
+
+        let n = 200;
+        let vectors: Vec<Vec<f32>> = (0..n).map(|i| spread_vector(dim, i)).collect();
+        for (i, v) in vectors.iter().enumerate() {
+            db.insert(&format!("v{}", i), v, None).unwrap();
+        }
+        assert_eq!(db.len(), n);
+
+        let recall_before = hnsw_recall(&db, &vectors, dim, 10, 10);
+        // rebuild_index no debe romper la búsqueda existente
+        db.rebuild_index().unwrap();
+        assert_eq!(db.len(), n, "rebuild no debe cambiar el número de vectores");
+
+        let recall_after = hnsw_recall(&db, &vectors, dim, 10, 10);
+        assert!(
+            recall_after >= 0.8,
+            "recall tras rebuild demasiado bajo: {:.3}",
+            recall_after
+        );
+        assert!(
+            recall_after >= recall_before - 0.05,
+            "rebuild degradó el recall: antes={:.3} después={:.3}",
+            recall_before,
+            recall_after
+        );
+    }
+
+    /// Generador determinista de vectores bien repartidos en [-1,1]^dim
+    /// (LCG; evita la cadena 1D que produce `generate_test_vector`).
+    fn spread_vector(dim: usize, seed: usize) -> Vec<f32> {
+        let mut s = (seed as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(1);
+        (0..dim)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 33) as f32 / (1u32 << 31) as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// Mide el recall@k promedio de la DB contra brute-force sobre `vectors`,
+    /// usando `num_queries` consultas (semillas fuera del conjunto insertado).
+    fn hnsw_recall(
+        db: &VectorDB,
+        vectors: &[Vec<f32>],
+        dim: usize,
+        k: usize,
+        num_queries: usize,
+    ) -> f32 {
+        let mut total = 0.0f32;
+        for q in 0..num_queries {
+            let query = spread_vector(dim, vectors.len() + q + 1);
+
+            // Brute-force top-k
+            let mut dists: Vec<(usize, f32)> = vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let d: f32 = query
+                        .iter()
+                        .zip(v.iter())
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f32>()
+                        .sqrt();
+                    (i, d)
+                })
+                .collect();
+            dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let exact: std::collections::HashSet<String> = dists[..k]
+                .iter()
+                .map(|(i, _)| format!("v{}", i))
+                .collect();
+
+            let results = db.search(&query, k).unwrap();
+            let got: std::collections::HashSet<String> =
+                results.iter().map(|r| r.id.clone()).collect();
+
+            total += exact.intersection(&got).count() as f32 / k as f32;
+        }
+        total / num_queries as f32
     }
 }

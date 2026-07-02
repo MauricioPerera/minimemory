@@ -435,9 +435,27 @@ impl BasicMarkdownParser {
         let mut chunk_index = 0;
 
         while start < content.len() {
-            let end = (start + target_size).min(content.len());
+            // Retroceder `end` al char boundary anterior para no cortar un
+            // char multibyte (UTF-8) por la mitad y evitar un panic en el slice.
+            let mut end = (start + target_size).min(content.len());
+            while end > start && !content.is_char_boundary(end) {
+                end -= 1;
+            }
 
-            // Buscar un buen punto de corte (fin de párrafo o oración)
+            // Si target_size es menor que el char que empieza en `start`, el
+            // retroceso deja `end == start`. Avanzamos hasta el final de ese
+            // char para emitirlo completo y garantizar progreso.
+            if end <= start {
+                end = content[start..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| start + i)
+                    .unwrap_or(content.len());
+            }
+
+            // Buscar un buen punto de corte (fin de párrafo o oración).
+            // rfind devuelve un byte boundary sobre un slice que empieza en
+            // `start` (también boundary), por lo que el resultado es válido.
             let actual_end = if end < content.len() {
                 let slice = &content[start..end];
                 if let Some(pos) = slice.rfind("\n\n") {
@@ -468,21 +486,33 @@ impl BasicMarkdownParser {
                 chunk_index += 1;
             }
 
-            // Mover con overlap, pero asegurar que siempre avanzamos
             // Si llegamos al final, salir del loop
             if actual_end >= content.len() {
                 break;
             }
 
-            // Calcular nuevo start con overlap
-            let new_start = if actual_end > overlap {
+            // Calcular nuevo start con overlap y retroceder al char boundary
+            // anterior para no empezar el siguiente slice en medio de un char.
+            let mut new_start = if actual_end > overlap {
                 actual_end - overlap
             } else {
                 actual_end
             };
+            while new_start > start && !content.is_char_boundary(new_start) {
+                new_start -= 1;
+            }
 
-            // Asegurar que siempre avanzamos al menos 1 posición
-            start = new_start.max(start + 1);
+            // Asegurar que siempre avanzamos al menos un char completo, para
+            // no quedarnos pegados cuando target_size es menor que un char
+            // multibyte (p. ej. emoji de 4 bytes con target_size pequeño).
+            if new_start <= start {
+                match content[start..].char_indices().nth(1) {
+                    Some((i, _)) => start = start + i,
+                    None => break,
+                }
+            } else {
+                start = new_start;
+            }
         }
 
         let total = chunks.len();
@@ -941,5 +971,56 @@ Brief content.
 
         // Long section should be split into multiple chunks
         assert!(result.total_chunks >= 3);
+    }
+
+    #[test]
+    fn test_chunk_by_size_multibyte_spanish() {
+        // "á" es 2 bytes en UTF-8; target_size=5 cae en medio de un char.
+        let content = "ááááááááá".to_string();
+        let config = ChunkConfig::new(ChunkStrategy::BySize {
+            target_size: 5,
+            overlap: 0,
+        });
+        let result = chunk_markdown(&content, &config).unwrap();
+
+        assert!(!result.chunks.is_empty());
+        // Ningún chunk debe estar vacío tras el trim
+        for chunk in &result.chunks {
+            assert!(!chunk.content.is_empty());
+        }
+        // La concatenación de los chunks cubre el texto original
+        let rebuilt: String = result.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(rebuilt, content);
+    }
+
+    #[test]
+    fn test_chunk_by_size_multibyte_cjk_emoji_with_overlap() {
+        // CJK (3 bytes/char) + emoji (4 bytes/char), con overlap > 0.
+        let content = "你好世界你好世界你好世界 😀😀😀😀😀".to_string();
+        let config = ChunkConfig::new(ChunkStrategy::BySize {
+            target_size: 7,
+            overlap: 3,
+        });
+        let result = chunk_markdown(&content, &config).unwrap();
+
+        assert!(result.total_chunks >= 2);
+        for chunk in &result.chunks {
+            assert!(!chunk.content.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_by_size_emoji_small_target() {
+        // target_size menor que un char (emoji = 4 bytes): debe avanzar sin panic.
+        let content = "😀😀😀😀".to_string();
+        let config = ChunkConfig::new(ChunkStrategy::BySize {
+            target_size: 1,
+            overlap: 0,
+        });
+        let result = chunk_markdown(&content, &config).unwrap();
+
+        assert!(!result.chunks.is_empty());
+        let rebuilt: String = result.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(rebuilt, content);
     }
 }

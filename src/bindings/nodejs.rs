@@ -167,8 +167,8 @@ impl VectorDB {
             .get(&id)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
         {
-            Some((vector, _)) => Ok(Some(vector.iter().map(|&x| x as f64).collect())),
-            None => Ok(None),
+            Some((Some(vector), _)) => Ok(Some(vector.iter().map(|&x| x as f64).collect())),
+            _ => Ok(None),
         }
     }
 
@@ -254,6 +254,7 @@ fn metadata_to_hashmap(meta: RustMetadata) -> HashMap<String, String> {
             RustMetadataValue::Float(f) => f.to_string(),
             RustMetadataValue::Bool(b) => b.to_string(),
             RustMetadataValue::List(_) => "[list]".to_string(),
+            RustMetadataValue::Map(_) => "{map}".to_string(),
         };
         map.insert(key, str_value);
     }

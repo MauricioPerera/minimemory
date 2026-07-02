@@ -479,7 +479,7 @@ fn bench_filters(c: &mut Criterion) {
                 db.search_with_filter(
                     &query,
                     10,
-                    Filter::and(vec![
+                    Filter::all(vec![
                         Filter::eq("category", "tech"),
                         Filter::eq("active", true),
                     ]),

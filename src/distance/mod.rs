@@ -31,8 +31,22 @@ impl Distance {
     ///
     /// Usa implementaciones SIMD (AVX2/SSE) cuando están disponibles
     /// para máximo rendimiento.
+    ///
+    /// # Panics
+    ///
+    /// Panica si `a` y `b` tienen longitudes distintas. Las rutas SIMD indexan
+    /// `b` en los mismos offsets que `a` sin verificar límites, así que una
+    /// longitud inconsistente sería lectura fuera de límites (UB); el panic
+    /// en esta capa segura previene el UB antes de despachar.
     #[inline]
     pub fn calculate(&self, a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "Distance::calculate requiere vectores de igual longitud (a.len() = {}, b.len() = {})",
+            a.len(),
+            b.len()
+        );
         match self {
             Distance::Cosine => simd::cosine_distance(a, b),
             Distance::Euclidean => simd::euclidean_distance(a, b),
@@ -101,5 +115,56 @@ mod tests {
         let dist = Distance::DotProduct.calculate(&a, &b);
         // dot = 1*4 + 2*5 + 3*6 = 32, distance = -32
         assert!((dist - (-32.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "vectores de igual longitud")]
+    fn test_cosine_mismatched_lengths_panics() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        Distance::Cosine.calculate(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "vectores de igual longitud")]
+    fn test_euclidean_mismatched_lengths_panics() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        Distance::Euclidean.calculate(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "vectores de igual longitud")]
+    fn test_dot_product_mismatched_lengths_panics() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        Distance::DotProduct.calculate(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "vectores de igual longitud")]
+    fn test_manhattan_mismatched_lengths_panics() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        Distance::Manhattan.calculate(&a, &b);
+    }
+
+    #[test]
+    fn test_equal_lengths_unchanged() {
+        // Valores tomados de los tests existentes: el guard no altera resultados.
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert!((Distance::Cosine.calculate(&a, &b) - 0.0).abs() < 1e-6);
+        assert!((Distance::Euclidean.calculate(&a, &b) - 0.0).abs() < 1e-6);
+        assert!((Distance::Manhattan.calculate(&a, &b) - 0.0).abs() < 1e-6);
+
+        let c = vec![0.0, 0.0];
+        let d = vec![3.0, 4.0];
+        assert!((Distance::Euclidean.calculate(&c, &d) - 5.0).abs() < 1e-6);
+        assert!((Distance::Manhattan.calculate(&c, &d) - 7.0).abs() < 1e-6);
+
+        let e = vec![1.0, 2.0, 3.0];
+        let f = vec![4.0, 5.0, 6.0];
+        assert!((Distance::DotProduct.calculate(&e, &f) - (-32.0)).abs() < 1e-6);
     }
 }

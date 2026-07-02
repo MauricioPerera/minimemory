@@ -38,4 +38,7 @@ pub enum Error {
 
     #[error("Embedding error: {0}")]
     Embedding(String),
+
+    #[error("Invalid vector: {0}")]
+    InvalidVector(String),
 }

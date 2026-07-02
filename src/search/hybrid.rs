@@ -11,6 +11,30 @@ use crate::types::HybridSearchResult;
 
 use super::rrf::{weighted_reciprocal_rank_fusion, RankedResult, DEFAULT_RRF_K};
 
+/// Soft-delete marker: docs con metadata "deleted" = true se excluyen de
+/// resultados. Se filtra en el sub-método (junto al filtro de metadata) para
+/// que el reintento incremental pueda ver cuántos candidatos califican
+/// realmente y decidir si hace falta fetchear más.
+fn is_soft_deleted(metadata: Option<&crate::types::Metadata>) -> bool {
+    matches!(
+        metadata.and_then(|m| m.get("deleted")),
+        Some(crate::types::MetadataValue::Bool(true))
+    )
+}
+
+/// Tamaño inicial de fetch para el reintento incremental: el doble de lo
+/// necesario, saturando al tamaño del índice (amortigua soft-deletes y
+/// filtros selectivos ocasionales sin escanear todo el índice en el caso
+/// común). Nunca pasa 0 a un índice con documentos.
+fn initial_fetch_k(need: usize, index_len: usize) -> usize {
+    let k = need.saturating_mul(2).min(index_len);
+    if k == 0 && index_len > 0 {
+        1
+    } else {
+        k
+    }
+}
+
 /// Modo de búsqueda.
 #[derive(Debug, Clone, Default)]
 pub enum SearchMode {
@@ -170,13 +194,9 @@ impl HybridSearch {
             SearchMode::FilterOnly => Self::filter_only_search(params, storage)?,
         };
 
-        // Filter out soft-deleted documents (metadata "deleted" = true)
-        results.retain(|r| {
-            !matches!(
-                r.metadata.as_ref().and_then(|m| m.get("deleted")),
-                Some(crate::types::MetadataValue::Bool(true))
-            )
-        });
+        // Soft-delete filtering se aplica en cada sub-método (junto al filtro
+        // de metadata) para que el reintento incremental contabilice los
+        // candidatos que califican realmente.
 
         // Apply ORDER BY if specified (overrides default score ordering)
         if let Some(ref order) = params.order_by {
@@ -192,7 +212,10 @@ impl HybridSearch {
             });
         }
 
-        // Apply OFFSET (pagination)
+        // Apply OFFSET (pagination) BEFORE LIMIT: los sub-métodos devuelven
+        // todos los candidatos que califican (filtro + soft-delete), así tras
+        // el offset sigue habiendo hasta k resultados (contrato:
+        // min(k, docs que califican)).
         if params.offset > 0 {
             if params.offset >= results.len() {
                 return Ok(vec![]);
@@ -200,11 +223,8 @@ impl HybridSearch {
             results = results.into_iter().skip(params.offset).collect();
         }
 
-        // Apply LIMIT (k) — sub-methods already apply k, but after re-sorting
-        // the order may differ, so re-apply
-        if let Some(ref _order) = params.order_by {
-            results.truncate(params.k);
-        }
+        // Apply LIMIT (k) last, after soft-delete removal, ordering and offset.
+        results.truncate(params.k);
 
         Ok(results)
     }
@@ -219,39 +239,52 @@ impl HybridSearch {
             Error::InvalidConfig("Vector query required for vector search".into())
         })?;
 
-        // Buscar más resultados si hay filtro (pre-filter approach)
-        let search_k = if params.filter.is_some() {
-            params.k * 10 // Buscar 10x más para compensar filtrado
-        } else {
-            params.k
-        };
+        let need = params.k.saturating_add(params.offset);
+        if need == 0 {
+            return Ok(vec![]);
+        }
+        let index_len = index.len();
+        // Con ORDER BY el ranking es por metadata, no por score: hace falta
+        // todo lo que califica (fetch-all). Si no, basta con k+offset.
+        let target = if params.order_by.is_some() { index_len } else { need };
 
-        let results = index.search(query, search_k, storage, distance)?;
+        // Reintento incremental: empieza con ~2*(k+offset) y duplica hasta
+        // tener `target` candidatos que califican (filtro + soft-delete) o
+        // hasta agotar el índice. El caso común (sin filtro/offset/soft-delete)
+        // resuelve en 1 fetch preservando ANN.
+        let mut search_k = initial_fetch_k(need, index_len);
+        loop {
+            let results = index.search(query, search_k, storage, distance)?;
 
-        // Aplicar filtro
-        let filtered: Vec<_> = results
-            .into_iter()
-            .filter(|r| {
-                if let Some(filter) = &params.filter {
-                    FilterEvaluator::evaluate(filter, r.metadata.as_ref())
-                } else {
-                    true
-                }
-            })
-            .take(params.k)
-            .enumerate()
-            .map(|(rank, r)| HybridSearchResult {
-                id: r.id,
-                score: r.distance, // Menor = mejor
-                vector_distance: Some(r.distance),
-                bm25_score: None,
-                vector_rank: Some(rank),
-                keyword_rank: None,
-                metadata: r.metadata,
-            })
-            .collect();
+            let filtered: Vec<_> = results
+                .into_iter()
+                .filter(|r| {
+                    if is_soft_deleted(r.metadata.as_ref()) {
+                        return false;
+                    }
+                    if let Some(filter) = &params.filter {
+                        FilterEvaluator::evaluate(filter, r.metadata.as_ref())
+                    } else {
+                        true
+                    }
+                })
+                .enumerate()
+                .map(|(rank, r)| HybridSearchResult {
+                    id: r.id,
+                    score: r.distance, // Menor = mejor
+                    vector_distance: Some(r.distance),
+                    bm25_score: None,
+                    vector_rank: Some(rank),
+                    keyword_rank: None,
+                    metadata: r.metadata,
+                })
+                .collect();
 
-        Ok(filtered)
+            if filtered.len() >= target || search_k >= index_len {
+                return Ok(filtered);
+            }
+            search_k = search_k.saturating_mul(2).min(index_len);
+        }
     }
 
     fn keyword_search(
@@ -267,41 +300,46 @@ impl HybridSearch {
         let index = bm25_index
             .ok_or_else(|| Error::InvalidConfig("BM25 index required for keyword search".into()))?;
 
-        let search_k = if params.filter.is_some() {
-            params.k * 10
-        } else {
-            params.k
-        };
+        let need = params.k.saturating_add(params.offset);
+        if need == 0 {
+            return Ok(vec![]);
+        }
+        let index_len = index.len();
+        let target = if params.order_by.is_some() { index_len } else { need };
 
-        let results = index.search(query, search_k);
+        let mut search_k = initial_fetch_k(need, index_len);
+        loop {
+            let results = index.search(query, search_k);
 
-        let mut hybrid_results = Vec::new();
-        for (rank, result) in results.into_iter().enumerate() {
-            if let Ok(Some(doc)) = storage.get(&result.id) {
-                // Aplicar filtro
-                if let Some(filter) = &params.filter {
-                    if !FilterEvaluator::evaluate(filter, doc.metadata.as_ref()) {
+            let mut hybrid_results = Vec::new();
+            for (rank, result) in results.into_iter().enumerate() {
+                if let Ok(Some(doc)) = storage.get(&result.id) {
+                    if is_soft_deleted(doc.metadata.as_ref()) {
                         continue;
                     }
-                }
+                    if let Some(filter) = &params.filter {
+                        if !FilterEvaluator::evaluate(filter, doc.metadata.as_ref()) {
+                            continue;
+                        }
+                    }
 
-                hybrid_results.push(HybridSearchResult {
-                    id: result.id,
-                    score: -result.score, // Negativo para que menor = mejor (consistente con distance)
-                    vector_distance: None,
-                    bm25_score: Some(result.score),
-                    vector_rank: None,
-                    keyword_rank: Some(rank),
-                    metadata: doc.metadata,
-                });
-
-                if hybrid_results.len() >= params.k {
-                    break;
+                    hybrid_results.push(HybridSearchResult {
+                        id: result.id,
+                        score: -result.score, // Negativo para que menor = mejor (consistente con distance)
+                        vector_distance: None,
+                        bm25_score: Some(result.score),
+                        vector_rank: None,
+                        keyword_rank: Some(rank),
+                        metadata: doc.metadata,
+                    });
                 }
             }
-        }
 
-        Ok(hybrid_results)
+            if hybrid_results.len() >= target || search_k >= index_len {
+                return Ok(hybrid_results);
+            }
+            search_k = search_k.saturating_mul(2).min(index_len);
+        }
     }
 
     fn hybrid_search(
@@ -313,9 +351,52 @@ impl HybridSearch {
         vector_weight: f32,
         keyword_weight: f32,
     ) -> Result<Vec<HybridSearchResult>> {
-        // Obtener resultados de ambas búsquedas
-        let fetch_k = params.k * 3; // Fetch más para RRF
+        // Reintento incremental sobre ambos índices: se duplica fetch_k hasta
+        // que los candidatos que califican (filtro + soft-delete) tras el RRF
+        // alcancen `target`, o hasta cubrir ambos índices. El caso común
+        // (sin filtro/offset/soft-delete) resuelve en 1 fetch preservando ANN.
+        let need = params.k.saturating_add(params.offset);
+        if need == 0 {
+            return Ok(vec![]);
+        }
+        let vlen = vector_index.len();
+        let blen = bm25_index.map(|b| b.len()).unwrap_or(0);
+        let ceiling = vlen.max(blen);
+        let target = if params.order_by.is_some() { ceiling } else { need };
 
+        let mut fetch_k = initial_fetch_k(need, ceiling);
+        loop {
+            let final_results = Self::hybrid_fetch(
+                params,
+                vector_index,
+                bm25_index,
+                storage,
+                distance,
+                vector_weight,
+                keyword_weight,
+                fetch_k,
+            )?;
+
+            if final_results.len() >= target || fetch_k >= ceiling {
+                return Ok(final_results);
+            }
+            fetch_k = fetch_k.saturating_mul(2).min(ceiling);
+        }
+    }
+
+    /// Una ronda de búsqueda híbrida con un `fetch_k` dado: obtiene
+    /// `fetch_k` candidatos de cada índice, aplica RRF y filtra por metadata
+    /// y soft-delete. Devuelve los candidatos que califican, sin truncar.
+    fn hybrid_fetch(
+        params: &HybridSearchParams,
+        vector_index: &dyn Index,
+        bm25_index: Option<&BM25Index>,
+        storage: &dyn Storage,
+        distance: Distance,
+        vector_weight: f32,
+        keyword_weight: f32,
+        fetch_k: usize,
+    ) -> Result<Vec<HybridSearchResult>> {
         // Vector search
         let vector_results = if let Some(query) = &params.vector {
             let results = vector_index.search(query, fetch_k, storage, distance)?;
@@ -372,7 +453,9 @@ impl HybridSearch {
         let mut final_results = Vec::new();
         for (id, rrf_score) in rrf_results {
             if let Ok(Some(doc)) = storage.get(&id) {
-                // Aplicar filtro
+                if is_soft_deleted(doc.metadata.as_ref()) {
+                    continue;
+                }
                 if let Some(filter) = &params.filter {
                     if !FilterEvaluator::evaluate(filter, doc.metadata.as_ref()) {
                         continue;
@@ -398,10 +481,6 @@ impl HybridSearch {
                     keyword_rank: kw_rank,
                     metadata: doc.metadata,
                 });
-
-                if final_results.len() >= params.k {
-                    break;
-                }
             }
         }
 
@@ -417,20 +496,14 @@ impl HybridSearch {
             .as_ref()
             .ok_or_else(|| Error::InvalidConfig("Filter required for filter-only search".into()))?;
 
-        // When ORDER BY or OFFSET is used, collect all matching results
-        // so sorting and pagination can be applied in the central search() method.
-        // When ORDER BY or OFFSET is used, collect all matching results
-        // so sorting and pagination can be applied in the central search() method.
-        // Cap at 100_000 to prevent OOM on huge datasets.
-        let need_all = params.order_by.is_some() || params.offset > 0;
-        let take_limit = if need_all {
-            100_000
-        } else {
-            params.k
-        };
+        // Collect all matching results so soft-delete removal, ORDER BY, offset
+        // and LIMIT can be applied consistently in the central search() method.
+        // Cap to prevent OOM on huge datasets, but never below k + offset.
+        let take_limit = 100_000.max(params.k.saturating_add(params.offset));
 
         let results: Vec<_> = storage
             .iter()
+            .filter(|doc| !is_soft_deleted(doc.metadata.as_ref()))
             .filter(|doc| FilterEvaluator::evaluate(filter, doc.metadata.as_ref()))
             .take(take_limit)
             .map(|doc| HybridSearchResult {
@@ -616,5 +689,92 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-3");
+    }
+
+    // Fast path: índice grande (2k << len), sin filtro ni offset. El reintento
+    // incremental debe resolver en 1 fetch (~2k) y devolver el mismo top-k que
+    // el ranking completo (ground truth). Verifica que el fast path no escanea
+    // todo el índice pero sigue entregando los k más cercanos.
+    fn build_line(n: usize) -> (Arc<MemoryStorage>, Arc<FlatIndex>) {
+        let storage = Arc::new(MemoryStorage::new());
+        let index = Arc::new(FlatIndex::new());
+        for i in 0..n {
+            let v = [i as f32, 0.0, 0.0];
+            storage
+                .insert(format!("doc-{}", i), Some(v.to_vec()), None)
+                .unwrap();
+            index.add(&format!("doc-{}", i), &v, &*storage, Distance::Euclidean).unwrap();
+        }
+        (storage, index)
+    }
+
+    #[test]
+    fn vector_fast_path_matches_full_ranking() {
+        // 300 docs, k=10 => fetch inicial = 20 (<< 300). Top-10 por distancia
+        // a [0,0,0] debe ser doc-0..doc-9, idéntico al ranking completo.
+        let (storage, index) = build_line(300);
+        let q = vec![0.0, 0.0, 0.0];
+
+        let fast = HybridSearch::search(
+            &HybridSearchParams::vector(q.clone(), 10),
+            index.as_ref(),
+            None,
+            storage.as_ref(),
+            Distance::Euclidean,
+        )
+        .unwrap();
+
+        let full = HybridSearch::search(
+            &HybridSearchParams::vector(q.clone(), 300),
+            index.as_ref(),
+            None,
+            storage.as_ref(),
+            Distance::Euclidean,
+        )
+        .unwrap();
+
+        assert_eq!(fast.len(), 10);
+        let fast_ids: Vec<_> = fast.iter().map(|r| r.id.clone()).collect();
+        let full_ids: Vec<_> = full.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(fast_ids, full_ids[..10].to_vec());
+        assert_eq!(fast_ids, (0..10).map(|i| format!("doc-{}", i)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn keyword_fast_path_matches_full_ranking() {
+        // 300 docs con tf creciente => BM25 determinista. k=10 => fetch 20.
+        let storage = Arc::new(MemoryStorage::new());
+        let bm25 = Arc::new(BM25Index::new(vec!["content".into()]));
+        let vector_index = FlatIndex::new();
+        for i in 0..300 {
+            let mut meta = Metadata::new();
+            meta.insert("content", "term ".repeat(i + 1));
+            storage
+                .insert(format!("doc-{}", i), Some(vec![0.0, 0.0, 0.0]), Some(meta.clone()))
+                .unwrap();
+            bm25.add(&format!("doc-{}", i), Some(&meta)).unwrap();
+        }
+
+        let fast = HybridSearch::search(
+            &HybridSearchParams::keyword("term", 10),
+            &vector_index,
+            Some(bm25.as_ref()),
+            storage.as_ref(),
+            Distance::Euclidean,
+        )
+        .unwrap();
+        let full = HybridSearch::search(
+            &HybridSearchParams::keyword("term", 300),
+            &vector_index,
+            Some(bm25.as_ref()),
+            storage.as_ref(),
+            Distance::Euclidean,
+        )
+        .unwrap();
+
+        assert_eq!(fast.len(), 10);
+        let fast_ids: Vec<_> = fast.iter().map(|r| r.id.clone()).collect();
+        let full_ids: Vec<_> = full.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(fast_ids, full_ids[..10].to_vec());
     }
 }

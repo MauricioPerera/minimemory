@@ -12,6 +12,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
+use bincode::Options;
+
 use crate::error::{Error, Result};
 use crate::types::StoredVector;
 
@@ -176,42 +178,89 @@ fn write_vectors_to_file(
 /// Returns (header, vectors, loaded_index_blocks).
 /// Index data is present in version 2+ files.
 /// Verifies CRC32 checksum if present (v2+ files).
+///
+/// Endurece la lectura contra archivos hostiles/truncados: toda alocación
+/// derivada del contenido se acota al tamaño real del archivo, las entradas
+/// se deserializan con un límite de bytes y los archivos v3+ exigen footer
+/// válido con CRC verificado.
 pub fn load_vectors<P: AsRef<Path>>(
     path: P,
 ) -> Result<(FileHeader, Vec<StoredVector>, LoadedIndexBlocks)> {
-    let file = File::open(path)?;
+    let file = File::open(path.as_ref())?;
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::with_capacity(256 * 1024, file);
 
     // Leer header
     let header = FileHeader::read_from(&mut reader)?;
 
+    // Bytes restantes tras el header: límite superior para toda alocación
+    // derivada del contenido del archivo.
+    let header_pos = reader.stream_position().unwrap_or(super::format::HEADER_SIZE as u64);
+    if file_len < header_pos {
+        return Err(Error::Serialization(format!(
+            "corrupt or malicious file: file size {} smaller than header end {}",
+            file_len, header_pos
+        )));
+    }
+    let mut remaining = file_len - header_pos;
+
+    // Tamaño mínimo plausible de una entrada: solo el prefijo u32 de longitud.
+    // Cualquier entrada real ocupa más, así que este umbral nunca rechaza un
+    // archivo legítimo y a la vez acota un num_vectors hostil.
+    const MIN_ENTRY_SIZE: u64 = 4;
+    let max_plausible_vectors = remaining / MIN_ENTRY_SIZE;
+    if header.num_vectors > max_plausible_vectors {
+        return Err(Error::Serialization(format!(
+            "corrupt or malicious file: header claims {} vectors but file can hold at most {}",
+            header.num_vectors, max_plausible_vectors
+        )));
+    }
+
     // CRC32 hasher for verification
     let mut hasher = crc32fast::Hasher::new();
 
-    // Leer vectores
-    let mut vectors = Vec::with_capacity(header.num_vectors as usize);
+    // Pre-asignar capacidad acotada por el tamaño del archivo (no por el header).
+    let cap = std::cmp::min(header.num_vectors as usize, max_plausible_vectors as usize);
+    let mut vectors = Vec::with_capacity(cap);
     let mut buf4 = [0u8; 4];
     // Reuse a single buffer across iterations to avoid per-vector heap allocations
     let mut data: Vec<u8> = Vec::with_capacity(4096);
 
     for _ in 0..header.num_vectors {
         // Leer longitud
-        if reader.read_exact(&mut buf4).is_err() {
-            break;
+        reader.read_exact(&mut buf4)?;
+        let len = u32::from_le_bytes(buf4) as u64;
+        remaining = remaining.checked_sub(4).ok_or_else(|| {
+            Error::Serialization(
+                "corrupt or malicious file: entry length prefix beyond end of file".into(),
+            )
+        })?;
+
+        if len > remaining {
+            return Err(Error::Serialization(format!(
+                "corrupt or malicious file: entry length {} exceeds remaining {} bytes",
+                len, remaining
+            )));
         }
-        let len = u32::from_le_bytes(buf4) as usize;
 
         hasher.update(&buf4);
 
         // Leer datos (reuse buffer, only grows if needed)
-        data.resize(len, 0);
-        reader.read_exact(&mut data[..len])?;
+        let len_us = len as usize;
+        data.resize(len_us, 0);
+        reader.read_exact(&mut data[..len_us])?;
+        remaining -= len;
 
-        hasher.update(&data[..len]);
+        hasher.update(&data[..len_us]);
 
-        // Deserializar
-        let entry: VectorEntry = bincode::deserialize(&data)?;
+        // Deserializar con límite derivado del len ya validado (no aloca Vec
+        // hostiles dentro de bincode). Fixint + allow_trailing_bytes mantiene el
+        // formato usado por `bincode::serialize` en save.
+        let entry: VectorEntry = bincode::options()
+            .with_limit(len_us as u64)
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .deserialize(&data[..len_us])?;
 
         vectors.push(StoredVector {
             id: entry.id,
@@ -230,6 +279,10 @@ pub fn load_vectors<P: AsRef<Path>>(
                 break;
             }
             hasher.update(&buf4);
+            remaining = match remaining.checked_sub(4) {
+                Some(r) => r,
+                None => break,
+            };
 
             // End marker (4 zero bytes)
             if buf4 == [0, 0, 0, 0] {
@@ -241,14 +294,25 @@ pub fn load_vectors<P: AsRef<Path>>(
                 break;
             }
             hasher.update(&len_buf);
+            remaining = match remaining.checked_sub(4) {
+                Some(r) => r,
+                None => break,
+            };
 
-            let block_len = u32::from_le_bytes(len_buf) as usize;
+            let block_len = u32::from_le_bytes(len_buf) as u64;
+            if block_len > remaining {
+                return Err(Error::Serialization(format!(
+                    "corrupt or malicious file: index block length {} exceeds remaining {} bytes",
+                    block_len, remaining
+                )));
+            }
             // Read block data
-            let mut block_data = vec![0u8; block_len];
+            let mut block_data = vec![0u8; block_len as usize];
             if reader.read_exact(&mut block_data).is_err() {
                 break;
             }
             hasher.update(&block_data);
+            remaining -= block_len;
 
             match &buf4 {
                 b"HNSW" => index_blocks.hnsw = Some(block_data),
@@ -259,25 +323,53 @@ pub fn load_vectors<P: AsRef<Path>>(
     }
 
     // Verify CRC32 checksum (footer: 4 bytes checksum + 4 bytes "END!")
-    // Only verify if we have enough bytes remaining for the footer
     let current_pos = reader.stream_position().unwrap_or(0);
-    if current_pos + 8 <= file_len {
+    if header.version >= 3 {
+        // v3+: save siempre escribe CRC real, así que el footer es obligatorio
+        // y el checksum 0 ya no se acepta como "sin verificar".
+        if current_pos + 8 > file_len {
+            return Err(Error::Serialization(
+                "corrupt or malicious file: missing CRC32 footer".into(),
+            ));
+        }
         let mut checksum_buf = [0u8; 4];
         let mut end_marker = [0u8; 4];
+        reader.read_exact(&mut checksum_buf)?;
+        reader.read_exact(&mut end_marker)?;
+        if &end_marker != b"END!" {
+            return Err(Error::Serialization(
+                "corrupt or malicious file: bad footer marker".into(),
+            ));
+        }
+        let stored_checksum = u32::from_le_bytes(checksum_buf);
+        let computed = hasher.finalize();
+        if computed != stored_checksum {
+            return Err(Error::InvalidConfig(format!(
+                "CRC32 checksum mismatch: expected {:08x}, got {:08x}. File may be corrupted.",
+                stored_checksum, computed
+            )));
+        }
+    } else {
+        // v1/v2: verificación best-effort. checksum 0 = sin verificar (archivos
+        // legados), y un archivo sin footer se acepta.
+        if current_pos + 8 <= file_len {
+            let mut checksum_buf = [0u8; 4];
+            let mut end_marker = [0u8; 4];
 
-        if reader.read_exact(&mut checksum_buf).is_ok()
-            && reader.read_exact(&mut end_marker).is_ok()
-            && &end_marker == b"END!"
-        {
-            let stored_checksum = u32::from_le_bytes(checksum_buf);
-            // Only verify if checksum is non-zero (v1 files wrote 0)
-            if stored_checksum != 0 {
-                let computed = hasher.finalize();
-                if computed != stored_checksum {
-                    return Err(Error::InvalidConfig(format!(
-                        "CRC32 checksum mismatch: expected {:08x}, got {:08x}. File may be corrupted.",
-                        stored_checksum, computed
-                    )));
+            if reader.read_exact(&mut checksum_buf).is_ok()
+                && reader.read_exact(&mut end_marker).is_ok()
+                && &end_marker == b"END!"
+            {
+                let stored_checksum = u32::from_le_bytes(checksum_buf);
+                // Only verify if checksum is non-zero (v1 files wrote 0)
+                if stored_checksum != 0 {
+                    let computed = hasher.finalize();
+                    if computed != stored_checksum {
+                        return Err(Error::InvalidConfig(format!(
+                            "CRC32 checksum mismatch: expected {:08x}, got {:08x}. File may be corrupted.",
+                            stored_checksum, computed
+                        )));
+                    }
                 }
             }
         }
@@ -539,6 +631,160 @@ mod tests {
         assert_eq!(loaded_vectors[0].id, "v1");
         assert_eq!(loaded_blocks.hnsw.as_deref(), Some(hnsw_bytes.as_slice()));
         assert_eq!(loaded_blocks.bm25.as_deref(), Some(bm25_bytes.as_slice()));
+
+        fs::remove_file(&path).ok();
+    }
+
+    // --- Hardening tests (hostile / truncated / footer-less .mmdb files) ---
+
+    /// Build a raw 64-byte v3 header matching `FileHeader::write_to` layout.
+    fn raw_v3_header(dimensions: u32, num_vectors: u64, index_offset: u64) -> Vec<u8> {
+        use crate::storage::format::{HEADER_SIZE, MAGIC, VERSION};
+        let mut buf = Vec::with_capacity(HEADER_SIZE);
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&dimensions.to_le_bytes());
+        buf.extend_from_slice(&num_vectors.to_le_bytes());
+        buf.push(0); // distance_type: Cosine
+        buf.push(0); // index_type: Flat
+        buf.extend_from_slice(&0u16.to_le_bytes()); // hnsw_m
+        buf.extend_from_slice(&0u16.to_le_bytes()); // hnsw_ef
+        buf.extend_from_slice(&(HEADER_SIZE as u64).to_le_bytes()); // data_offset
+        buf.extend_from_slice(&index_offset.to_le_bytes());
+        buf.push(0); // quantization_type: None
+        buf.extend_from_slice(&[0u8; HEADER_SIZE - 43]); // padding
+        assert_eq!(buf.len(), HEADER_SIZE);
+        buf
+    }
+
+    #[test]
+    fn test_hostile_num_vectors_does_not_oom() {
+        // Header claims u32::MAX vectors but file has no vector data.
+        let path = temp_path();
+        fs::write(&path, raw_v3_header(3, u32::MAX as u64, 0)).unwrap();
+
+        let result = load_vectors(&path);
+        assert!(result.is_err(), "expected error for hostile num_vectors");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("corrupt or malicious file"),
+            "expected corruption message, got: {}",
+            msg
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_hostile_entry_len_does_not_oom() {
+        // One entry whose length prefix (u32::MAX) exceeds the remaining bytes.
+        let path = temp_path();
+        let mut bytes = raw_v3_header(3, 1, 0);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // entry length prefix, no payload
+        fs::write(&path, &bytes).unwrap();
+
+        let result = load_vectors(&path);
+        assert!(result.is_err(), "expected error for hostile entry len");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("corrupt or malicious file"),
+            "expected corruption message, got: {}",
+            msg
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_v3_truncated_mid_data_errors_not_partial() {
+        let path = temp_path();
+
+        let vectors = vec![
+            StoredVector { id: "a".to_string(), vector: Some(vec![1.0, 2.0, 3.0]), metadata: None, quantized: None },
+            StoredVector { id: "b".to_string(), vector: Some(vec![4.0, 5.0, 6.0]), metadata: None, quantized: None },
+            StoredVector { id: "c".to_string(), vector: Some(vec![7.0, 8.0, 9.0]), metadata: None, quantized: None },
+        ];
+        let mut header = FileHeader::new(3, 3, Distance::Cosine, &IndexType::Flat);
+        save_vectors(&path, &mut header, vectors.into_iter(), &IndexBlocks::none()).unwrap();
+
+        // Keep header + exactly the first entry (cut the second entry's length prefix).
+        let full = fs::read(&path).unwrap();
+        let first_entry_len = u32::from_le_bytes(full[64..68].try_into().unwrap()) as usize;
+        let keep = 64 + 4 + first_entry_len;
+        assert!(keep < full.len(), "cut point must be before end of file");
+        fs::write(&path, &full[..keep]).unwrap();
+
+        let result = load_vectors(&path);
+        assert!(result.is_err(), "truncated file must not load as a partial database");
+        // Must NOT have returned the first vector as a silent partial Ok.
+        if let Ok((_, loaded, _)) = load_vectors(&path) {
+            panic!("truncated file loaded as Ok with {} vectors", loaded.len());
+        }
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_v3_missing_footer_errors() {
+        let path = temp_path();
+
+        let vectors = vec![StoredVector { id: "a".to_string(), vector: Some(vec![1.0, 2.0, 3.0]), metadata: None, quantized: None }];
+        let mut header = FileHeader::new(3, 1, Distance::Cosine, &IndexType::Flat);
+        save_vectors(&path, &mut header, vectors.into_iter(), &IndexBlocks::none()).unwrap();
+
+        // Strip the 8-byte footer (checksum + "END!").
+        let full = fs::read(&path).unwrap();
+        let cut = full.len() - 8;
+        fs::write(&path, &full[..cut]).unwrap();
+
+        let result = load_vectors(&path);
+        assert!(result.is_err(), "v3 file without footer must not load");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("missing CRC32 footer"),
+            "expected missing-footer error, got: {}",
+            msg
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_roundtrip_with_quantization_and_ivf_index() {
+        use crate::quantization::{QuantizedVector, ScalarQuantParams};
+
+        let path = temp_path();
+
+        let params = ScalarQuantParams::default();
+        let quant = QuantizedVector::Int8 { data: vec![1i8, 2, 3], params };
+        let vectors = vec![StoredVector {
+            id: "q1".to_string(),
+            vector: None, // quantized-only document
+            metadata: None,
+            quantized: Some(quant.clone()),
+        }];
+
+        let hnsw_bytes = b"fake-ivf-serialized-index";
+        let blocks = IndexBlocks { hnsw: Some(hnsw_bytes), bm25: None };
+        let mut header = FileHeader::new(3, 1, Distance::Cosine, &IndexType::ivf())
+            .with_quantization(crate::quantization::QuantizationType::Int8);
+        save_vectors(&path, &mut header, vectors.into_iter(), &blocks).unwrap();
+
+        let (loaded_header, loaded_vectors, loaded_blocks) = load_vectors(&path).unwrap();
+        assert_eq!(loaded_header.version, 3);
+        assert_eq!(loaded_header.dimensions, 3);
+        assert_eq!(loaded_header.index_type, 2, "IVF index_type must round-trip");
+        assert_eq!(loaded_header.quantization_type, 1, "Int8 quantization must round-trip");
+        assert_eq!(loaded_vectors.len(), 1);
+        assert_eq!(loaded_vectors[0].id, "q1");
+        assert_eq!(loaded_vectors[0].vector, None);
+        let loaded_quant = loaded_vectors[0].quantized.as_ref().expect("quantized survived");
+        match loaded_quant {
+            QuantizedVector::Int8 { data, .. } => assert_eq!(data, &vec![1i8, 2, 3]),
+            other => panic!("expected Int8 quantization, got {:?}", other),
+        }
+        assert_eq!(loaded_blocks.hnsw.as_deref(), Some(hnsw_bytes.as_slice()));
+        assert_eq!(loaded_blocks.bm25, None);
 
         fs::remove_file(&path).ok();
     }

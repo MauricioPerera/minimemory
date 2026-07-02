@@ -266,7 +266,7 @@ pub extern "C" fn mmdb_get(
     };
 
     match db.inner.get(id_str) {
-        Ok(Some((vector, _))) => {
+        Ok(Some((Some(vector), _))) => {
             unsafe { *len = vector.len() as u32 };
             let mut boxed = vector.into_boxed_slice();
             let ptr = boxed.as_mut_ptr();

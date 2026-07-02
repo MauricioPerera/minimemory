@@ -2127,3 +2127,468 @@ fn rand_float() -> f32 {
         .subsec_nanos();
     ((seed % 1000) as f32) / 1000.0
 }
+
+// ============================================================================
+// Tests de chunking multibyte (UTF-8)
+// ============================================================================
+
+mod chunking_multibyte {
+    use super::*;
+    use minimemory::chunking::{ChunkConfig, ChunkStrategy};
+
+    #[test]
+    fn ingest_markdown_multibyte_does_not_panic() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        let markdown = "ááááááááá ñññ üüü 你好世界 😀😀😀";
+        let config = ChunkConfig::new(ChunkStrategy::BySize {
+            target_size: 5,
+            overlap: 2,
+        });
+
+        let count = db.ingest_markdown(markdown, &config).unwrap();
+        assert!(count >= 1);
+    }
+
+    #[test]
+    fn ingest_markdown_cjk_no_content_lost() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        let markdown = "你好世界你好世界你好世界";
+        let config = ChunkConfig::new(ChunkStrategy::BySize {
+            target_size: 7,
+            overlap: 0,
+        });
+
+        let count = db.ingest_markdown(markdown, &config).unwrap();
+        assert!(count >= 2);
+
+        // Recuperar el contenido concatenado de los chunks via fulltext search
+        // no es necesario; basta con re-chunkear y comparar.
+        let result =
+            minimemory::chunking::chunk_markdown(markdown, &config).unwrap();
+        let rebuilt: String = result.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(rebuilt, markdown);
+    }
+}
+
+// ============================================================================
+// Search contract: offset, filter and soft-delete must not reduce results
+// below min(k, docs that qualify after filter/soft-delete). See
+// audit/audit-C-search-query-quant.md, findings 2-4.
+// ============================================================================
+
+mod search_contract {
+    use super::*;
+    use minimemory::{Filter, HybridSearchParams};
+
+    fn ids(results: &[minimemory::HybridSearchResult]) -> Vec<String> {
+        results.iter().map(|r| r.id.to_string()).collect()
+    }
+
+    // 20 docs on a line: distance to query [0,0,0,0] grows with i, so ranking
+    // is fully deterministic (doc-0 closest .. doc-19 farthest).
+    fn build_line_db(n: usize) -> VectorDB {
+        let db = VectorDB::new(Config::new(4).with_distance(Distance::Euclidean)).unwrap();
+        for i in 0..n {
+            let v = [i as f32, 0.0, 0.0, 0.0];
+            db.insert(format!("doc-{}", i), &v, None).unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn vector_search_offset_returns_k_shifted() {
+        let db = build_line_db(20);
+        let q = [0.0, 0.0, 0.0, 0.0];
+
+        let full = db.hybrid_search(HybridSearchParams::vector(q.to_vec(), 20)).unwrap();
+        let page = db
+            .hybrid_search(HybridSearchParams::vector(q.to_vec(), 10).with_offset(5))
+            .unwrap();
+
+        assert_eq!(page.len(), 10, "offset must not reduce results below k");
+        assert_eq!(ids(&page), ids(&full[5..15]), "offset must shift the ranking");
+    }
+
+    #[test]
+    fn keyword_search_offset_returns_k_shifted() {
+        let db = VectorDB::with_fulltext(Config::new(4), vec!["content".into()]).unwrap();
+        // Constant length (20 tokens), tf of "rust" grows with i => BM25 score
+        // monotonic in i => doc-19 ranks first, doc-0 last.
+        for i in 0..20 {
+            let mut meta = Metadata::new();
+            let content = format!("{}{}", "rust ".repeat(i + 1), "pad ".repeat(19 - i));
+            meta.insert("content", content);
+            let v = [i as f32, 0.0, 0.0, 0.0];
+            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta))
+                .unwrap();
+        }
+
+        let full = db
+            .hybrid_search(HybridSearchParams::keyword("rust", 20))
+            .unwrap();
+        let page = db
+            .hybrid_search(HybridSearchParams::keyword("rust", 10).with_offset(5))
+            .unwrap();
+
+        assert_eq!(page.len(), 10, "offset must not reduce results below k");
+        assert_eq!(ids(&page), ids(&full[5..15]), "offset must shift the ranking");
+    }
+
+    #[test]
+    fn hybrid_search_offset_returns_k_shifted() {
+        // 40 docs: buggy code fetches k*3 = 30, so an offset of 25 (> 2k) is
+        // needed to expose the under-fetch; fixed code fetches all 40.
+        let db = VectorDB::with_fulltext(Config::new(4), vec!["content".into()]).unwrap();
+        for i in 0..40 {
+            let mut meta = Metadata::new();
+            // Distinct tf => distinct BM25 scores => deterministic keyword
+            // ordering (HashMap tie-break order is randomized per call).
+            meta.insert("content", "term ".repeat(i + 1));
+            let v = [i as f32, 0.0, 0.0, 0.0];
+            db.insert_document(&format!("doc-{}", i), Some(&v), Some(meta))
+                .unwrap();
+        }
+        let q = [0.0, 0.0, 0.0, 0.0];
+
+        let full = db
+            .hybrid_search(HybridSearchParams::hybrid(q.to_vec(), "term", 40))
+            .unwrap();
+        let page = db
+            .hybrid_search(HybridSearchParams::hybrid(q.to_vec(), "term", 10).with_offset(25))
+            .unwrap();
+
+        assert_eq!(page.len(), 10, "offset must not reduce results below k");
+        assert_eq!(ids(&page), ids(&full[25..35]), "offset must shift the ranking");
+    }
+
+    #[test]
+    fn vector_search_selective_filter_returns_k() {
+        // 100 non-tech docs close to the query + 10 tech docs far away, k=10.
+        // Buggy code fetches k*10 = 100 (all non-tech) then filters => 0.
+        // Fixed code fetches all 110 => 10 tech.
+        let db = VectorDB::new(Config::new(4).with_distance(Distance::Euclidean)).unwrap();
+        for i in 0..100 {
+            let v = [0.001 * (i as f32 + 1.0), 0.0, 0.0, 0.0];
+            let mut meta = Metadata::new();
+            meta.insert("category", "other");
+            db.insert(format!("other-{}", i), &v, Some(meta)).unwrap();
+        }
+        for i in 0..10 {
+            let v = [100.0 + i as f32, 0.0, 0.0, 0.0];
+            let mut meta = Metadata::new();
+            meta.insert("category", "tech");
+            db.insert(format!("tech-{}", i), &v, Some(meta)).unwrap();
+        }
+
+        let results = db
+            .hybrid_search(
+                HybridSearchParams::vector(vec![0.0, 0.0, 0.0, 0.0], 10)
+                    .with_filter(Filter::eq("category", "tech")),
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 10, "selective filter must still return k");
+        for r in &results {
+            assert_eq!(
+                r.metadata.as_ref().unwrap().get("category").unwrap().as_str().unwrap(),
+                "tech"
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_search_selective_filter_returns_k() {
+        // 30 non-tech (close vector, high tf) + 10 tech (far vector, low tf).
+        // Buggy code fetches k*3 = 30 (all non-tech on both sides) then filters
+        // post-RRF => 0. Fixed code fetches all 40 => 10 tech.
+        let db = VectorDB::with_fulltext(Config::new(4), vec!["content".into()]).unwrap();
+        for i in 0..30 {
+            let mut meta = Metadata::new();
+            meta.insert("content", "term term term");
+            meta.insert("category", "other");
+            let v = [0.001 * (i as f32 + 1.0), 0.0, 0.0, 0.0];
+            db.insert_document(&format!("other-{}", i), Some(&v), Some(meta))
+                .unwrap();
+        }
+        for i in 0..10 {
+            let mut meta = Metadata::new();
+            meta.insert("content", "term");
+            meta.insert("category", "tech");
+            let v = [100.0 + i as f32, 0.0, 0.0, 0.0];
+            db.insert_document(&format!("tech-{}", i), Some(&v), Some(meta))
+                .unwrap();
+        }
+
+        let results = db
+            .hybrid_search(
+                HybridSearchParams::hybrid(vec![0.0, 0.0, 0.0, 0.0], "term", 10)
+                    .with_filter(Filter::eq("category", "tech")),
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 10, "hybrid selective filter must return k");
+        for r in &results {
+            assert_eq!(
+                r.metadata.as_ref().unwrap().get("category").unwrap().as_str().unwrap(),
+                "tech"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_deleted_docs_do_not_reduce_result_count() {
+        // 15 docs; the 5 closest to the query are soft-deleted. Buggy code
+        // fetches k=10 (5 deleted + 5 alive) then retains => 5. Fixed code
+        // fetches all 15, retains the 10 alive => 10.
+        let db = VectorDB::new(Config::new(4).with_distance(Distance::Euclidean)).unwrap();
+        for i in 0..15 {
+            let v = [i as f32, 0.0, 0.0, 0.0];
+            let mut meta = Metadata::new();
+            if i < 5 {
+                meta.insert("deleted", true);
+            }
+            db.insert(format!("doc-{}", i), &v, Some(meta)).unwrap();
+        }
+
+        let results = db
+            .hybrid_search(HybridSearchParams::vector(vec![0.0, 0.0, 0.0, 0.0], 10))
+            .unwrap();
+
+        assert_eq!(results.len(), 10, "soft-deletes must not reduce results below k");
+        for r in &results {
+            let deleted = r
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("deleted"))
+                .map(|v| v.as_bool().unwrap_or(false))
+                .unwrap_or(false);
+            assert!(!deleted, "no soft-deleted docs in results");
+        }
+        // The 5 closest (doc-0..doc-4) were deleted, so we get doc-5..doc-14.
+        let indices: Vec<usize> = results
+            .iter()
+            .map(|r| r.id.strip_prefix("doc-").unwrap().parse::<usize>().unwrap())
+            .collect();
+        assert!(indices.iter().all(|i| *i >= 5));
+    }
+
+    #[test]
+    fn k_larger_than_total_returns_all_without_error() {
+        let db = VectorDB::new(Config::new(4).with_distance(Distance::Euclidean)).unwrap();
+        for i in 0..3 {
+            let v = [i as f32, 0.0, 0.0, 0.0];
+            db.insert(format!("doc-{}", i), &v, None).unwrap();
+        }
+
+        let results = db
+            .hybrid_search(HybridSearchParams::vector(vec![0.0, 0.0, 0.0, 0.0], 100))
+            .unwrap();
+        assert_eq!(results.len(), 3);
+
+        // With a filter and k > total qualifying: return all qualifying.
+        let db2 = VectorDB::new(Config::new(4).with_distance(Distance::Euclidean)).unwrap();
+        let mut v = [0.0f32, 0.0, 0.0, 0.0];
+        for i in 0..3 {
+            v[0] = i as f32;
+            let mut meta = Metadata::new();
+            meta.insert("category", if i < 2 { "tech" } else { "other" });
+            db2.insert(format!("doc-{}", i), &v, Some(meta)).unwrap();
+        }
+        let filtered = db2
+            .hybrid_search(
+                HybridSearchParams::vector(vec![0.0, 0.0, 0.0, 0.0], 100)
+                    .with_filter(Filter::eq("category", "tech")),
+            )
+            .unwrap();
+        assert_eq!(filtered.len(), 2);
+    }
+}
+
+// ============================================================================
+// Validación de vectores no finitos (NaN/Inf) en la frontera de la API
+// ============================================================================
+
+mod vector_finiteness_validation {
+    use super::*;
+    use minimemory::Error;
+
+    fn db() -> VectorDB {
+        VectorDB::new(Config::new(3).with_distance(Distance::Euclidean)).unwrap()
+    }
+
+    #[test]
+    fn insert_with_nan_is_rejected_and_db_intact() {
+        let db = db();
+        let err = db.insert("a", &[f32::NAN, 0.0, 0.0], None).unwrap_err();
+        assert!(matches!(err, Error::InvalidVector(_)), "got {:?}", err);
+        assert_eq!(db.len(), 0);
+        assert!(!db.contains("a"));
+    }
+
+    #[test]
+    fn insert_with_inf_is_rejected() {
+        let db = db();
+        let err = db
+            .insert("a", &[f32::INFINITY, 0.0, 0.0], None)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidVector(_)), "got {:?}", err);
+        let err = db
+            .insert("b", &[0.0, f32::NEG_INFINITY, 0.0], None)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidVector(_)), "got {:?}", err);
+        assert_eq!(db.len(), 0);
+    }
+
+    #[test]
+    fn update_with_nan_is_rejected_and_original_survives() {
+        let db = db();
+        db.insert("a", &[1.0, 0.0, 0.0], None).unwrap();
+        let err = db.update("a", &[f32::NAN, 0.0, 0.0], None).unwrap_err();
+        assert!(matches!(err, Error::InvalidVector(_)), "got {:?}", err);
+        let (vec, _) = db.get("a").unwrap().unwrap();
+        assert_eq!(vec.unwrap(), vec![1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn search_with_nan_query_is_rejected() {
+        let db = db();
+        db.insert("a", &[1.0, 0.0, 0.0], None).unwrap();
+        let err = db.search(&[f32::NAN, 0.0, 0.0], 5).unwrap_err();
+        assert!(matches!(err, Error::InvalidVector(_)), "got {:?}", err);
+    }
+
+    #[test]
+    fn finite_extreme_values_are_accepted() {
+        let db = db();
+        db.insert(
+            "a",
+            &[f32::MAX, f32::MIN_POSITIVE, 1.0],
+            None,
+        )
+        .unwrap();
+        db.insert(
+            "b",
+            &[f32::MIN, f32::MAX, f32::MIN_POSITIVE],
+            None,
+        )
+        .unwrap();
+        let results = db
+            .search(&[f32::MAX, f32::MIN_POSITIVE, 1.0], 2)
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "a");
+    }
+}
+
+// ============================================================================
+// Tests de índices parciales: clear() y populate retroactivo
+// ============================================================================
+
+mod partial_index_lifecycle {
+    use super::*;
+    use minimemory::partial_index::PartialIndexConfig;
+    use minimemory::Filter;
+
+    fn meta_with(category: &str) -> Option<Metadata> {
+        let mut m = Metadata::new();
+        m.insert("category", category);
+        Some(m)
+    }
+
+    #[test]
+    fn clear_empties_partial_indexes_but_keeps_them_registered() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        db.create_partial_index(
+            "tech",
+            PartialIndexConfig::new(Filter::eq("category", "tech")),
+        )
+        .unwrap();
+
+        // Poblar: 2 docs que matchean, 1 que no.
+        db.insert("doc1", &[1.0, 0.0, 0.0], meta_with("tech"))
+            .unwrap();
+        db.insert("doc2", &[0.0, 1.0, 0.0], meta_with("tech"))
+            .unwrap();
+        db.insert("doc3", &[0.0, 0.0, 1.0], meta_with("sports"))
+            .unwrap();
+
+        let results = db.search_partial("tech", &[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // clear() debe vaciar storage principal e índices parciales, pero
+        // mantener el índice parcial registrado.
+        db.clear();
+        assert!(db.is_empty());
+        assert!(db.has_partial_index("tech"));
+
+        // search_partial no debe devolver ids ya borrados.
+        let results = db.search_partial("tech", &[1.0, 0.0, 0.0], 10).unwrap();
+        assert!(results.is_empty(), "expected empty, got {:?}", results);
+
+        // Un insert posterior que matchea vuelve a aparecer en el parcial.
+        db.insert("doc4", &[0.5, 0.5, 0.0], meta_with("tech"))
+            .unwrap();
+        let results = db.search_partial("tech", &[0.5, 0.5, 0.0], 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc4");
+    }
+
+    #[test]
+    fn create_partial_index_indexes_existing_documents_retroactively() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+
+        // 10 docs: 5 matchean el filtro, 5 no.
+        for i in 0..10 {
+            let id = format!("doc{}", i);
+            let category = if i % 2 == 0 { "tech" } else { "sports" };
+            let v = [i as f32, 0.0, 0.0];
+            db.insert(&id, &v, meta_with(category)).unwrap();
+        }
+
+        // Crear el índice parcial DESPUÉS de insertar.
+        db.create_partial_index(
+            "tech",
+            PartialIndexConfig::new(Filter::eq("category", "tech")),
+        )
+        .unwrap();
+
+        // Debe encontrar los 5 existentes sin insertar nada nuevo.
+        let results = db.search_partial("tech", &[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(results.len(), 5);
+        for r in &results {
+            assert_eq!(r.id.len(), 4); // "doc0".."doc9" -> 4 chars
+            let n: usize = r.id[3..].parse().unwrap();
+            assert_eq!(n % 2, 0, "only even ids match the filter");
+        }
+    }
+
+    #[test]
+    fn deleted_document_does_not_appear_in_partial_search() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        db.create_partial_index(
+            "tech",
+            PartialIndexConfig::new(Filter::eq("category", "tech")),
+        )
+        .unwrap();
+
+        db.insert("doc1", &[1.0, 0.0, 0.0], meta_with("tech"))
+            .unwrap();
+        db.insert("doc2", &[0.0, 1.0, 0.0], meta_with("tech"))
+            .unwrap();
+
+        assert_eq!(
+            db.search_partial("tech", &[1.0, 0.0, 0.0], 10)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Borrar doc1 de la DB principal; on_delete debe sacarlo del parcial.
+        assert!(db.delete("doc1").unwrap());
+        assert!(!db.contains("doc1"));
+
+        let results = db.search_partial("tech", &[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc2");
+    }
+}

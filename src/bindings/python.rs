@@ -24,6 +24,7 @@
 use pyo3::exceptions::{PyIOError, PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -135,10 +136,10 @@ impl PyVectorDB {
     ///     items: Lista de tuplas (id, vector, metadata)
     fn insert_batch(
         &self,
-        items: Vec<(String, Vec<f32>, Option<&Bound<'_, PyDict>>)>,
+        items: Vec<(String, Vec<f32>, Option<Bound<'_, PyDict>>)>,
     ) -> PyResult<()> {
         for (id, vector, metadata) in items {
-            let meta = metadata.map(|m| dict_to_metadata(m)).transpose()?;
+            let meta = metadata.map(|m| dict_to_metadata(&m)).transpose()?;
             self.inner
                 .insert(&id, &vector, meta)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -162,12 +163,15 @@ impl PyVectorDB {
 
         Ok(results
             .into_iter()
-            .map(|r| PySearchResult {
-                id: r.id,
-                distance: r.distance,
-                metadata: r.metadata.map(metadata_to_dict),
+            .map(|r| {
+                let metadata = r.metadata.map(metadata_to_dict).transpose()?;
+                Ok(PySearchResult {
+                    id: r.id,
+                    distance: r.distance,
+                    metadata,
+                })
             })
-            .collect())
+            .collect::<PyResult<Vec<_>>>()?)
     }
 
     /// Obtiene un vector por su ID.
@@ -183,11 +187,11 @@ impl PyVectorDB {
             .get(id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?
         {
-            Some((vector, metadata)) => {
-                let meta = metadata.map(metadata_to_dict);
+            Some((Some(vector), metadata)) => {
+                let meta = metadata.map(metadata_to_dict).transpose()?;
                 Ok(Some((vector, meta)))
             }
-            None => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -280,7 +284,6 @@ impl PyVectorDB {
 
 /// Resultado de una búsqueda.
 #[pyclass(name = "SearchResult")]
-#[derive(Clone)]
 pub struct PySearchResult {
     #[pyo3(get)]
     pub id: String,
@@ -306,11 +309,11 @@ fn dict_to_metadata(dict: &Bound<'_, PyDict>) -> PyResult<RustMetadata> {
 
         if let Ok(v) = value.extract::<String>() {
             meta.insert(key_str, v);
+        } else if let Ok(v) = value.extract::<bool>() {
+            meta.insert(key_str, v);
         } else if let Ok(v) = value.extract::<i64>() {
             meta.insert(key_str, v);
         } else if let Ok(v) = value.extract::<f64>() {
-            meta.insert(key_str, v);
-        } else if let Ok(v) = value.extract::<bool>() {
             meta.insert(key_str, v);
         } else {
             return Err(PyValueError::new_err(format!(
@@ -324,22 +327,23 @@ fn dict_to_metadata(dict: &Bound<'_, PyDict>) -> PyResult<RustMetadata> {
 }
 
 /// Convierte Metadata de Rust a HashMap para Python
-fn metadata_to_dict(meta: RustMetadata) -> HashMap<String, PyObject> {
+fn metadata_to_dict(meta: RustMetadata) -> PyResult<HashMap<String, PyObject>> {
     Python::with_gil(|py| {
         let mut map = HashMap::new();
 
         for (key, value) in meta.fields {
             let py_value: PyObject = match value {
-                RustMetadataValue::String(s) => s.into_py(py),
-                RustMetadataValue::Int(i) => i.into_py(py),
-                RustMetadataValue::Float(f) => f.into_py(py),
-                RustMetadataValue::Bool(b) => b.into_py(py),
+                RustMetadataValue::String(s) => s.into_py_any(py)?,
+                RustMetadataValue::Int(i) => i.into_py_any(py)?,
+                RustMetadataValue::Float(f) => f.into_py_any(py)?,
+                RustMetadataValue::Bool(b) => b.into_py_any(py)?,
                 RustMetadataValue::List(_) => py.None(), // Simplificado
+                RustMetadataValue::Map(_) => py.None(), // Simplificado
             };
             map.insert(key, py_value);
         }
 
-        map
+        Ok(map)
     })
 }
 
