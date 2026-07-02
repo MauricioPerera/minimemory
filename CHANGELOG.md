@@ -5,6 +5,37 @@ All notable changes to minimemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-07-01
+
+Result of a deep code audit (66 findings: 6 CRITICAL, 15 HIGH, 24 MEDIUM, 21 LOW) across core storage, indexes/SIMD, search/query/quantization, memory/replication, and bindings/embeddings. Full report in `audit/AUDIT-SUMMARY.md`. Test suite grew from 314 to 377 (245 lib + 100 integration + 32 doc).
+
+### Security
+- Reject `NaN`/`Inf` vectors at the API boundary via a new `Error::InvalidVector` variant
+- Harden `.mmdb` loading: reject hostile header/entry limits and bincode size caps, surface truncation as an error instead of a silent partial load, and make CRC32 mandatory in v3 files
+- Validate vector dimensions on `update`/`update_document` before mutating storage (was only checked on `insert`)
+- Assert equal vector lengths in `Distance::calculate`, closing an out-of-bounds read in the SIMD paths (SSE/AVX2/AVX-512/NEON)
+- Respect UTF-8 char boundaries in `chunk_by_size`, fixing a panic on multibyte text via `ingest_markdown`
+
+### Added
+- `VectorDB::rebuild_index()` to (re)train the main index from storage — mandatory for IVF after a bulk load to activate K-means clustering and `num_probes`
+- `Error::InvalidVector` and `Error::InvalidFilter` variants
+- Replication `ConflictResolution` is now enforced: `LastWriteWins`, `KeepLocal`, `ApplyRemote` compare timestamps and populate `SyncResult.conflicts`
+- Search contract: vector, keyword, and hybrid search return `min(k, qualifying)`, with offset applied before truncation and filters/soft-delete applied before RRF fusion
+- `clear()` now empties partial indexes; `create_partial_index` backfills already-stored documents
+- Atomic `import_snapshot` in WASM (validate before clear)
+- Faithful round-trip of List/Map metadata values in WASM
+- `catch_unwind` guard on every FFI `extern "C"` boundary with `# Safety` contracts
+- Deterministic tie-breaking by id in RRF ranking
+
+### Fixed
+- `ffi`, `nodejs`, and `python` bindings compile (migrated pyo3 0.20 → 0.26; correct `Option<Vec<f32>>` handling in `get`, `Map` arm in metadata conversion, Python bools stored as `Bool`)
+- Replication `maybe_compact` no longer discards unexported log entries
+- `Filter::regex` with an invalid pattern now returns `Error::InvalidFilter` instead of silently matching nothing
+- Quantization of constant vectors (min == max) round-trips without `NaN`; dim-0 and Int3/Binary bounds guards added
+- Embeddings propagate model failures instead of returning silent zero vectors
+- Saturating arithmetic for `k`/`offset` in search and `cleanup_old` timestamps; zero/invalid score weights no longer produce `NaN`
+- Soft-delete semantics (`metadata["deleted"] == true`) documented on the public search APIs
+
 ## [2.5.0] - 2025
 
 ### Added

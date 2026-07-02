@@ -2,7 +2,7 @@
 
 Embedded vector database for Rust, JavaScript, and Python. Like SQLite for vectors.
 
-**493KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **314 Rust tests** | **51 browser tests**
+**466KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **377 tests** | **51 browser tests**
 
 [![npm](https://img.shields.io/npm/v/@rckflr/minimemory)](https://www.npmjs.com/package/@rckflr/minimemory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -60,7 +60,11 @@ const results = JSON.parse(db.search(new Float32Array(384), 10));
 | **Filters** | $eq, $ne, $gt, $gte, $lt, $lte, $contains, $regex, $and, $or |
 | **Query** | ORDER BY any field, OFFSET/LIMIT pagination, PagedResult |
 | **Persistence** | .mmdb binary format v3 with CRC32 checksums, atomic writes |
-| **WASM** | 493KB, runs in browser + Cloudflare Workers + Node.js |
+| **Validation** | Rejects NaN/Inf vectors (`Error::InvalidVector`), dimension checks on insert and update |
+| **Search contract** | Returns `min(k, qualifying)`; offset applied before truncation, filters before RRF fusion |
+| **Replication** | `ConflictResolution` (LWW / KeepLocal / ApplyRemote); compaction preserves unexported log entries |
+| **Indexing** | `VectorDB::rebuild_index()` — mandatory for IVF after bulk load to activate clustering |
+| **WASM** | 466KB, runs in browser + Cloudflare Workers + Node.js |
 | **Extras** | Reranker (trait-based), agent memory system, local embeddings (Candle) |
 
 ## Quantization
@@ -142,6 +146,26 @@ localStorage.setItem("my-db", snapshot);
 db.import_snapshot(localStorage.getItem("my-db"));
 ```
 
+## Indexing & IVF
+
+The IVF index does not train its clusters on insert. After a bulk load you must call `rebuild_index()` so K-means runs over all stored vectors; otherwise IVF silently falls back to brute-force search and `num_probes` has no effect. For HNSW and Flat the call is optional (useful to compact/reorganize after mass deletes).
+
+```rust
+use minimemory::{VectorDB, Config, IndexType};
+
+let config = Config::new(384)
+    .with_index(IndexType::IVF { num_clusters: 100, num_probes: 10 });
+let db = VectorDB::new(config)?;
+
+// Bulk insert...
+for i in 0..10_000 {
+    db.insert(&format!("doc-{i}"), &vec![0.1; 384], None)?;
+}
+
+// Mandatory for IVF: trains clusters so num_probes takes effect.
+db.rebuild_index()?;
+```
+
 ## Browser Usage
 
 ```html
@@ -217,14 +241,14 @@ export default {
 | Project | Description | Link |
 |---------|-------------|------|
 | **minimemory** | Core vector DB (Rust + WASM) | [GitHub](https://github.com/MauricioPerera/minimemory) |
-| **@rckflr/minimemory** | npm package (493KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
+| **@rckflr/minimemory** | npm package (466KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
 | **miniCMS** | PocketBase-like CMS in browser | [Live](https://minicms.pages.dev) / [GitHub](https://github.com/MauricioPerera/minicms) |
 | **minimemory-do-demo** | Cloudflare DO benchmark | [Live](https://minimemory-do-demo.rckflr.workers.dev) / [GitHub](https://github.com/MauricioPerera/minimemory-do-demo) |
 
 ## Architecture
 
 ```
-minimemory (19,700 LOC Rust)
+minimemory (~22,900 LOC Rust)
 ├── db.rs              — VectorDB main API
 ├── distance/          — Cosine, Euclidean, DotProduct, Manhattan (SIMD)
 ├── index/             — Flat, HNSW, IVF
@@ -238,6 +262,8 @@ minimemory (19,700 LOC Rust)
 ├── bindings/wasm.rs   — 35-method WASM API
 └── types.rs           — PagedResult, OrderBy, Config
 ```
+
+A deep code audit (66 findings across core storage, indexes/SIMD, search/query/quantization, memory/replication, and bindings/embeddings) was performed and resolved in v3.0.0 — see [audit/AUDIT-SUMMARY.md](audit/AUDIT-SUMMARY.md).
 
 ## License
 

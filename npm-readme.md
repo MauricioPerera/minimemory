@@ -2,7 +2,7 @@
 
 Embedded vector database for JavaScript/TypeScript. Like SQLite for vectors — runs in the browser, Cloudflare Workers, and Node.js via WebAssembly.
 
-**493KB WASM** | **Zero dependencies** | **HNSW + BM25 + Filters** | **5 quantization levels**
+**466KB WASM** | **Zero dependencies** | **HNSW + BM25 + Filters** | **5 quantization levels**
 
 ## Install
 
@@ -87,6 +87,8 @@ if (saved) {
 }
 ```
 
+`import_snapshot` is atomic: the snapshot is validated before the existing database is cleared, so a malformed import leaves the current data intact. Metadata values of type List and Map round-trip faithfully (they are preserved on export and read back on import).
+
 ## Quantization (Memory Compression)
 
 | Constructor | Compression | Accuracy | Use Case |
@@ -113,6 +115,8 @@ const db = WasmVectorDB.new_int3(384, "cosine", "flat");
 
 - `"flat"` — Exact brute-force search (best for < 10K vectors)
 - `"hnsw"` — Approximate nearest neighbor (best for > 10K vectors)
+
+All distance metrics (cosine, euclidean, dot, manhattan) work with every index type, including HNSW.
 
 ```javascript
 // HNSW with custom parameters
@@ -152,6 +156,8 @@ db.filter_search('{"$or": [{"status": "active"}, {"priority": {"$gt": 5}}]}', 10
 // Vector search with filter
 db.search_with_filter(queryVector, 10, '{"category": "tech"}')
 ```
+
+Malformed filter JSON or an invalid `$regex` pattern throws a JavaScript error instead of silently returning empty results.
 
 ## Cloudflare Workers
 
@@ -234,7 +240,7 @@ const results = JSON.parse(db.search_auto(new Float32Array(768), 10));
 
 | Component | Size |
 |-----------|------|
-| WASM binary | 493 KB |
+| WASM binary | 466 KB |
 | JS wrapper | ~30 KB |
 | TypeScript types | included |
 | Total (gzipped) | ~190 KB |
