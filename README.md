@@ -2,7 +2,7 @@
 
 Embedded vector database for Rust, JavaScript, and Python. Like SQLite for vectors.
 
-**520KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **453 tests** | **51 browser tests**
+**563KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **453 tests** | **51 browser tests**
 
 [![npm](https://img.shields.io/npm/v/@rckflr/minimemory)](https://www.npmjs.com/package/@rckflr/minimemory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -67,7 +67,7 @@ const results = JSON.parse(db.search(new Float32Array(384), 10));
 | **Search contract** | Returns `min(k, qualifying)`; offset applied before truncation, filters before RRF fusion |
 | **Replication** | `ConflictResolution` (LWW / KeepLocal / ApplyRemote); compaction preserves unexported log entries |
 | **Indexing** | `VectorDB::rebuild_index()` — mandatory for IVF after bulk load to activate clustering |
-| **WASM** | 520KB, runs in browser + Cloudflare Workers + Node.js |
+| **WASM** | 563KB, runs in browser + Cloudflare Workers + Node.js |
 | **Extras** | Reranker (trait-based), agent memory system, local embeddings (Candle) |
 
 ## Quantization
@@ -355,7 +355,7 @@ export default {
 | Project | Description | Link |
 |---------|-------------|------|
 | **minimemory** | Core vector DB (Rust + WASM) | [GitHub](https://github.com/MauricioPerera/minimemory) |
-| **@rckflr/minimemory** | npm package (520KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
+| **@rckflr/minimemory** | npm package (563KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
 | **miniCMS** | PocketBase-like CMS in browser | [Live](https://minicms.pages.dev) / [GitHub](https://github.com/MauricioPerera/minicms) |
 | **minimemory-do-demo** | Cloudflare DO benchmark | [Live](https://minimemory-do-demo.rckflr.workers.dev) / [GitHub](https://github.com/MauricioPerera/minimemory-do-demo) |
 
