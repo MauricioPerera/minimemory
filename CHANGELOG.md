@@ -5,6 +5,11 @@ All notable changes to minimemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-07-01
+
+### Changed
+- npm package README updated to reflect v3.0.0 (466KB WASM, 377 tests, new WASM binding behaviors). No code changes — the published 3.0.0 tarball shipped with the pre-audit README.
+
 ## [3.0.0] - 2026-07-01
 
 Result of a deep code audit (66 findings: 6 CRITICAL, 15 HIGH, 24 MEDIUM, 21 LOW) across core storage, indexes/SIMD, search/query/quantization, memory/replication, and bindings/embeddings. Full report in `audit/AUDIT-SUMMARY.md`. Test suite grew from 314 to 377 (245 lib + 100 integration + 32 doc).
