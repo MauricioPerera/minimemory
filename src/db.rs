@@ -1,5 +1,6 @@
 //! Base de datos vectorial principal.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,9 +9,10 @@ use parking_lot::Mutex;
 use crate::distance::Distance;
 use crate::error::{Error, Result};
 use crate::index::{BM25Index, FlatIndex, HNSWIndex, IVFIndex, Index, IndexType};
+use crate::metadata_index::{MetadataIndexManager, RangeOp};
 use crate::partial_index::{PartialIndexConfig, PartialIndexManager, PartialIndexStats};
 use crate::quantization::{QuantizationType, Quantizer};
-use crate::query::{Filter, OrderBy};
+use crate::query::{Filter, FilterOp, OrderBy};
 use crate::search::{HybridSearch, HybridSearchParams};
 use crate::storage::{disk, format::FileHeader, MemoryStorage, Storage};
 use crate::types::{Config, HybridSearchResult, Metadata, PagedResult, SearchResult, VectorId};
@@ -52,6 +54,12 @@ pub struct VectorDB {
     bm25_fields: Vec<String>,
     /// Gestor de índices parciales
     partial_indexes: PartialIndexManager,
+    /// Índices de metadata opt-in por campo (aceleran `$eq`/rangos). No se
+    /// persisten en `.mmdb` (v1): tras [`open`](VectorDB::open) hay que
+    /// recrearlos con [`create_metadata_index`](VectorDB::create_metadata_index)
+    /// (que indexa retroactivamente la metadata existente). Tampoco se
+    /// restauran solos vía [`open_with_wal`](VectorDB::open_with_wal).
+    metadata_indexes: MetadataIndexManager,
     /// Quantizer for vector compression (None when QuantizationType::None)
     quantizer: Option<Quantizer>,
     /// Write-Ahead Log para durabilidad por operación (None = sin WAL,
@@ -99,6 +107,7 @@ impl VectorDB {
             bm25_index: None,
             bm25_fields: Vec::new(),
             partial_indexes: PartialIndexManager::new(),
+            metadata_indexes: MetadataIndexManager::new(),
             quantizer,
             wal: None,
         })
@@ -134,6 +143,7 @@ impl VectorDB {
             bm25_index: Some(bm25_index),
             bm25_fields: indexed_fields,
             partial_indexes: PartialIndexManager::new(),
+            metadata_indexes: MetadataIndexManager::new(),
             quantizer,
             wal: None,
         })
@@ -214,6 +224,7 @@ impl VectorDB {
             bm25_index: None,
             bm25_fields: Vec::new(),
             partial_indexes: PartialIndexManager::new(),
+            metadata_indexes: MetadataIndexManager::new(),
             quantizer,
             wal: None,
         })
@@ -308,6 +319,7 @@ impl VectorDB {
             bm25_index: Some(bm25_index),
             bm25_fields: indexed_fields,
             partial_indexes: PartialIndexManager::new(),
+            metadata_indexes: MetadataIndexManager::new(),
             quantizer,
             wal: None,
         })
@@ -726,11 +738,27 @@ impl VectorDB {
             bm25.add(id, metadata.as_ref())?;
         }
 
+        // Mantener índices de metadata (sólo si hay alguno registrado: evita
+        // el write lock en el caso común sin índices).
+        if !self.metadata_indexes.is_empty() {
+            let id_vec: VectorId = id.to_string();
+            self.metadata_indexes.on_insert(&id_vec, metadata.as_ref());
+        }
+
         Ok(())
     }
 
     /// Borrado núcleo (sin WAL). Devuelve `true` si el documento existía.
     fn delete_inner(&self, id: &str) -> Result<bool> {
+        // Metadata vieja para los índices de metadata: se lee ANTES de mutar el
+        // storage, porque on_delete la necesita para desindexar por valor.
+        let md_idx_active = !self.metadata_indexes.is_empty();
+        let old_metadata = if md_idx_active {
+            self.storage.get(id)?.and_then(|d| d.metadata)
+        } else {
+            None
+        };
+
         let deleted = self.storage.delete(id)?;
         if deleted {
             self.index.remove(id)?;
@@ -740,6 +768,12 @@ impl VectorDB {
             }
             // Remover de índices parciales
             let _ = self.partial_indexes.on_delete(id);
+            // Desindexar de metadata con la metadata vieja (desindexación por
+            // valor, barata y con contadores exactos).
+            if md_idx_active {
+                let id_vec: VectorId = id.to_string();
+                self.metadata_indexes.on_delete(&id_vec, old_metadata.as_ref());
+            }
         }
         Ok(deleted)
     }
@@ -752,6 +786,10 @@ impl VectorDB {
             bm25.clear();
         }
         let _ = self.partial_indexes.clear_all();
+        // Vaciar buckets de metadata conservando los índices registrados.
+        if !self.metadata_indexes.is_empty() {
+            self.metadata_indexes.on_clear();
+        }
     }
 
     /// Append de una `WalOp` al WAL activo, si lo hay. No-op si el WAL no está
@@ -1009,6 +1047,150 @@ impl VectorDB {
     /// Retorna los campos indexados para BM25.
     pub fn bm25_fields(&self) -> &[String] {
         &self.bm25_fields
+    }
+
+    // ==================== ÍNDICES DE METADATA ====================
+
+    /// Crea un índice de metadata sobre `field` y lo popula **retroactivamente**
+    /// con toda la metadata existente en storage.
+    ///
+    /// Los índices de metadata aceleran las hojas `$eq` y de rango
+    /// (`$gt`/`$gte`/`$lt`/`$lte`) de [`Filter`] sobre el campo indexado: el
+    /// query planner poda el conjunto de candidatos con el índice y luego
+    /// re-evalúa el filtro completo (el índice nunca cambia resultados, sólo
+    /// acelera).
+    ///
+    /// # Retroactividad
+    ///
+    /// A diferencia de un bug anterior con los índices parciales, este método
+    /// indexa **después** la metadata de los documentos ya presentes (recorre
+    /// el storage y alimenta al índice con `on_insert`). Sin este paso, los
+    /// docs preexistentes quedarían fuera del índice y las consultas darían
+    /// resultados incompletos. Llamar a `create_metadata_index` basta para
+    /// indexar todo lo existente; no hay que reinsertar.
+    ///
+    /// # Persistencia (v1)
+    ///
+    /// Los índices de metadata **no se persisten** en `.mmdb` ni en el WAL:
+    /// tras [`open`](Self::open) / [`open_with_wal`](Self::open_with_wal) el
+    /// gestor arranca vacío y hay que recrearlos con este método (que indexa
+    /// retroactivamente la metadata cargada del snapshot/WAL). Es una llamada
+    /// por índice que se quiera mantener activo.
+    ///
+    /// # Errores
+    ///
+    /// - [`Error::AlreadyExists`] si ya existe un índice sobre `field`.
+    /// - Propaga cualquier error de registro del índice.
+    pub fn create_metadata_index(&self, field: &str) -> Result<()> {
+        self.metadata_indexes.create_index(field)?;
+        // Indexar retroactivamente toda la metadata existente. `on_insert` es
+        // infalible, así que no hay error que propagar aquí; el único punto de
+        // fallo (create_index) ya se ejecutó arriba con `?`.
+        for doc in self.storage.iter() {
+            self.metadata_indexes.on_insert(&doc.id, doc.metadata.as_ref());
+        }
+        Ok(())
+    }
+
+    /// Elimina el índice de metadata sobre `field`.
+    ///
+    /// Tras esto, las consultas sobre ese campo vuelven a resolverse por
+    /// full-scan (mismos resultados, sólo más lento).
+    ///
+    /// # Errores
+    ///
+    /// - [`Error::NotFound`] si no existe un índice sobre `field`.
+    pub fn drop_metadata_index(&self, field: &str) -> Result<()> {
+        self.metadata_indexes.drop_index(field)
+    }
+
+    /// Lista los campos con índice de metadata registrado, en orden
+    /// lexicográfico (determinista).
+    pub fn list_metadata_indexes(&self) -> Vec<String> {
+        self.metadata_indexes.list_indexes()
+    }
+
+    /// `true` si `field` tiene un índice de metadata registrado.
+    pub fn has_metadata_index(&self, field: &str) -> bool {
+        self.metadata_indexes.has_index(field)
+    }
+
+    // -------------------- Query planner --------------------
+
+    /// Planifica un [`Filter`] contra los índices de metadata y devuelve el
+    /// conjunto de ids candidatos, o `None` si no se puede podar.
+    ///
+    /// # Semántica
+    ///
+    /// - `None` ⇒ no hay forma de podar con los índices registrados (campo no
+    ///   indexado, operador no indexable en v1, o un `$or` con alguna rama no
+    ///   indexable). El caller hace full-scan y evalúa el filtro directo.
+    /// - `Some(set)` ⇒ el caller puede restringir el escaneo a los ids del set
+    ///   **y luego re-evaluar el filtro completo** sobre cada candidato. El set
+    ///   es siempre un superset de los ids que cumplen el filtro (regla de oro:
+    ///   el planner sólo poda, nunca decide resultados). `Some(vacío)` poda a
+    ///   cero.
+    ///
+    /// # Reglas
+    ///
+    /// - Hoja `$eq` sobre campo indexado → `candidates_eq`. Hojas de rango →
+    ///   `candidates_range` con el `RangeOp` correspondiente. Otros operadores
+    ///   (`$ne`, `$in`, `$nin`, `$exists`, `$contains`, `$starts_with`,
+    ///   `$ends_with`, `$regex`) → no indexables en v1.
+    /// - `$and` → intersección de las ramas indexables; las ramas `None` se
+    ///   verifican en la pasada final. Si ninguna rama es indexable → `None`.
+    ///   Un `$and` vacío (siempre verdadero) → `None`.
+    /// - `$or` → unión sólo si **todas** las ramas son indexables; si alguna es
+    ///   `None` → `None` (fallback a full-scan del `$or` completo). Un `$or`
+    ///   vacío (siempre verdadero) → `None`.
+    /// - `$not` → no indexable en v1 → `None`.
+    fn plan_filter_candidates(&self, filter: &Filter) -> Option<HashSet<VectorId>> {
+        match filter {
+            Filter::Condition { field, op } => self.plan_op_candidates(field, op),
+            Filter::And(parts) => {
+                // Intersección de las ramas indexables.
+                let mut acc: Option<HashSet<VectorId>> = None;
+                for part in parts {
+                    if let Some(set) = self.plan_filter_candidates(part) {
+                        acc = Some(match acc {
+                            None => set,
+                            Some(cur) => cur.intersection(&set).cloned().collect(),
+                        });
+                    }
+                }
+                acc
+            }
+            Filter::Or(parts) => {
+                // `$or` vacío = siempre verdadero: no se puede podar.
+                if parts.is_empty() {
+                    return None;
+                }
+                // Unión sólo si todas las ramas son indexables.
+                let mut acc: HashSet<VectorId> = HashSet::new();
+                for part in parts {
+                    match self.plan_filter_candidates(part) {
+                        Some(set) => acc.extend(set),
+                        None => return None,
+                    }
+                }
+                Some(acc)
+            }
+            Filter::Not(_) => None,
+        }
+    }
+
+    /// Candidatos de una hoja `Condition` según el operador.
+    fn plan_op_candidates(&self, field: &str, op: &FilterOp) -> Option<HashSet<VectorId>> {
+        match op {
+            FilterOp::Eq(v) => self.metadata_indexes.candidates_eq(field, v),
+            FilterOp::Gt(v) => self.metadata_indexes.candidates_range(field, RangeOp::Gt, v),
+            FilterOp::Gte(v) => self.metadata_indexes.candidates_range(field, RangeOp::Gte, v),
+            FilterOp::Lt(v) => self.metadata_indexes.candidates_range(field, RangeOp::Lt, v),
+            FilterOp::Lte(v) => self.metadata_indexes.candidates_range(field, RangeOp::Lte, v),
+            // $ne / $in / $nin / $exists / $contains / $starts_with /
+            // $ends_with / $regex: no indexables en v1.
+            _ => None,
+        }
     }
 
     // ==================== ÍNDICES PARCIALES ====================
@@ -1392,12 +1574,22 @@ impl VectorDB {
             crate::query::FilterEvaluator::validate(filter)?;
         }
 
-        HybridSearch::search(
+        // Query planner de índices de metadata: poda el conjunto de candidatos
+        // cuando hay índices registrados que cubren (parte de) el filtro. La
+        // verificación final del filtro se re-evalúa sobre cada candidato, así
+        // el índice sólo acelera, nunca cambia resultados.
+        let candidates = params
+            .filter
+            .as_ref()
+            .and_then(|f| self.plan_filter_candidates(f));
+
+        HybridSearch::search_with_candidates(
             &params,
             self.index.as_ref(),
             self.bm25_index.as_ref().map(|b| b.as_ref()),
             self.storage.as_ref(),
             self.config.distance,
+            candidates.as_ref(),
         )
     }
 
@@ -1563,18 +1755,30 @@ impl VectorDB {
             crate::query::FilterEvaluator::validate(f)?;
         }
 
+        // Query planner de índices de metadata: poda candidatos cuando hay
+        // índices que cubren (parte de) el filtro. El filtro se re-evalúa
+        // completo sobre cada candidato (el índice sólo acelera).
+        let candidates = filter.as_ref().and_then(|f| self.plan_filter_candidates(f));
+
         // Collect all matching documents
         let all: Vec<HybridSearchResult> = self
             .storage
             .iter()
             .filter(|doc| {
+                // Poda del planner: si hay candidatos, descartar los ids fuera
+                // del set (superset de los que cumplen el filtro completo).
+                if let Some(ref cands) = candidates {
+                    if !cands.contains(&doc.id) {
+                        return false;
+                    }
+                }
                 // Skip soft-deleted if metadata has deleted flag
                 if let Some(ref meta) = doc.metadata {
                     if let Some(crate::types::MetadataValue::Bool(true)) = meta.get("deleted") {
                         return false;
                     }
                 }
-                // Apply filter if provided
+                // Apply filter if provided (verificación final, siempre).
                 match &filter {
                     Some(f) => crate::query::FilterEvaluator::evaluate(f, doc.metadata.as_ref()),
                     None => true,

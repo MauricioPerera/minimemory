@@ -2,12 +2,14 @@
 //!
 //! Combina búsqueda vectorial, BM25 y filtros de metadata.
 
+use std::collections::HashSet;
+
 use crate::distance::Distance;
 use crate::error::{Error, Result};
 use crate::index::{BM25Index, Index};
 use crate::query::{compare_metadata_values, Filter, FilterEvaluator, OrderBy, SortDirection};
 use crate::storage::Storage;
-use crate::types::HybridSearchResult;
+use crate::types::{HybridSearchResult, VectorId};
 
 use super::rrf::{weighted_reciprocal_rank_fusion, RankedResult, DEFAULT_RRF_K};
 
@@ -20,6 +22,19 @@ fn is_soft_deleted(metadata: Option<&crate::types::Metadata>) -> bool {
         metadata.and_then(|m| m.get("deleted")),
         Some(crate::types::MetadataValue::Bool(true))
     )
+}
+
+/// `true` si `id` pasa el pre-filtro de candidatos del query planner.
+///
+/// `candidate_ids = None` ⇒ sin poda (todos pasan). `Some(set)` ⇒ sólo pasan
+/// los ids del set. El set es siempre un **superset** de los ids que cumplen
+/// el filtro completo (el planner sólo poda; la verificación final del filtro
+/// se re-evalúa sobre cada candidato), así omitir los que no están es seguro.
+fn passes_candidate_prune(id: &VectorId, candidate_ids: Option<&HashSet<VectorId>>) -> bool {
+    match candidate_ids {
+        None => true,
+        Some(set) => set.contains(id),
+    }
 }
 
 /// Tamaño inicial de fetch para el reintento incremental: el doble de lo
@@ -176,9 +191,31 @@ impl HybridSearch {
         storage: &dyn Storage,
         distance: Distance,
     ) -> Result<Vec<HybridSearchResult>> {
+        Self::search_with_candidates(params, vector_index, bm25_index, storage, distance, None)
+    }
+
+    /// Búsqueda híbrida con un conjunto de candidatos del query planner.
+    ///
+    /// Como [`search`](Self::search) pero recibiendo `candidate_ids` del
+    /// planner de índices de metadata: `None` desactiva la poda (comportamiento
+    /// idéntico a `search`); `Some(set)` restringe el escaneo a los ids del set
+    /// **sin cambiar resultados** — el filtro completo se re-evalúa sobre cada
+    /// candidato (regla de oro: el índice sólo acelera, nunca decide). Vía
+    /// [`VectorDB::hybrid_search`](crate::VectorDB::hybrid_search), que calcula
+    /// los candidatos cuando hay índices de metadata registrados.
+    pub fn search_with_candidates(
+        params: &HybridSearchParams,
+        vector_index: &dyn Index,
+        bm25_index: Option<&BM25Index>,
+        storage: &dyn Storage,
+        distance: Distance,
+        candidate_ids: Option<&HashSet<VectorId>>,
+    ) -> Result<Vec<HybridSearchResult>> {
         let mut results = match &params.mode {
-            SearchMode::Vector => Self::vector_search(params, vector_index, storage, distance)?,
-            SearchMode::Keyword => Self::keyword_search(params, bm25_index, storage)?,
+            SearchMode::Vector => {
+                Self::vector_search(params, vector_index, storage, distance, candidate_ids)?
+            }
+            SearchMode::Keyword => Self::keyword_search(params, bm25_index, storage, candidate_ids)?,
             SearchMode::Hybrid {
                 vector_weight,
                 keyword_weight,
@@ -190,8 +227,11 @@ impl HybridSearch {
                 distance,
                 *vector_weight,
                 *keyword_weight,
+                candidate_ids,
             )?,
-            SearchMode::FilterOnly => Self::filter_only_search(params, storage)?,
+            SearchMode::FilterOnly => {
+                Self::filter_only_search(params, storage, candidate_ids)?
+            }
         };
 
         // Soft-delete filtering se aplica en cada sub-método (junto al filtro
@@ -234,6 +274,7 @@ impl HybridSearch {
         index: &dyn Index,
         storage: &dyn Storage,
         distance: Distance,
+        candidate_ids: Option<&HashSet<VectorId>>,
     ) -> Result<Vec<HybridSearchResult>> {
         let query = params.vector.as_ref().ok_or_else(|| {
             Error::InvalidConfig("Vector query required for vector search".into())
@@ -249,24 +290,20 @@ impl HybridSearch {
         let target = if params.order_by.is_some() { index_len } else { need };
 
         // Reintento incremental: empieza con ~2*(k+offset) y duplica hasta
-        // tener `target` candidatos que califican (filtro + soft-delete) o
-        // hasta agotar el índice. El caso común (sin filtro/offset/soft-delete)
-        // resuelve en 1 fetch preservando ANN.
+        // tener `target` candidatos que califican (filtro + soft-delete + poda
+        // del planner) o hasta agotar el índice. El caso común (sin
+        // filtro/offset/soft-delete) resuelve en 1 fetch preservando ANN.
         let mut search_k = initial_fetch_k(need, index_len);
         loop {
             let results = index.search(query, search_k, storage, distance)?;
 
             let filtered: Vec<_> = results
                 .into_iter()
-                .filter(|r| {
-                    if is_soft_deleted(r.metadata.as_ref()) {
-                        return false;
-                    }
-                    if let Some(filter) = &params.filter {
-                        FilterEvaluator::evaluate(filter, r.metadata.as_ref())
-                    } else {
-                        true
-                    }
+                .filter(|r| passes_candidate_prune(&r.id, candidate_ids))
+                .filter(|r| !is_soft_deleted(r.metadata.as_ref()))
+                .filter(|r| match &params.filter {
+                    Some(filter) => FilterEvaluator::evaluate(filter, r.metadata.as_ref()),
+                    None => true,
                 })
                 .enumerate()
                 .map(|(rank, r)| HybridSearchResult {
@@ -291,6 +328,7 @@ impl HybridSearch {
         params: &HybridSearchParams,
         bm25_index: Option<&BM25Index>,
         storage: &dyn Storage,
+        candidate_ids: Option<&HashSet<VectorId>>,
     ) -> Result<Vec<HybridSearchResult>> {
         let query = params
             .text_query
@@ -314,6 +352,9 @@ impl HybridSearch {
             let mut hybrid_results = Vec::new();
             for (rank, result) in results.into_iter().enumerate() {
                 if let Ok(Some(doc)) = storage.get(&result.id) {
+                    if !passes_candidate_prune(&doc.id, candidate_ids) {
+                        continue;
+                    }
                     if is_soft_deleted(doc.metadata.as_ref()) {
                         continue;
                     }
@@ -324,7 +365,7 @@ impl HybridSearch {
                     }
 
                     hybrid_results.push(HybridSearchResult {
-                        id: result.id,
+                        id: doc.id,
                         score: -result.score, // Negativo para que menor = mejor (consistente con distance)
                         vector_distance: None,
                         bm25_score: Some(result.score),
@@ -350,11 +391,13 @@ impl HybridSearch {
         distance: Distance,
         vector_weight: f32,
         keyword_weight: f32,
+        candidate_ids: Option<&HashSet<VectorId>>,
     ) -> Result<Vec<HybridSearchResult>> {
         // Reintento incremental sobre ambos índices: se duplica fetch_k hasta
-        // que los candidatos que califican (filtro + soft-delete) tras el RRF
-        // alcancen `target`, o hasta cubrir ambos índices. El caso común
-        // (sin filtro/offset/soft-delete) resuelve en 1 fetch preservando ANN.
+        // que los candidatos que califican (filtro + soft-delete + poda del
+        // planner) tras el RRF alcancen `target`, o hasta cubrir ambos índices.
+        // El caso común (sin filtro/offset/soft-delete) resuelve en 1 fetch
+        // preservando ANN.
         let need = params.k.saturating_add(params.offset);
         if need == 0 {
             return Ok(vec![]);
@@ -375,6 +418,7 @@ impl HybridSearch {
                 vector_weight,
                 keyword_weight,
                 fetch_k,
+                candidate_ids,
             )?;
 
             if final_results.len() >= target || fetch_k >= ceiling {
@@ -385,8 +429,9 @@ impl HybridSearch {
     }
 
     /// Una ronda de búsqueda híbrida con un `fetch_k` dado: obtiene
-    /// `fetch_k` candidatos de cada índice, aplica RRF y filtra por metadata
-    /// y soft-delete. Devuelve los candidatos que califican, sin truncar.
+    /// `fetch_k` candidatos de cada índice, aplica RRF y filtra por metadata,
+    /// soft-delete y la poda del planner. Devuelve los candidatos que
+    /// califican, sin truncar.
     fn hybrid_fetch(
         params: &HybridSearchParams,
         vector_index: &dyn Index,
@@ -396,6 +441,7 @@ impl HybridSearch {
         vector_weight: f32,
         keyword_weight: f32,
         fetch_k: usize,
+        candidate_ids: Option<&HashSet<VectorId>>,
     ) -> Result<Vec<HybridSearchResult>> {
         // Vector search
         let vector_results = if let Some(query) = &params.vector {
@@ -453,6 +499,9 @@ impl HybridSearch {
         let mut final_results = Vec::new();
         for (id, rrf_score) in rrf_results {
             if let Ok(Some(doc)) = storage.get(&id) {
+                if !passes_candidate_prune(&doc.id, candidate_ids) {
+                    continue;
+                }
                 if is_soft_deleted(doc.metadata.as_ref()) {
                     continue;
                 }
@@ -490,6 +539,7 @@ impl HybridSearch {
     fn filter_only_search(
         params: &HybridSearchParams,
         storage: &dyn Storage,
+        candidate_ids: Option<&HashSet<VectorId>>,
     ) -> Result<Vec<HybridSearchResult>> {
         let filter = params
             .filter
@@ -503,6 +553,7 @@ impl HybridSearch {
 
         let results: Vec<_> = storage
             .iter()
+            .filter(|doc| passes_candidate_prune(&doc.id, candidate_ids))
             .filter(|doc| !is_soft_deleted(doc.metadata.as_ref()))
             .filter(|doc| FilterEvaluator::evaluate(filter, doc.metadata.as_ref()))
             .take(take_limit)

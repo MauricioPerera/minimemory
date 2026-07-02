@@ -2894,3 +2894,459 @@ mod wal_integration {
         cleanup(&[snap]);
     }
 }
+
+// ============================================================================
+// Índices de metadata + query planner
+// ============================================================================
+
+mod metadata_indexes {
+    use super::*;
+    use minimemory::{Filter, MetadataValue, OrderBy};
+    use std::collections::HashSet;
+
+    fn mk_meta(i: usize) -> Metadata {
+        let mut m = Metadata::new();
+        let cats = ["tech", "news", "sports", "food"];
+        m.insert("cat", cats[i % 4]);
+        m.insert("n", i as i64);
+        m.insert("score", (i as f64) / 10.0);
+        m.insert("active", i % 2 == 0);
+        m.insert(
+            "tag_list",
+            MetadataValue::List(vec![
+                MetadataValue::String(format!("t{}", i % 5)),
+                MetadataValue::String("rust".into()),
+            ]),
+        );
+        m
+    }
+
+    fn build_db() -> VectorDB {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        for i in 0..200 {
+            let v = [i as f32, 0.0, 0.0];
+            db.insert(format!("d{}", i), &v, Some(mk_meta(i)))
+                .unwrap();
+        }
+        db
+    }
+
+    fn filter_ids(db: &VectorDB, filter: Filter) -> HashSet<String> {
+        db.filter_search(filter, 10_000)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    fn list_ids(db: &VectorDB, filter: Option<Filter>) -> HashSet<String> {
+        db.list_documents(filter, None, 10_000, 0)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    /// Batería de filtros que cubre hojas indexables y no indexables, `$and`,
+    /// `$or`, `$not`, anidados, campos mixtos indexados y no indexados, y los
+    /// casos vacíos de `$and`/`$or`.
+    fn filter_battery() -> Vec<(&'static str, Filter)> {
+        vec![
+            ("eq_str_indexed", Filter::eq("cat", "tech")),
+            ("eq_str_empty", Filter::eq("cat", "missing")),
+            ("eq_int_indexed", Filter::eq("n", 5i64)),
+            ("eq_bool_indexed", Filter::eq("active", true)),
+            ("eq_float_none", Filter::eq("score", 5.0f64)),
+            ("gt_int", Filter::gt("n", 50i64)),
+            ("gte_int", Filter::gte("n", 50i64)),
+            ("lt_int", Filter::lt("n", 50i64)),
+            ("lte_int", Filter::lte("n", 50i64)),
+            ("gt_float", Filter::gt("score", 5.0f64)),
+            ("lte_float", Filter::lte("score", 13.0f64)),
+            ("range_int", Filter::range("n", Some(10i64), Some(20i64))),
+            ("range_float", Filter::range("score", Some(3.0f64), Some(7.0f64))),
+            (
+                "and_both_indexed",
+                Filter::eq("cat", "tech").and(Filter::gte("n", 50i64)),
+            ),
+            (
+                "and_indexed_and_none",
+                Filter::eq("cat", "tech")
+                    .and(Filter::contains("cat", "tec"))
+                    .and(Filter::gte("n", 10i64)),
+            ),
+            (
+                "and_three_nested",
+                Filter::all(vec![
+                    Filter::gte("n", 10i64),
+                    Filter::lte("n", 20i64),
+                    Filter::eq("active", true),
+                ]),
+            ),
+            (
+                "or_both_indexed",
+                Filter::any(vec![Filter::eq("cat", "tech"), Filter::eq("cat", "news")]),
+            ),
+            (
+                "or_with_none_branch",
+                Filter::any(vec![
+                    Filter::eq("cat", "tech"),
+                    Filter::contains("cat", "foo"),
+                ]),
+            ),
+            (
+                "or_range_and_eq",
+                Filter::any(vec![Filter::eq("n", 5i64), Filter::gt("score", 19.0f64)]),
+            ),
+            ("not_eq", Filter::not(Filter::eq("cat", "tech"))),
+            ("ne_operator", Filter::ne("cat", "tech")),
+            ("exists_cat", Filter::exists("cat")),
+            ("not_exists_missing", Filter::not_exists("nope")),
+            ("in_list_op", Filter::in_list("cat", vec!["tech", "news"])),
+            ("eq_list_field_none", Filter::eq("tag_list", "rust")),
+            ("empty_or_all", Filter::any(vec![])),
+            ("empty_and_all", Filter::all(vec![])),
+            (
+                "and_or_nested",
+                Filter::all(vec![
+                    Filter::any(vec![Filter::eq("cat", "tech"), Filter::eq("cat", "news")]),
+                    Filter::lt("n", 30i64),
+                ]),
+            ),
+        ]
+    }
+
+    /// Equivalencia EXHAUSTIVA: con y sin índices creados, los mismos datos y
+    /// los mismos filtros deben devolver exactamente el mismo set de ids, tanto
+    /// por `filter_search` como por `list_documents`.
+    #[test]
+    fn full_equivalence_with_and_without_index() {
+        let db = build_db();
+
+        // Baseline: sin índices (full-scan). El planner devuelve None para todo.
+        let mut baseline_filter: Vec<(&'static str, HashSet<String>)> = vec![];
+        let mut baseline_list: Vec<(&'static str, HashSet<String>)> = vec![];
+        for (name, f) in filter_battery() {
+            baseline_filter.push((name, filter_ids(&db, f.clone())));
+            baseline_list.push((name, list_ids(&db, Some(f.clone()))));
+        }
+
+        // Crear índices sobre campos string/int/float/bool (no sobre List).
+        db.create_metadata_index("cat").unwrap();
+        db.create_metadata_index("n").unwrap();
+        db.create_metadata_index("score").unwrap();
+        db.create_metadata_index("active").unwrap();
+        assert_eq!(
+            db.list_metadata_indexes(),
+            vec!["active", "cat", "n", "score"]
+        );
+
+        // Mismos filtros con índices activos: resultados idénticos.
+        for (i, (name, f)) in filter_battery().iter().enumerate() {
+            let got = filter_ids(&db, f.clone());
+            assert_eq!(got, baseline_filter[i].1, "filter_search mismatch: {}", name);
+            let got_list = list_ids(&db, Some(f.clone()));
+            assert_eq!(got_list, baseline_list[i].1, "list_documents mismatch: {}", name);
+        }
+    }
+
+    /// Equivalencia también en la ruta vectorial con filtro (`search_with_filter`):
+    /// el pre-filtro del planner no debe cambiar el set de resultados.
+    #[test]
+    fn search_with_filter_equivalence() {
+        let db_no_idx = build_db();
+        let db_idx = build_db();
+        db_idx.create_metadata_index("cat").unwrap();
+        db_idx.create_metadata_index("n").unwrap();
+
+        let q = &[100.0f32, 0.0, 0.0];
+        let filters = vec![
+            Filter::eq("cat", "tech"),
+            Filter::gte("n", 150i64),
+            Filter::eq("cat", "tech").and(Filter::gte("n", 100i64)),
+            Filter::any(vec![Filter::eq("cat", "tech"), Filter::eq("cat", "news")]),
+        ];
+
+        for f in filters {
+            let a: HashSet<String> = db_no_idx
+                .search_with_filter(q, 500, f.clone())
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            let b: HashSet<String> = db_idx
+                .search_with_filter(q, 500, f)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(a, b);
+        }
+    }
+
+    /// `create_metadata_index` indexa retroactivamente: crear el índice DESPUÉS
+    /// de insertar sigue devolviendo los filtros correctos.
+    #[test]
+    fn create_index_retroactive_after_inserts() {
+        let db = build_db();
+        // Sin índice: full-scan.
+        let baseline_eq = filter_ids(&db, Filter::eq("cat", "tech"));
+        let baseline_range = filter_ids(&db, Filter::gte("n", 100i64));
+        assert!(!baseline_eq.is_empty());
+        assert!(!baseline_range.is_empty());
+
+        // Crear los índices después de los inserts → deben indexar lo existente.
+        db.create_metadata_index("cat").unwrap();
+        db.create_metadata_index("n").unwrap();
+        assert_eq!(filter_ids(&db, Filter::eq("cat", "tech")), baseline_eq);
+        assert_eq!(filter_ids(&db, Filter::gte("n", 100i64)), baseline_range);
+    }
+
+    /// Mantenimiento: update/delete/clear mantienen el índice coherente.
+    #[test]
+    fn maintenance_update_delete_clear() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        db.create_metadata_index("cat").unwrap();
+
+        let mk = |c: &str| {
+            let mut m = Metadata::new();
+            m.insert("cat", c);
+            m
+        };
+
+        db.insert("d1", &[1.0, 0.0, 0.0], Some(mk("a"))).unwrap();
+        db.insert("d2", &[0.0, 1.0, 0.0], Some(mk("b"))).unwrap();
+
+        // Update cambia el valor de un campo indexado → el filtro refleja el
+        // valor nuevo, no el viejo.
+        db.update("d1", &[1.0, 0.0, 0.0], Some(mk("c"))).unwrap();
+        assert!(filter_ids(&db, Filter::eq("cat", "a")).is_empty());
+        assert_eq!(filter_ids(&db, Filter::eq("cat", "c")), HashSet::from(["d1".into()]));
+
+        // Delete saca el documento del índice.
+        db.delete("d2").unwrap();
+        assert!(filter_ids(&db, Filter::eq("cat", "b")).is_empty());
+        assert_eq!(filter_ids(&db, Filter::eq("cat", "c")), HashSet::from(["d1".into()]));
+
+        // Clear vacía los buckets pero conserva el registro del índice.
+        db.clear();
+        assert!(filter_ids(&db, Filter::eq("cat", "c")).is_empty());
+        assert_eq!(db.list_metadata_indexes(), vec!["cat"]);
+
+        // Tras clear, inserciones futuras vuelven a poblar el índice.
+        db.insert("d3", &[0.0, 0.0, 1.0], Some(mk("a"))).unwrap();
+        assert_eq!(filter_ids(&db, Filter::eq("cat", "a")), HashSet::from(["d3".into()]));
+    }
+
+    /// `update_document` (metadata-only, sin vector) también mantiene el índice.
+    #[test]
+    fn maintenance_update_document_metadata_only() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        db.create_metadata_index("cat").unwrap();
+        let mk = |c: &str| {
+            let mut m = Metadata::new();
+            m.insert("cat", c);
+            m
+        };
+        db.insert_document("d1", None, Some(mk("a"))).unwrap();
+        db.update_document("d1", None, Some(mk("z"))).unwrap();
+        assert!(filter_ids(&db, Filter::eq("cat", "a")).is_empty());
+        assert_eq!(filter_ids(&db, Filter::eq("cat", "z")), HashSet::from(["d1".into()]));
+    }
+
+    /// `drop_metadata_index` → las consultas siguen correctas por full-scan
+    /// (mismos resultados que con índice).
+    #[test]
+    fn drop_index_falls_back_to_full_scan_same_results() {
+        let db = build_db();
+        db.create_metadata_index("cat").unwrap();
+        db.create_metadata_index("n").unwrap();
+
+        let with_idx_cat = filter_ids(&db, Filter::eq("cat", "tech"));
+        let with_idx_range = filter_ids(&db, Filter::gte("n", 100i64));
+
+        db.drop_metadata_index("cat").unwrap();
+        db.drop_metadata_index("n").unwrap();
+        assert!(db.list_metadata_indexes().is_empty());
+
+        // Sin índices: full-scan, mismos resultados.
+        assert_eq!(filter_ids(&db, Filter::eq("cat", "tech")), with_idx_cat);
+        assert_eq!(filter_ids(&db, Filter::gte("n", 100i64)), with_idx_range);
+
+        // Drop inexistente → NotFound.
+        assert!(db.drop_metadata_index("cat").is_err());
+    }
+
+    /// `$or` con una rama no indexable (`$contains`) → fallback a full-scan del
+    /// `$or` completo, resultado correcto.
+    #[test]
+    fn or_with_non_indexable_branch_correct() {
+        let db = build_db();
+        let baseline = filter_ids(&db, Filter::any(vec![
+            Filter::eq("cat", "tech"),
+            Filter::contains("cat", "foo"),
+        ]));
+        db.create_metadata_index("cat").unwrap();
+        let with_idx = filter_ids(&db, Filter::any(vec![
+            Filter::eq("cat", "tech"),
+            Filter::contains("cat", "foo"),
+        ]));
+        assert_eq!(baseline, with_idx);
+        // "tech" contiene "tec": rama eq + rama contains(tec) → todos los tech.
+        let both = filter_ids(&db, Filter::any(vec![
+            Filter::eq("cat", "tech"),
+            Filter::contains("cat", "tec"),
+        ]));
+        assert_eq!(both, filter_ids(&db, Filter::eq("cat", "tech")));
+    }
+
+    /// `$or` con una rama sobre campo NO indexado (campo sin índice) → fallback
+    /// correcto, mismo resultado que sin índices.
+    #[test]
+    fn or_branch_on_unindexed_field_falls_back() {
+        let db = build_db();
+        let baseline = filter_ids(
+            &db,
+            Filter::any(vec![Filter::eq("cat", "tech"), Filter::eq("active", true)]),
+        );
+        // Sólo "cat" indexado: la rama "active" no es indexable → None → fallback.
+        db.create_metadata_index("cat").unwrap();
+        let with_idx = filter_ids(
+            &db,
+            Filter::any(vec![Filter::eq("cat", "tech"), Filter::eq("active", true)]),
+        );
+        assert_eq!(baseline, with_idx);
+    }
+
+    /// `$and` con una rama indexada y otra no indexable: poda con la rama
+    /// indexada y verificación final → mismo resultado que full-scan.
+    #[test]
+    fn and_indexed_and_unindexed_branch() {
+        let db = build_db();
+        let baseline = filter_ids(
+            &db,
+            Filter::eq("cat", "tech").and(Filter::contains("cat", "ec")),
+        );
+        db.create_metadata_index("cat").unwrap();
+        let with_idx = filter_ids(
+            &db,
+            Filter::eq("cat", "tech").and(Filter::contains("cat", "ec")),
+        );
+        assert_eq!(baseline, with_idx);
+    }
+
+    /// `Some(empty)` del planner poda a cero: `$and` de dos hojas indexadas con
+    /// conjuntos disjuntos → 0 resultados, igual que full-scan.
+    #[test]
+    fn and_disjoint_indexed_leaves_prunes_to_zero() {
+        let db = build_db();
+        // n == 5 (un doc) AND n == 6 (otro doc) → imposible → 0.
+        let f = Filter::all(vec![Filter::eq("n", 5i64), Filter::eq("n", 6i64)]);
+        let baseline = filter_ids(&db, f.clone());
+        assert!(baseline.is_empty());
+        db.create_metadata_index("n").unwrap();
+        assert_eq!(filter_ids(&db, f), HashSet::<String>::new());
+    }
+
+    /// `filter_search_ordered` (ORDER BY + filter) también se beneficia y
+    /// coincide sin índice.
+    #[test]
+    fn filter_search_ordered_equivalence() {
+        let db = build_db();
+        let baseline: HashSet<String> = db
+            .filter_search_ordered(
+                Filter::eq("cat", "tech"),
+                OrderBy::desc("n"),
+                10_000,
+                0,
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        db.create_metadata_index("cat").unwrap();
+        db.create_metadata_index("n").unwrap();
+        let with_idx: HashSet<String> = db
+            .filter_search_ordered(
+                Filter::eq("cat", "tech"),
+                OrderBy::desc("n"),
+                10_000,
+                0,
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(baseline, with_idx);
+    }
+
+    /// `list_documents` con ORDER BY + filtro + offset: el planner no rompe la
+    /// paginación ni el orden.
+    #[test]
+    fn list_documents_ordered_paged_equivalence() {
+        let db = build_db();
+        let baseline: Vec<String> = db
+            .list_documents(Some(Filter::gte("n", 100i64)), Some(OrderBy::asc("n")), 10, 5)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        db.create_metadata_index("n").unwrap();
+        let with_idx: Vec<String> = db
+            .list_documents(Some(Filter::gte("n", 100i64)), Some(OrderBy::asc("n")), 10, 5)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(baseline, with_idx);
+    }
+
+    /// Casos vacíos: `$and` vacío y `$or` vacío son "siempre verdadero" → el
+    /// planner devuelve None (no poda) y se devuelven todos los docs.
+    #[test]
+    fn empty_and_or_return_all_docs() {
+        let db = build_db();
+        let all: HashSet<String> = (0..200).map(|i| format!("d{}", i)).collect();
+        db.create_metadata_index("cat").unwrap();
+        assert_eq!(filter_ids(&db, Filter::all(vec![])), all);
+        assert_eq!(filter_ids(&db, Filter::any(vec![])), all);
+        assert_eq!(list_ids(&db, Some(Filter::all(vec![]))), all);
+    }
+
+    /// `has_metadata_index` refleja el registro.
+    #[test]
+    fn has_and_list_metadata_index() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        assert!(db.list_metadata_indexes().is_empty());
+        db.create_metadata_index("a").unwrap();
+        db.create_metadata_index("b").unwrap();
+        assert!(db.has_metadata_index("a"));
+        assert!(!db.has_metadata_index("z"));
+        assert_eq!(db.list_metadata_indexes(), vec!["a", "b"]);
+    }
+
+    /// Crear un índice duplicado → AlreadyExists.
+    #[test]
+    fn create_duplicate_is_error() {
+        let db = VectorDB::new(Config::new(3)).unwrap();
+        db.create_metadata_index("cat").unwrap();
+        assert!(db.create_metadata_index("cat").is_err());
+    }
+
+    /// Un índice creado sobre un campo cuyos valores son List/Map (no
+    /// indexables) no rompe nada: las consultas caen a None/full-scan.
+    #[test]
+    fn index_on_list_field_falls_back() {
+        let db = build_db();
+        db.create_metadata_index("tag_list").unwrap();
+        // eq sobre List → candidates_eq devuelve None → full-scan.
+        let baseline = filter_ids(&db, Filter::eq("tag_list", "rust"));
+        // mismo resultado (vacío: List nunca es igual a un String).
+        assert!(baseline.is_empty());
+    }
+}

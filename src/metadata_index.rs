@@ -372,6 +372,16 @@ impl MetadataIndexManager {
         self.fields.read().contains_key(field)
     }
 
+    /// `true` si no hay ningún índice registrado.
+    ///
+    /// Helper barato (sin ordenar) para que el integrador evite tomar el write
+    /// lock de `on_insert`/`on_delete`/`on_clear` en el caso común en que no hay
+    /// índices — relevante porque esas llamadas viven en el hot path de
+    /// inserción/borrado de `VectorDB`.
+    pub fn is_empty(&self) -> bool {
+        self.fields.read().is_empty()
+    }
+
     /// Notifica la inserción de un documento: indexa `id` bajo los campos
     /// indexados presentes en `metadata`.
     pub fn on_insert(&self, id: &VectorId, metadata: Option<&Metadata>) {
