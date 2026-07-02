@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 use crate::distance::Distance;
 use crate::error::{Error, Result};
 use crate::index::{BM25Index, FlatIndex, HNSWIndex, IVFIndex, Index, IndexType};
@@ -12,6 +14,7 @@ use crate::query::{Filter, OrderBy};
 use crate::search::{HybridSearch, HybridSearchParams};
 use crate::storage::{disk, format::FileHeader, MemoryStorage, Storage};
 use crate::types::{Config, HybridSearchResult, Metadata, PagedResult, SearchResult, VectorId};
+use crate::wal::{WalConfig, WalOp, WalWriter};
 
 /// Base de datos vectorial embebida.
 ///
@@ -51,6 +54,13 @@ pub struct VectorDB {
     partial_indexes: PartialIndexManager,
     /// Quantizer for vector compression (None when QuantizationType::None)
     quantizer: Option<Quantizer>,
+    /// Write-Ahead Log para durabilidad por operación (None = sin WAL,
+    /// comportamiento idéntico a antes de la integración).
+    ///
+    /// `Mutex` da interior mutabilidad: las mutaciones (`&self`) appendean sin
+    /// necesidad de `&mut self`. Se inicializa en `None` y se activa con
+    /// [`enable_wal`] / [`enable_wal_with`] / [`open_with_wal`] / [`new_with_wal`].
+    wal: Option<Mutex<WalWriter>>,
 }
 
 impl VectorDB {
@@ -90,6 +100,7 @@ impl VectorDB {
             bm25_fields: Vec::new(),
             partial_indexes: PartialIndexManager::new(),
             quantizer,
+            wal: None,
         })
     }
 
@@ -124,6 +135,7 @@ impl VectorDB {
             bm25_fields: indexed_fields,
             partial_indexes: PartialIndexManager::new(),
             quantizer,
+            wal: None,
         })
     }
 
@@ -203,6 +215,7 @@ impl VectorDB {
             bm25_fields: Vec::new(),
             partial_indexes: PartialIndexManager::new(),
             quantizer,
+            wal: None,
         })
     }
 
@@ -296,6 +309,7 @@ impl VectorDB {
             bm25_fields: indexed_fields,
             partial_indexes: PartialIndexManager::new(),
             quantizer,
+            wal: None,
         })
     }
 
@@ -360,41 +374,17 @@ impl VectorDB {
     ) -> Result<()> {
         let id = id.into();
 
-        if vector.len() != self.config.dimensions {
-            return Err(Error::DimensionMismatch {
-                expected: self.config.dimensions,
-                got: vector.len(),
-            });
-        }
-        Self::validate_vector(vector)?;
+        self.insert_document_inner(&id, Some(vector), &metadata)?;
 
-        if self.storage.contains(&id) {
-            return Err(Error::AlreadyExists(id));
-        }
-
-        // Store quantized or full vector
-        if let Some(ref quantizer) = self.quantizer {
-            let qvec = quantizer.quantize(vector)?;
-            self.storage
-                .insert_quantized(id.clone(), qvec, metadata.clone())?;
-        } else {
-            self.storage
-                .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        }
-
-        // Index always uses f32 for graph construction (HNSW needs precise distances)
-        self.index
-            .add(&id, vector, &*self.storage, self.config.distance)?;
-
-        // Indexar en BM25 si está habilitado
-        if let Some(ref bm25) = self.bm25_index {
-            bm25.add(&id, metadata.as_ref())?;
-        }
-
-        // Añadir a índices parciales que coincidan
-        let _ = self
-            .partial_indexes
-            .on_insert(&id, vector, metadata.as_ref());
+        // Durabilidad: append al WAL tras mutar la memoria. Si el append falla
+        // (disco lleno, etc.) la memoria YA fue mutada — el crate no es
+        // transaccional, así que el error se propaga pero el cambio queda
+        // (best-effort, coherente con la no-transaccionalidad documentada).
+        self.append_wal(WalOp::Insert {
+            id,
+            vector: Some(vector.to_vec()),
+            metadata,
+        })?;
 
         Ok(())
     }
@@ -439,44 +429,14 @@ impl VectorDB {
     ) -> Result<()> {
         let id = id.into();
 
-        // Validar dimensiones si hay vector
-        if let Some(vec) = vector {
-            if vec.len() != self.config.dimensions {
-                return Err(Error::DimensionMismatch {
-                    expected: self.config.dimensions,
-                    got: vec.len(),
-                });
-            }
-            Self::validate_vector(vec)?;
-        }
+        self.insert_document_inner(&id, vector, &metadata)?;
 
-        if self.storage.contains(&id) {
-            return Err(Error::AlreadyExists(id));
-        }
-
-        // Store with quantization if vector present and quantizer active
-        if let (Some(vec), Some(ref quantizer)) = (vector, &self.quantizer) {
-            let qvec = quantizer.quantize(vec)?;
-            self.storage
-                .insert_quantized(id.clone(), qvec, metadata.clone())?;
-        } else {
-            let vec_data = vector.map(|v| v.to_vec());
-            self.storage
-                .insert(id.clone(), vec_data, metadata.clone())?;
-        }
-
-        // Solo indexar en índice vectorial si hay vector
-        if let Some(vec) = vector {
-            self.index
-                .add(&id, vec, &*self.storage, self.config.distance)?;
-            // Añadir a índices parciales que coincidan
-            let _ = self.partial_indexes.on_insert(&id, vec, metadata.as_ref());
-        }
-
-        // Indexar en BM25 si está habilitado
-        if let Some(ref bm25) = self.bm25_index {
-            bm25.add(&id, metadata.as_ref())?;
-        }
+        // Durabilidad: ver `insert` para la semántica de fallo del append.
+        self.append_wal(WalOp::Insert {
+            id,
+            vector: vector.map(|v| v.to_vec()),
+            metadata,
+        })?;
 
         Ok(())
     }
@@ -574,16 +534,19 @@ impl VectorDB {
     /// # Retorna
     ///
     /// `true` si el vector existía y fue eliminado, `false` si no existía.
+    ///
+    /// # WAL
+    ///
+    /// Solo se appendea `WalOp::Delete` si el documento existía (borrado real).
+    /// Un `delete` sobre un ID inexistente no muta nada y no genera entrada de
+    /// WAL. Si el append falla tras un borrado exitoso, se propaga el error: la
+    /// memoria ya mutó (best-effort, ver `insert`).
     pub fn delete(&self, id: &str) -> Result<bool> {
-        let deleted = self.storage.delete(id)?;
+        let deleted = self.delete_inner(id)?;
         if deleted {
-            self.index.remove(id)?;
-            // Remover de BM25 si está habilitado
-            if let Some(ref bm25) = self.bm25_index {
-                bm25.remove(id)?;
-            }
-            // Remover de índices parciales
-            let _ = self.partial_indexes.on_delete(id);
+            self.append_wal(WalOp::Delete {
+                id: id.to_string(),
+            })?;
         }
         Ok(deleted)
     }
@@ -605,6 +568,8 @@ impl VectorDB {
     ) -> Result<()> {
         let id = id.into();
 
+        // Validar antes de mutar: si las dimensiones no cuadran, no tocamos el
+        // documento existente.
         if vector.len() != self.config.dimensions {
             return Err(Error::DimensionMismatch {
                 expected: self.config.dimensions,
@@ -613,34 +578,16 @@ impl VectorDB {
         }
         Self::validate_vector(vector)?;
 
-        // Step 1: Update storage in-place (overwrite, no gap)
-        // First delete old entry, then immediately insert new one
-        self.storage.delete(&id)?;
-        if let Some(ref quantizer) = self.quantizer {
-            let qvec = quantizer.quantize(vector)?;
-            self.storage
-                .insert_quantized(id.clone(), qvec, metadata.clone())?;
-        } else {
-            self.storage
-                .insert(id.clone(), Some(vector.to_vec()), metadata.clone())?;
-        }
+        // Upsert idempotente sin loggear dos veces (delete + insert internos),
+        // luego una sola `WalOp::Update`.
+        self.delete_inner(&id)?;
+        self.insert_document_inner(&id, Some(vector), &metadata)?;
 
-        // Step 2: Update index (remove old, add new)
-        self.index.remove(&id)?;
-        self.index
-            .add(&id, vector, &*self.storage, self.config.distance)?;
-
-        // Step 3: Update BM25
-        if let Some(ref bm25) = self.bm25_index {
-            bm25.remove(&id)?;
-            bm25.add(&id, metadata.as_ref())?;
-        }
-
-        // Step 4: Update partial indexes
-        let _ = self.partial_indexes.on_delete(&id);
-        let _ = self
-            .partial_indexes
-            .on_insert(&id, vector, metadata.as_ref());
+        self.append_wal(WalOp::Update {
+            id,
+            vector: Some(vector.to_vec()),
+            metadata,
+        })?;
 
         Ok(())
     }
@@ -660,6 +607,7 @@ impl VectorDB {
     ) -> Result<()> {
         let id = id.into();
 
+        // Validar antes de mutar.
         if let Some(vec) = vector {
             if vec.len() != self.config.dimensions {
                 return Err(Error::DimensionMismatch {
@@ -670,8 +618,17 @@ impl VectorDB {
             Self::validate_vector(vec)?;
         }
 
-        self.delete(&id)?;
-        self.insert_document(id, vector, metadata)
+        // Upsert idempotente (delete + insert internos) + una sola WalOp::Update.
+        self.delete_inner(&id)?;
+        self.insert_document_inner(&id, vector, &metadata)?;
+
+        self.append_wal(WalOp::Update {
+            id,
+            vector: vector.map(|v| v.to_vec()),
+            metadata,
+        })?;
+
+        Ok(())
     }
 
     /// Verifica si un vector existe en la base de datos.
@@ -695,13 +652,158 @@ impl VectorDB {
     }
 
     /// Elimina todos los vectores de la base de datos.
+    ///
+    /// # WAL
+    ///
+    /// Appendea `WalOp::Clear` si el WAL está activo. A diferencia del resto de
+    /// mutaciones, `clear` es infalible (no retorna `Result`) por contrato
+    /// público histórico, así que un fallo del append **no se puede propagar**:
+    /// se ignora silenciosamente. Es la única excepción al patrón "append falla
+    /// ⇒ error" del resto de la API, impuesta por la firma existente. En la
+    /// práctica el append sólo falla por I/O de disco y `clear` ya dejó la
+    /// memoria vacía; el siguiente `open_with_wal` reconstruirá desde el
+    /// snapshot + las ops posteriores al último checkpoint.
     pub fn clear(&self) {
+        self.clear_inner();
+        let _ = self.append_wal(WalOp::Clear);
+    }
+
+    // -----------------------------------------------------------------------
+    // Núcleo interno de mutación (sin WAL).
+    //
+    // Estos helpers hacen exactamente el trabajo de storage/índice/BM25/parciales
+    // que hacían los métodos públicos antes de la integración, sin tocar el WAL.
+    // Los métodos públicos los llaman y luego appendean la `WalOp` que corresponde;
+    // el replay los llama directamente (sin loggear, porque está leyendo DEL log).
+    // -----------------------------------------------------------------------
+
+    /// Inserción núcleo (sin WAL). Valida dimensiones/finitud, rechaza
+    /// `AlreadyExists`, cuantiza si hay quantizer, e indexa en vectorial/BM25/
+    /// parciales. `metadata` se pasa por referencia para que el llamador pueda
+    /// además moverlo a la `WalOp`.
+    fn insert_document_inner(
+        &self,
+        id: &str,
+        vector: Option<&[f32]>,
+        metadata: &Option<Metadata>,
+    ) -> Result<()> {
+        // Validar dimensiones si hay vector
+        if let Some(vec) = vector {
+            if vec.len() != self.config.dimensions {
+                return Err(Error::DimensionMismatch {
+                    expected: self.config.dimensions,
+                    got: vec.len(),
+                });
+            }
+            Self::validate_vector(vec)?;
+        }
+
+        if self.storage.contains(id) {
+            return Err(Error::AlreadyExists(id.to_string()));
+        }
+
+        // Store with quantization if vector present and quantizer active
+        if let (Some(vec), Some(ref quantizer)) = (vector, &self.quantizer) {
+            let qvec = quantizer.quantize(vec)?;
+            self.storage
+                .insert_quantized(id.to_string(), qvec, metadata.clone())?;
+        } else {
+            let vec_data = vector.map(|v| v.to_vec());
+            self.storage
+                .insert(id.to_string(), vec_data, metadata.clone())?;
+        }
+
+        // Solo indexar en índice vectorial si hay vector
+        if let Some(vec) = vector {
+            self.index
+                .add(id, vec, &*self.storage, self.config.distance)?;
+            // Añadir a índices parciales que coincidan
+            let _ = self.partial_indexes.on_insert(id, vec, metadata.as_ref());
+        }
+
+        // Indexar en BM25 si está habilitado
+        if let Some(ref bm25) = self.bm25_index {
+            bm25.add(id, metadata.as_ref())?;
+        }
+
+        Ok(())
+    }
+
+    /// Borrado núcleo (sin WAL). Devuelve `true` si el documento existía.
+    fn delete_inner(&self, id: &str) -> Result<bool> {
+        let deleted = self.storage.delete(id)?;
+        if deleted {
+            self.index.remove(id)?;
+            // Remover de BM25 si está habilitado
+            if let Some(ref bm25) = self.bm25_index {
+                bm25.remove(id)?;
+            }
+            // Remover de índices parciales
+            let _ = self.partial_indexes.on_delete(id);
+        }
+        Ok(deleted)
+    }
+
+    /// `clear` núcleo (sin WAL).
+    fn clear_inner(&self) {
         self.storage.clear();
         self.index.clear();
         if let Some(ref bm25) = self.bm25_index {
             bm25.clear();
         }
         let _ = self.partial_indexes.clear_all();
+    }
+
+    /// Append de una `WalOp` al WAL activo, si lo hay. No-op si el WAL no está
+    /// habilitado. Propaga errores de I/O/serialización del `WalWriter`.
+    fn append_wal(&self, op: WalOp) -> Result<()> {
+        if let Some(ref wal) = self.wal {
+            wal.lock().append(&op)?;
+        }
+        Ok(())
+    }
+
+    /// Aplica una `WalOp` leída del WAL sobre la DB **sin re-loggear** (durante
+    /// el replay el `WalWriter` aún no está abierto, así que `append_wal` es
+    /// no-op de todas formas; pero además los helpers `*_inner` no tocan el WAL).
+    ///
+    /// **Replay idempotente**: tolera ops ya reflejadas en el snapshot (crash
+    /// entre `save` y `truncate` del checkpoint):
+    /// - `Insert`/`Update` → upsert (delete + insert): si el id ya existe, se
+    ///   reemplaza en vez de devolver `AlreadyExists`.
+    /// - `Delete` de id inexistente → no-op (`delete_inner` devuelve `false`).
+    /// - `Clear` → vacía todo (idempotente por definición).
+    fn apply_wal_op(&self, op: &WalOp) -> Result<()> {
+        match op {
+            WalOp::Insert { id, vector, metadata } => {
+                self.replay_upsert(id, vector.as_deref(), metadata)?;
+            }
+            WalOp::Update { id, vector, metadata } => {
+                self.replay_upsert(id, vector.as_deref(), metadata)?;
+            }
+            WalOp::Delete { id } => {
+                // Idempotente: borrar un id ausente es no-op.
+                self.delete_inner(id)?;
+            }
+            WalOp::Clear => {
+                self.clear_inner();
+            }
+        }
+        Ok(())
+    }
+
+    /// Upsert idempotente usado por el replay de `Insert`/`Update`: borra el id
+    /// (si existe, sin error si no) y lo (re)inserta. Tras el `delete_inner` el
+    /// id no está en storage, así que `insert_document_inner` no choca con
+    /// `AlreadyExists`.
+    fn replay_upsert(
+        &self,
+        id: &str,
+        vector: Option<&[f32]>,
+        metadata: &Option<Metadata>,
+    ) -> Result<()> {
+        self.delete_inner(id)?;
+        self.insert_document_inner(id, vector, metadata)
     }
 
     /// Reconstruye el índice principal a partir del storage completo.
@@ -772,6 +874,121 @@ impl VectorDB {
         };
 
         disk::save_vectors(path, &mut header, self.storage.iter(), &index_blocks)
+    }
+
+    // ==================== WRITE-AHEAD LOG ====================
+
+    /// Activa el WAL sobre `path` con configuración por defecto
+    /// (`fsync_on_append = false`: sobrevive a crash de proceso, no a corte de
+    /// energía). A partir de este momento, toda mutación (`insert`,
+    /// `insert_document`, `update`, `update_document`, `delete`, `clear`)
+    /// appendea su `WalOp` al log.
+    ///
+    /// Si `path` ya existe con un WAL válido, se reutiliza (y se trunca la cola
+    /// rota si la hubiera). Toma `&mut self` porque activar el WAL es un cambio
+    /// estructural (campo `Option` de `None` a `Some`), típico de setup antes
+    /// de uso concurrente; las mutaciones posteriores siguen siendo `&self`
+    /// vía la `Mutex` interior.
+    ///
+    /// Llamarlo dos veces reemplaza el writer anterior por uno nuevo sobre el
+    /// nuevo `path`.
+    pub fn enable_wal<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        self.enable_wal_with(path, WalConfig::default())
+    }
+
+    /// Activa el WAL sobre `path` con la [`WalConfig`] dada (por ejemplo
+    /// `WalConfig::new().with_fsync_on_append(true)` para durabilidad ante corte
+    /// de energía). Ver [`enable_wal`] para el resto de la semántica.
+    pub fn enable_wal_with<P: AsRef<Path>>(&mut self, path: P, config: WalConfig) -> Result<()> {
+        let writer = WalWriter::open_with(path, config)?;
+        self.wal = Some(Mutex::new(writer));
+        Ok(())
+    }
+
+    /// Checkpoint: persiste un snapshot `.mmdb` atómico en `snapshot_path`
+    /// (reusa [`save`]) y **después** trunca el WAL.
+    ///
+    /// # Orden y por qué
+    ///
+    /// 1. `save(snapshot_path)` — vuelca el estado completo a disco atómicamente
+    ///    (escritura a `.tmp` + rename).
+    /// 2. `wal.truncate()` — vacía el log (el snapshot ya capturó todo).
+    ///
+    /// Este orden es el seguro: si el proceso crashea **entre** el snapshot y
+    /// el truncate, el snapshot tiene el estado completo y el WAL todavía lleva
+    /// las ops; un [`open_with_wal`] posterior las reaplica de forma
+    /// **idempotente** (Insert→upsert, Delete→no-op, Update→upsert), llegando al
+    /// mismo estado final. Si truncáramos antes de salvar y crasheáramos, se
+    /// perdería la durabilidad no checkpointeada.
+    ///
+    /// Si no hay WAL activo, `checkpoint` equivale a un [`save`] plano (el
+    /// truncate se omite).
+    pub fn checkpoint<P: AsRef<Path>>(&self, snapshot_path: P) -> Result<()> {
+        self.save(snapshot_path)?;
+        if let Some(ref wal) = self.wal {
+            wal.lock().truncate()?;
+        }
+        Ok(())
+    }
+
+    /// Abre una DB desde un snapshot `.mmdb` **existente** + un WAL, aplicando
+    /// el replay, y deja el `WalWriter` abierto para seguir appendeando.
+    ///
+    /// # Flujo
+    ///
+    /// 1. Carga el snapshot con [`open`] (exige que exista; si no, error). De
+    ///    él se derivan dimensiones, métrica, índice y cuantización.
+    /// 2. `wal::replay(wal_path)` — lee las ops válidas (tolera cola rota).
+    /// 3. Aplica las ops en orden via [`apply_wal_op`] (replay idempotente).
+    /// 4. Abre el `WalWriter` sobre `wal_path` (trunca la cola rota si la hubo)
+    ///    para seguir loggeando.
+    ///
+    /// # Cuándo usarla vs [`new_with_wal`]
+    ///
+    /// `open_with_wal` exige snapshot existente. Para una DB **nueva** (sin
+    /// snapshot aún) con un WAL huérfano que quiera reaplicarse, usar
+    /// [`new_with_wal`], que parte de una `Config` explícita.
+    pub fn open_with_wal<P: AsRef<Path>, Q: AsRef<Path>>(
+        snapshot_path: P,
+        wal_path: Q,
+    ) -> Result<Self> {
+        let snapshot_path = snapshot_path.as_ref();
+        if !snapshot_path.exists() {
+            return Err(Error::InvalidConfig(format!(
+                "open_with_wal: el snapshot no existe: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        let mut db = Self::open(snapshot_path)?;
+        db.replay_wal(wal_path)?;
+        Ok(db)
+    }
+
+    /// Crea una DB **nueva** desde `config` y le aplica el replay de un WAL
+    /// (típicamente huérfano, sin snapshot), dejando el `WalWriter` abierto.
+    ///
+    /// Caso de uso: una DB abierta con WAL que nunca hizo checkpoint (no hay
+    /// `.mmdb`); al reabrir, se reconstruye desde la `Config` original + el
+    /// replay completo del log.
+    pub fn new_with_wal<P: AsRef<Path>>(config: Config, wal_path: P) -> Result<Self> {
+        let mut db = Self::new(config)?;
+        db.replay_wal(wal_path)?;
+        Ok(db)
+    }
+
+    /// Replay interno compartido por [`open_with_wal`] y [`new_with_wal`]:
+    /// lee las ops válidas del WAL, las aplica de forma idempotente, y abre el
+    /// `WalWriter` para seguir appendeando. El writer se abre **después** del
+    /// replay, así que las ops aplicadas no se re-loggean.
+    fn replay_wal<P: AsRef<Path>>(&mut self, wal_path: P) -> Result<()> {
+        let replay = crate::wal::replay(wal_path.as_ref())?;
+        for op in &replay.ops {
+            self.apply_wal_op(op)?;
+        }
+        let writer = WalWriter::open_with(wal_path, WalConfig::default())?;
+        self.wal = Some(Mutex::new(writer));
+        Ok(())
     }
 
     /// Retorna las dimensiones configuradas.

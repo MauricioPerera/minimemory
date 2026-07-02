@@ -2592,3 +2592,305 @@ mod partial_index_lifecycle {
         assert_eq!(results[0].id, "doc2");
     }
 }
+
+// ============================================================================
+// Tests de integración del Write-Ahead Log (WAL) en VectorDB
+// ============================================================================
+
+mod wal_integration {
+    use super::*;
+    use minimemory::QuantizationType;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_path(suffix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "minimemory_wal_{}_{}{}.{}",
+            std::process::id(),
+            n,
+            suffix,
+            suffix_suffix(suffix)
+        ));
+        p
+    }
+
+    // Extensión de archivo según el rol (snapshot .mmdb vs wal .wal).
+    fn suffix_suffix(suffix: &str) -> &'static str {
+        if suffix.contains("wal") {
+            "wal"
+        } else {
+            "mmdb"
+        }
+    }
+
+    fn cleanup(paths: &[PathBuf]) {
+        for p in paths {
+            fs::remove_file(p).ok();
+        }
+    }
+
+    /// Durabilidad básica sin snapshot: insert/update/delete → DROP (sin
+    /// `save()`) → `new_with_wal` recupera el estado completo desde el WAL
+    /// huérfano.
+    #[test]
+    fn test_wal_basic_durability_no_snapshot() {
+        let wal = temp_path("_wal_basic");
+        let cfg = Config::new(3).with_distance(Distance::Cosine);
+
+        {
+            let mut db = VectorDB::new(cfg.clone()).unwrap();
+            db.enable_wal(&wal).unwrap();
+
+            db.insert("a", &[1.0, 0.0, 0.0], None).unwrap();
+            db.insert("b", &[0.0, 1.0, 0.0], None).unwrap();
+            db.insert("c", &[0.0, 0.0, 1.0], None).unwrap();
+
+            // Update de "a" (vector + metadata nuevos).
+            let mut meta = Metadata::new();
+            meta.insert("k", "v");
+            db.update("a", &[0.5, 0.5, 0.0], Some(meta)).unwrap();
+
+            // Delete de "b".
+            assert!(db.delete("b").unwrap());
+
+            // DROP sin save(): no se escribe snapshot.
+        }
+
+        // Reabrir desde el WAL huérfano (no hay snapshot → new_with_wal).
+        let db = VectorDB::new_with_wal(cfg, &wal).unwrap();
+
+        assert_eq!(db.len(), 2); // 3 insertados - 1 borrado
+        assert!(!db.contains("b"));
+        assert!(db.contains("a"));
+        assert!(db.contains("c"));
+
+        let (vec_a, meta_a) = db.get("a").unwrap().unwrap();
+        assert_eq!(vec_a, Some(vec![0.5, 0.5, 0.0]));
+        assert!(meta_a.is_some());
+        assert_eq!(
+            meta_a.unwrap().get("k").and_then(|v| v.as_str()),
+            Some("v")
+        );
+
+        let (vec_c, _) = db.get("c").unwrap().unwrap();
+        assert_eq!(vec_c, Some(vec![0.0, 0.0, 1.0]));
+
+        cleanup(&[wal]);
+    }
+
+    /// Durabilidad con cuantización Int8: el WAL guarda el vector f32 original
+    /// y el replay lo re-cuantiza al aplicar. Los vectores recuperados
+    /// (dequantizados) son idénticos a los de una DB control insertada en vivo.
+    #[test]
+    fn test_wal_with_int8_quantization_requantizes_on_replay() {
+        let wal = temp_path("_wal_int8");
+        let cfg = Config::new(4).with_quantization(QuantizationType::Int8);
+
+        let v1 = vec![0.1, 0.2, 0.3, 0.4];
+        let v2 = vec![0.9, 0.8, 0.7, 0.6];
+
+        {
+            let mut db = VectorDB::new(cfg.clone()).unwrap();
+            db.enable_wal(&wal).unwrap();
+            db.insert("x", &v1, None).unwrap();
+            db.insert("y", &v2, None).unwrap();
+        }
+
+        // DB control: misma config, mismas inserciones en vivo.
+        let control = VectorDB::new(cfg.clone()).unwrap();
+        control.insert("x", &v1, None).unwrap();
+        control.insert("y", &v2, None).unwrap();
+
+        let db = VectorDB::new_with_wal(cfg, &wal).unwrap();
+        assert_eq!(db.len(), 2);
+
+        let (rec_x, _) = db.get("x").unwrap().unwrap();
+        let (rec_y, _) = db.get("y").unwrap().unwrap();
+        let (ctl_x, _) = control.get("x").unwrap().unwrap();
+        let (ctl_y, _) = control.get("y").unwrap().unwrap();
+
+        // Re-cuantización determinista: mismo f32 de entrada + mismo quantizer
+        // → mismo quantizado → misma dequantización exacta.
+        assert_eq!(rec_x, ctl_x);
+        assert_eq!(rec_y, ctl_y);
+
+        cleanup(&[wal]);
+    }
+
+    /// Checkpoint: tras `checkpoint`, el WAL queda vacío (solo header) y
+    /// `open_with_wal` (snapshot + wal) reconstruye exacto; las escrituras
+    /// post-checkpoint también se recuperan.
+    #[test]
+    fn test_wal_checkpoint_then_recover() {
+        let snap = temp_path("_snap_ckpt");
+        let wal = temp_path("_wal_ckpt");
+        let cfg = Config::new(2);
+
+        {
+            let mut db = VectorDB::new(cfg).unwrap();
+            db.enable_wal(&wal).unwrap();
+            db.insert("a", &[1.0, 2.0], None).unwrap();
+            db.insert("b", &[3.0, 4.0], None).unwrap();
+
+            db.checkpoint(&snap).unwrap();
+
+            // El WAL debe quedar vacío (solo header de 8 bytes).
+            assert_eq!(fs::metadata(&wal).unwrap().len(), 8);
+
+            // Escrituras post-checkpoint.
+            db.insert("c", &[5.0, 6.0], None).unwrap();
+            assert!(db.delete("a").unwrap());
+        }
+
+        let db = VectorDB::open_with_wal(&snap, &wal).unwrap();
+        assert_eq!(db.len(), 2); // b y c (a fue borrado post-checkpoint)
+        assert!(db.contains("b"));
+        assert!(db.contains("c"));
+        assert!(!db.contains("a"));
+
+        let (vec_c, _) = db.get("c").unwrap().unwrap();
+        assert_eq!(vec_c, Some(vec![5.0, 6.0]));
+
+        cleanup(&[snap, wal]);
+    }
+
+    /// Idempotencia: simula crash entre snapshot y truncate (save() manual SIN
+    /// truncar el WAL) + escrituras extra → `open_with_wal` reaplica todo sin
+    /// error (Insert de id ya en snapshot → upsert, no AlreadyExists) y el
+    /// estado final es correcto.
+    #[test]
+    fn test_wal_idempotent_replay_after_crash_between_save_and_truncate() {
+        let snap = temp_path("_snap_idem");
+        let wal = temp_path("_wal_idem");
+        let cfg = Config::new(2);
+
+        {
+            let mut db = VectorDB::new(cfg).unwrap();
+            db.enable_wal(&wal).unwrap();
+            db.insert("a", &[1.0, 1.0], None).unwrap();
+            db.insert("b", &[2.0, 2.0], None).unwrap();
+
+            // save() manual SIN truncar el WAL: simula crash justo después del
+            // snapshot, antes del truncate del checkpoint.
+            db.save(&snap).unwrap();
+
+            // Más escrituras que se suman al WAL (las de "a" y "b" ya están
+            // también en el snapshot → el replay debe tolerarlas).
+            db.insert("c", &[3.0, 3.0], None).unwrap();
+        }
+
+        // open_with_wal: snapshot tiene {a,b}, WAL tiene Insert(a), Insert(b),
+        // Insert(c). El replay reaplica a y b como upsert (ya existen) sin
+        // error, y añade c.
+        let db = VectorDB::open_with_wal(&snap, &wal).unwrap();
+        assert_eq!(db.len(), 3);
+        assert!(db.contains("a"));
+        assert!(db.contains("b"));
+        assert!(db.contains("c"));
+
+        cleanup(&[snap, wal]);
+    }
+
+    /// Cola rota: se corta el WAL a mitad de la última entrada a mano → el
+    /// replay recupera hasta la última entrada válida sin error.
+    #[test]
+    fn test_wal_broken_tail_recovers_valid_prefix() {
+        let wal = temp_path("_wal_broken");
+        let cfg = Config::new(2);
+
+        {
+            let mut db = VectorDB::new(cfg.clone()).unwrap();
+            db.enable_wal(&wal).unwrap();
+            db.insert("a", &[1.0, 1.0], None).unwrap();
+            db.insert("b", &[2.0, 2.0], None).unwrap();
+            db.insert("c", &[3.0, 3.0], None).unwrap();
+        }
+
+        // Truncar el archivo cortando los últimos 5 bytes → la 3ra entrada
+        // queda incompleta (torn write). Debe recuperarse a/b y descartarse c.
+        let len = fs::metadata(&wal).unwrap().len();
+        let cut = len.saturating_sub(5);
+        {
+            use std::io::Seek;
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .open(&wal)
+                .unwrap();
+            f.seek(std::io::SeekFrom::Start(0)).unwrap();
+            f.set_len(cut).unwrap();
+        }
+
+        let db = VectorDB::new_with_wal(cfg, &wal).unwrap();
+        // Solo las 2 primeras ops (Insert a, Insert b) son válidas.
+        assert_eq!(db.len(), 2);
+        assert!(db.contains("a"));
+        assert!(db.contains("b"));
+        assert!(!db.contains("c"));
+
+        cleanup(&[wal]);
+    }
+
+    /// clear() con WAL: la recuperación refleja la DB vacía + los inserts
+    /// posteriores al clear.
+    #[test]
+    fn test_wal_clear_then_inserts_reflected_on_recovery() {
+        let wal = temp_path("_wal_clear");
+        let cfg = Config::new(2);
+
+        {
+            let mut db = VectorDB::new(cfg.clone()).unwrap();
+            db.enable_wal(&wal).unwrap();
+            db.insert("a", &[1.0, 1.0], None).unwrap();
+            db.insert("b", &[2.0, 2.0], None).unwrap();
+            db.clear();
+            assert_eq!(db.len(), 0);
+            db.insert("c", &[3.0, 3.0], None).unwrap();
+        }
+
+        let db = VectorDB::new_with_wal(cfg, &wal).unwrap();
+        assert_eq!(db.len(), 1);
+        assert!(!db.contains("a"));
+        assert!(!db.contains("b"));
+        assert!(db.contains("c"));
+
+        cleanup(&[wal]);
+    }
+
+    /// Sin WAL habilitado: el comportamiento es exactamente el de antes (cero
+    /// regresión). insert/update/delete/clear/save/open funcionan sin tocar
+    /// ningún archivo de log.
+    #[test]
+    fn test_no_wal_no_regression() {
+        let snap = temp_path("_snap_nowal");
+        let cfg = Config::new(3);
+
+        let db = VectorDB::new(cfg).unwrap();
+        db.insert("a", &[1.0, 2.0, 3.0], None).unwrap();
+        db.insert("b", &[4.0, 5.0, 6.0], None).unwrap();
+        assert_eq!(db.len(), 2);
+
+        db.update("a", &[7.0, 8.0, 9.0], None).unwrap();
+        let (va, _) = db.get("a").unwrap().unwrap();
+        assert_eq!(va, Some(vec![7.0, 8.0, 9.0]));
+
+        assert!(db.delete("b").unwrap());
+        assert_eq!(db.len(), 1);
+
+        db.clear();
+        assert_eq!(db.len(), 0);
+
+        db.insert("c", &[1.0, 1.0, 1.0], None).unwrap();
+        db.save(&snap).unwrap();
+
+        let db2 = VectorDB::open(&snap).unwrap();
+        assert_eq!(db2.len(), 1);
+        assert!(db2.contains("c"));
+
+        // Ningún WAL se creó en este flujo.
+        cleanup(&[snap]);
+    }
+}
