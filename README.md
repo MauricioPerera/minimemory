@@ -2,7 +2,7 @@
 
 Embedded vector database for Rust, JavaScript, and Python. Like SQLite for vectors.
 
-**510KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **437 tests** | **51 browser tests**
+**520KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **437 tests** | **51 browser tests**
 
 [![npm](https://img.shields.io/npm/v/@rckflr/minimemory)](https://www.npmjs.com/package/@rckflr/minimemory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -66,7 +66,7 @@ const results = JSON.parse(db.search(new Float32Array(384), 10));
 | **Search contract** | Returns `min(k, qualifying)`; offset applied before truncation, filters before RRF fusion |
 | **Replication** | `ConflictResolution` (LWW / KeepLocal / ApplyRemote); compaction preserves unexported log entries |
 | **Indexing** | `VectorDB::rebuild_index()` — mandatory for IVF after bulk load to activate clustering |
-| **WASM** | 510KB, runs in browser + Cloudflare Workers + Node.js |
+| **WASM** | 520KB, runs in browser + Cloudflare Workers + Node.js |
 | **Extras** | Reranker (trait-based), agent memory system, local embeddings (Candle) |
 
 ## Quantization
@@ -255,7 +255,7 @@ export default {
 }
 ```
 
-## WASM API (35 methods)
+## WASM API (38 methods)
 
 ### Constructors
 | Method | Description |
@@ -275,6 +275,9 @@ export default {
 
 ### Persistence
 `export_snapshot`, `import_snapshot`
+
+### Metadata indexes
+`create_metadata_index`, `drop_metadata_index`, `list_metadata_indexes` — retroactive, accelerate `$eq`/range filters; not included in snapshots (recreate after `import_snapshot`)
 
 ### Matryoshka
 `insert_auto`, `insert_auto_with_metadata`, `search_auto`, `update_auto`, `update_auto_with_metadata`
@@ -297,7 +300,7 @@ export default {
 | Project | Description | Link |
 |---------|-------------|------|
 | **minimemory** | Core vector DB (Rust + WASM) | [GitHub](https://github.com/MauricioPerera/minimemory) |
-| **@rckflr/minimemory** | npm package (510KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
+| **@rckflr/minimemory** | npm package (520KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
 | **miniCMS** | PocketBase-like CMS in browser | [Live](https://minicms.pages.dev) / [GitHub](https://github.com/MauricioPerera/minicms) |
 | **minimemory-do-demo** | Cloudflare DO benchmark | [Live](https://minimemory-do-demo.rckflr.workers.dev) / [GitHub](https://github.com/MauricioPerera/minimemory-do-demo) |
 

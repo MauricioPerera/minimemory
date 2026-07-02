@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use parking_lot::Mutex;
 
 use crate::distance::Distance;
@@ -16,6 +17,7 @@ use crate::query::{Filter, FilterOp, OrderBy};
 use crate::search::{HybridSearch, HybridSearchParams};
 use crate::storage::{disk, format::FileHeader, MemoryStorage, Storage};
 use crate::types::{Config, HybridSearchResult, Metadata, PagedResult, SearchResult, VectorId};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::wal::{WalConfig, WalOp, WalWriter};
 
 /// Base de datos vectorial embebida.
@@ -68,6 +70,7 @@ pub struct VectorDB {
     /// `Mutex` da interior mutabilidad: las mutaciones (`&self`) appendean sin
     /// necesidad de `&mut self`. Se inicializa en `None` y se activa con
     /// [`enable_wal`] / [`enable_wal_with`] / [`open_with_wal`] / [`new_with_wal`].
+    #[cfg(not(target_arch = "wasm32"))]
     wal: Option<Mutex<WalWriter>>,
 }
 
@@ -109,6 +112,7 @@ impl VectorDB {
             partial_indexes: PartialIndexManager::new(),
             metadata_indexes: MetadataIndexManager::new(),
             quantizer,
+            #[cfg(not(target_arch = "wasm32"))]
             wal: None,
         })
     }
@@ -145,6 +149,7 @@ impl VectorDB {
             partial_indexes: PartialIndexManager::new(),
             metadata_indexes: MetadataIndexManager::new(),
             quantizer,
+            #[cfg(not(target_arch = "wasm32"))]
             wal: None,
         })
     }
@@ -226,6 +231,7 @@ impl VectorDB {
             partial_indexes: PartialIndexManager::new(),
             metadata_indexes: MetadataIndexManager::new(),
             quantizer,
+            #[cfg(not(target_arch = "wasm32"))]
             wal: None,
         })
     }
@@ -321,6 +327,7 @@ impl VectorDB {
             partial_indexes: PartialIndexManager::new(),
             metadata_indexes: MetadataIndexManager::new(),
             quantizer,
+            #[cfg(not(target_arch = "wasm32"))]
             wal: None,
         })
     }
@@ -392,11 +399,14 @@ impl VectorDB {
         // (disco lleno, etc.) la memoria YA fue mutada — el crate no es
         // transaccional, así que el error se propaga pero el cambio queda
         // (best-effort, coherente con la no-transaccionalidad documentada).
-        self.append_wal(WalOp::Insert {
-            id,
-            vector: Some(vector.to_vec()),
-            metadata,
-        })?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.append_wal(WalOp::Insert {
+                id,
+                vector: Some(vector.to_vec()),
+                metadata,
+            })?;
+        }
 
         Ok(())
     }
@@ -444,11 +454,14 @@ impl VectorDB {
         self.insert_document_inner(&id, vector, &metadata)?;
 
         // Durabilidad: ver `insert` para la semántica de fallo del append.
-        self.append_wal(WalOp::Insert {
-            id,
-            vector: vector.map(|v| v.to_vec()),
-            metadata,
-        })?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.append_wal(WalOp::Insert {
+                id,
+                vector: vector.map(|v| v.to_vec()),
+                metadata,
+            })?;
+        }
 
         Ok(())
     }
@@ -555,6 +568,7 @@ impl VectorDB {
     /// memoria ya mutó (best-effort, ver `insert`).
     pub fn delete(&self, id: &str) -> Result<bool> {
         let deleted = self.delete_inner(id)?;
+        #[cfg(not(target_arch = "wasm32"))]
         if deleted {
             self.append_wal(WalOp::Delete {
                 id: id.to_string(),
@@ -595,11 +609,14 @@ impl VectorDB {
         self.delete_inner(&id)?;
         self.insert_document_inner(&id, Some(vector), &metadata)?;
 
-        self.append_wal(WalOp::Update {
-            id,
-            vector: Some(vector.to_vec()),
-            metadata,
-        })?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.append_wal(WalOp::Update {
+                id,
+                vector: Some(vector.to_vec()),
+                metadata,
+            })?;
+        }
 
         Ok(())
     }
@@ -634,11 +651,14 @@ impl VectorDB {
         self.delete_inner(&id)?;
         self.insert_document_inner(&id, vector, &metadata)?;
 
-        self.append_wal(WalOp::Update {
-            id,
-            vector: vector.map(|v| v.to_vec()),
-            metadata,
-        })?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.append_wal(WalOp::Update {
+                id,
+                vector: vector.map(|v| v.to_vec()),
+                metadata,
+            })?;
+        }
 
         Ok(())
     }
@@ -677,7 +697,10 @@ impl VectorDB {
     /// snapshot + las ops posteriores al último checkpoint.
     pub fn clear(&self) {
         self.clear_inner();
-        let _ = self.append_wal(WalOp::Clear);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = self.append_wal(WalOp::Clear);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -794,6 +817,7 @@ impl VectorDB {
 
     /// Append de una `WalOp` al WAL activo, si lo hay. No-op si el WAL no está
     /// habilitado. Propaga errores de I/O/serialización del `WalWriter`.
+    #[cfg(not(target_arch = "wasm32"))]
     fn append_wal(&self, op: WalOp) -> Result<()> {
         if let Some(ref wal) = self.wal {
             wal.lock().append(&op)?;
@@ -811,6 +835,7 @@ impl VectorDB {
     ///   reemplaza en vez de devolver `AlreadyExists`.
     /// - `Delete` de id inexistente → no-op (`delete_inner` devuelve `false`).
     /// - `Clear` → vacía todo (idempotente por definición).
+    #[cfg(not(target_arch = "wasm32"))]
     fn apply_wal_op(&self, op: &WalOp) -> Result<()> {
         match op {
             WalOp::Insert { id, vector, metadata } => {
@@ -834,6 +859,7 @@ impl VectorDB {
     /// (si existe, sin error si no) y lo (re)inserta. Tras el `delete_inner` el
     /// id no está en storage, así que `insert_document_inner` no choca con
     /// `AlreadyExists`.
+    #[cfg(not(target_arch = "wasm32"))]
     fn replay_upsert(
         &self,
         id: &str,
@@ -930,6 +956,7 @@ impl VectorDB {
     ///
     /// Llamarlo dos veces reemplaza el writer anterior por uno nuevo sobre el
     /// nuevo `path`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn enable_wal<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         self.enable_wal_with(path, WalConfig::default())
     }
@@ -937,6 +964,7 @@ impl VectorDB {
     /// Activa el WAL sobre `path` con la [`WalConfig`] dada (por ejemplo
     /// `WalConfig::new().with_fsync_on_append(true)` para durabilidad ante corte
     /// de energía). Ver [`enable_wal`] para el resto de la semántica.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn enable_wal_with<P: AsRef<Path>>(&mut self, path: P, config: WalConfig) -> Result<()> {
         let writer = WalWriter::open_with(path, config)?;
         self.wal = Some(Mutex::new(writer));
@@ -961,6 +989,7 @@ impl VectorDB {
     ///
     /// Si no hay WAL activo, `checkpoint` equivale a un [`save`] plano (el
     /// truncate se omite).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn checkpoint<P: AsRef<Path>>(&self, snapshot_path: P) -> Result<()> {
         self.save(snapshot_path)?;
         if let Some(ref wal) = self.wal {
@@ -986,6 +1015,7 @@ impl VectorDB {
     /// `open_with_wal` exige snapshot existente. Para una DB **nueva** (sin
     /// snapshot aún) con un WAL huérfano que quiera reaplicarse, usar
     /// [`new_with_wal`], que parte de una `Config` explícita.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_wal<P: AsRef<Path>, Q: AsRef<Path>>(
         snapshot_path: P,
         wal_path: Q,
@@ -1009,6 +1039,7 @@ impl VectorDB {
     /// Caso de uso: una DB abierta con WAL que nunca hizo checkpoint (no hay
     /// `.mmdb`); al reabrir, se reconstruye desde la `Config` original + el
     /// replay completo del log.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_wal<P: AsRef<Path>>(config: Config, wal_path: P) -> Result<Self> {
         let mut db = Self::new(config)?;
         db.replay_wal(wal_path)?;
@@ -1019,6 +1050,7 @@ impl VectorDB {
     /// lee las ops válidas del WAL, las aplica de forma idempotente, y abre el
     /// `WalWriter` para seguir appendeando. El writer se abre **después** del
     /// replay, así que las ops aplicadas no se re-loggean.
+    #[cfg(not(target_arch = "wasm32"))]
     fn replay_wal<P: AsRef<Path>>(&mut self, wal_path: P) -> Result<()> {
         let replay = crate::wal::replay(wal_path.as_ref())?;
         for op in &replay.ops {

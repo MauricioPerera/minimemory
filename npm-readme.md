@@ -2,7 +2,7 @@
 
 Embedded vector database for JavaScript/TypeScript. Like SQLite for vectors — runs in the browser, Cloudflare Workers, and Node.js via WebAssembly.
 
-**510KB WASM** | **Zero dependencies** | **HNSW + BM25 + Filters** | **5 quantization levels**
+**520KB WASM** | **Zero dependencies** | **HNSW + BM25 + Filters** | **5 quantization levels**
 
 ## Install
 
@@ -240,7 +240,7 @@ const results = JSON.parse(db.search_auto(new Float32Array(768), 10));
 
 | Component | Size |
 |-----------|------|
-| WASM binary | 510 KB |
+| WASM binary | 520 KB |
 | JS wrapper | ~30 KB |
 | TypeScript types | included |
 | Total (gzipped) | ~190 KB |

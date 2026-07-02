@@ -253,6 +253,31 @@ export class MiniMemory {
     return this.db.import_snapshot(snapshot);
   }
 
+  // ─── Metadata indexes (opt-in) ───────────────────────────────────────────
+
+  /**
+   * Create an opt-in metadata index on `field` (retroactive: indexes existing
+   * docs). Speeds up `$eq` and range filters (`$gt`, `$gte`, `$lt`, `$lte`) in
+   * `filterSearch`, `list`, and `searchWithFilter`. Results are unchanged.
+   *
+   * Indexes are NOT serialized by `export()`. Importing a snapshot into a DB
+   * that already has indexes keeps them populated; importing into a freshly
+   * constructed DB starts with none — recreate them with this method.
+   */
+  createMetadataIndex(field: string): void {
+    this.db.create_metadata_index(field);
+  }
+
+  /** Drop the metadata index on `field`. Queries on it fall back to full-scan. */
+  dropMetadataIndex(field: string): void {
+    this.db.drop_metadata_index(field);
+  }
+
+  /** List indexed fields (lexicographic), e.g. `["category", "price"]`. */
+  listMetadataIndexes(): string[] {
+    return JSON.parse(this.db.list_metadata_indexes());
+  }
+
   /** Free WASM memory. Call when done with the database. */
   dispose(): void {
     this.db.free();

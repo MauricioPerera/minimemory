@@ -685,6 +685,52 @@ impl WasmVectorDB {
 
         Ok(imported)
     }
+
+    // =========================================================================
+    // Metadata indexes (opt-in, accelerate $eq and range filters)
+    // =========================================================================
+
+    /// Crea un índice de metadata opt-in sobre `field`. Es retroactivo: indexa
+    /// automáticamente los documentos ya presentes (no hay que reinsertar).
+    ///
+    /// Acelera los filtros `$eq` y de rango (`$gt`, `$gte`, `$lt`, `$lte`)
+    /// resueltos por `filter_search`, `list_documents` y `search_with_filter`
+    /// a través del query planner interno. Los resultados no cambian, sólo la
+    /// velocidad: el índice nunca altera qué documentos coinciden.
+    ///
+    /// # Persistencia
+    ///
+    /// Los índices **no** se serializan en `export_snapshot` (éste sólo vuelca
+    /// ids, vectores y metadata). `import_snapshot` sobre una `WasmVectorDB`
+    /// que ya tenga índices registrados **los conserva**: el `clear` interno
+    /// vacía los buckets pero mantiene los campos indexados, y las inserciones
+    /// del import los repueblan. En cambio, importar el snapshot en una
+    /// `WasmVectorDB` recién construida arranca sin índices y hay que
+    /// recrearlos con este método (que indexa retroactivamente lo importado).
+    #[wasm_bindgen]
+    pub fn create_metadata_index(&self, field: &str) -> Result<(), JsError> {
+        self.inner
+            .create_metadata_index(field)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Elimina el índice de metadata sobre `field`. Las consultas sobre ese
+    /// campo vuelven a resolverse por full-scan (mismos resultados, sólo más
+    /// lento). Los índices restantes se mantienen intactos.
+    #[wasm_bindgen]
+    pub fn drop_metadata_index(&self, field: &str) -> Result<(), JsError> {
+        self.inner
+            .drop_metadata_index(field)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Lista los campos con índice de metadata registrado, en orden
+    /// lexicográfico. Devuelve un JSON array de strings, p.ej. `["category","price"]`.
+    #[wasm_bindgen]
+    pub fn list_metadata_indexes(&self) -> String {
+        let indexes = self.inner.list_metadata_indexes();
+        serde_json::to_string(&indexes).unwrap_or_else(|_| "[]".to_string())
+    }
 }
 
 /// Trunca un vector a las dimensiones especificadas y lo normaliza.
@@ -1011,5 +1057,77 @@ mod tests {
         assert!(parse_filter(r#"{"field":{"$contains":"substr"}}"#).is_ok());
         assert!(parse_filter(r#"{"$and":[{"a":1},{"b":2}]}"#).is_ok());
         assert!(parse_filter(r#"{"$or":[{"a":1},{"b":2}]}"#).is_ok());
+    }
+
+    /// Helper: DB diminuta con 4 docs categorizados, para ejercitar índices.
+    fn categorized_db() -> WasmVectorDB {
+        let db = WasmVectorDB::new(2, "cosine", "flat").unwrap();
+        db.insert_with_metadata("a", &[1.0, 0.0], r#"{"category":"tech"}"#).unwrap();
+        db.insert_with_metadata("b", &[0.0, 1.0], r#"{"category":"tech"}"#).unwrap();
+        db.insert_with_metadata("c", &[1.0, 1.0], r#"{"category":"sports"}"#).unwrap();
+        db.insert_with_metadata("d", &[0.0, 0.0], r#"{"category":"news"}"#).unwrap();
+        db
+    }
+
+    /// Extrae los IDs de un JSON array de resultados de filter_search, ordenados.
+    /// El orden de filter_search con índice no es determinista (HashSet), así
+    /// que comparamos como conjunto, no como string.
+    fn result_ids(json: &str) -> Vec<String> {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let mut ids: Vec<String> = arr.iter().map(|v| v["id"].as_str().unwrap().to_string()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn metadata_index_keeps_filter_results_and_lists_state() {
+        let db = categorized_db();
+
+        // Sin índice: la lista está vacía y filter_search funciona por full-scan.
+        assert_eq!(db.list_metadata_indexes(), "[]");
+        let without_idx = db.filter_search(r#"{"category":"tech"}"#, 100).unwrap();
+        let expected = result_ids(&without_idx);
+        assert_eq!(expected, vec!["a".to_string(), "b".to_string()]);
+
+        // Crear índice retroactivo sobre "category" y verificar que list lo refleja.
+        db.create_metadata_index("category").unwrap();
+        let parsed: Vec<String> = serde_json::from_str(&db.list_metadata_indexes()).unwrap();
+        assert_eq!(parsed, vec!["category".to_string()]);
+
+        // Con índice: mismos resultados que sin índice (el planner sólo acelera).
+        let with_idx = db.filter_search(r#"{"category":"tech"}"#, 100).unwrap();
+        assert_eq!(result_ids(&with_idx), expected);
+
+        // Drop: la lista vuelve a estar vacía y los resultados siguen idénticos.
+        db.drop_metadata_index("category").unwrap();
+        assert_eq!(db.list_metadata_indexes(), "[]");
+        let after_drop = db.filter_search(r#"{"category":"tech"}"#, 100).unwrap();
+        assert_eq!(result_ids(&after_drop), expected);
+    }
+
+    #[test]
+    fn import_snapshot_into_fresh_db_loses_indexes_but_same_db_keeps_them() {
+        let db = categorized_db();
+        db.create_metadata_index("category").unwrap();
+        let expected = vec!["a".to_string(), "b".to_string()];
+
+        // Misma DB: export -> import conserva el índice (clear mantiene los
+        // registros y las reinserciones los repueblan).
+        let snap = db.export_snapshot().unwrap();
+        db.import_snapshot(&snap).unwrap();
+        assert_eq!(db.list_metadata_indexes(), r#"["category"]"#);
+        let via_idx = db.filter_search(r#"{"category":"tech"}"#, 100).unwrap();
+        assert_eq!(result_ids(&via_idx), expected);
+
+        // DB fresca: el snapshot no lleva los índices, hay que recrearlos.
+        let fresh = WasmVectorDB::new(2, "cosine", "flat").unwrap();
+        fresh.import_snapshot(&snap).unwrap();
+        assert_eq!(fresh.list_metadata_indexes(), "[]");
+        fresh.create_metadata_index("category").unwrap();
+        assert_eq!(fresh.list_metadata_indexes(), r#"["category"]"#);
+        assert_eq!(
+            result_ids(&fresh.filter_search(r#"{"category":"tech"}"#, 100).unwrap()),
+            expected
+        );
     }
 }

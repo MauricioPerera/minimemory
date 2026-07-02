@@ -156,6 +156,7 @@ pub mod search;
 mod storage;
 pub mod transfer;
 mod types;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod wal;
 
 // Local embeddings (optional)
