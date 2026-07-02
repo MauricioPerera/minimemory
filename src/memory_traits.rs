@@ -45,6 +45,7 @@
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -279,10 +280,13 @@ pub struct UsageStats {
 
 impl UsageStats {
     /// Crea nuevas estadisticas con timestamp actual.
+    ///
+    /// Si el reloj del sistema esta antes de la epoca UNIX (clock skew extremo),
+    /// el timestamp cae a 0 en lugar de paniquear.
     pub fn new() -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs() as i64;
         Self {
             access_count: 0,
@@ -297,7 +301,7 @@ impl UsageStats {
         self.access_count += 1;
         self.last_accessed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs() as i64;
     }
 
@@ -327,19 +331,23 @@ impl UsageStats {
     }
 
     /// Edad en segundos.
+    ///
+    /// Con un reloj pre-epoca, `now` cae a 0 y el resultado es negativo (sin panic).
     pub fn age_seconds(&self) -> i64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs() as i64;
         now - self.created_at
     }
 
     /// Segundos desde ultimo acceso.
+    ///
+    /// Con un reloj pre-epoca, `now` cae a 0 y el resultado es negativo (sin panic).
     pub fn staleness_seconds(&self) -> i64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs() as i64;
         now - self.last_accessed
     }
@@ -983,12 +991,19 @@ impl<P: DomainPreset> GenericMemory<P> {
     }
 
     /// Establece los pesos del score final.
-    /// Los tres pesos deben sumar 1.0.
+    ///
+    /// Los tres pesos se normalizan dividiendo por su suma, por lo que **no**
+    /// necesitan sumar 1.0. Si la suma es 0, negativa, o no finita (NaN/inf),
+    /// la llamada se ignora y se conservan los pesos anteriores — esto evita
+    /// producir pesos NaN que propagarian `combined_score = NaN` y romperian el
+    /// ordenamiento de [`Self::recall`].
     pub fn set_score_weights(&mut self, relevance: f32, transfer: f32, priority: f32) {
         let total = relevance + transfer + priority;
-        self.relevance_weight = relevance / total;
-        self.transfer_weight = transfer / total;
-        self.priority_weight = priority / total;
+        if total > 0.0 && total.is_finite() {
+            self.relevance_weight = relevance / total;
+            self.transfer_weight = transfer / total;
+            self.priority_weight = priority / total;
+        }
     }
 
     /// Establece el umbral de transferibilidad.
@@ -1377,8 +1392,13 @@ impl<P: DomainPreset> GenericMemory<P> {
             }
         }
 
-        // Ordenar por score combinado
-        recalls.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap());
+        // Ordenar por score combinado. unwrap_or(Equal) como red de seguridad
+        // frente a un posible score NaN (p. ej. pesos mal configurados).
+        recalls.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(Ordering::Equal)
+        });
         recalls.truncate(k);
 
         Ok(recalls)
@@ -1636,8 +1656,13 @@ impl<P: DomainPreset> GenericMemory<P> {
             })
             .collect();
 
-        // Sort by priority score
-        recalls.sort_by(|a, b| b.priority_score.partial_cmp(&a.priority_score).unwrap());
+        // Sort by priority score. unwrap_or(Equal) como red de seguridad frente
+        // a un posible score NaN.
+        recalls.sort_by(|a, b| {
+            b.priority_score
+                .partial_cmp(&a.priority_score)
+                .unwrap_or(Ordering::Equal)
+        });
         recalls.truncate(k);
         Ok(recalls)
     }
@@ -2875,5 +2900,72 @@ mod tests {
         let stats = memory.stats();
         assert_eq!(stats.total_accesses, 0);
         assert_eq!(stats.avg_usefulness, 0.0);
+    }
+
+    /// `set_score_weights(0,0,0)` no produce pesos NaN: se ignora y conserva los
+    /// pesos anteriores.
+    #[test]
+    fn test_set_score_weights_zero_sum_ignored() {
+        let mut memory = GenericMemory::<SoftwareDevelopment>::new(4).unwrap();
+        let (rw, tw, pw) = (memory.relevance_weight, memory.transfer_weight, memory.priority_weight);
+
+        memory.set_score_weights(0.0, 0.0, 0.0);
+        assert_eq!(memory.relevance_weight, rw);
+        assert_eq!(memory.transfer_weight, tw);
+        assert_eq!(memory.priority_weight, pw);
+        assert!(memory.relevance_weight.is_finite());
+        assert!(memory.transfer_weight.is_finite());
+        assert!(memory.priority_weight.is_finite());
+
+        // Suma no finita (NaN/inf) también se ignora.
+        memory.set_score_weights(f32::NAN, 0.0, 0.0);
+        assert_eq!(memory.relevance_weight, rw);
+    }
+
+    /// Helper: inserta un doc con metadata mínima para que pase el filtro de
+    /// transferibilidad de `recall` (transfer_level = universal => score 1.0).
+    fn insert_recall_doc(memory: &GenericMemory<SoftwareDevelopment>, id: &str, vec: &[f32]) {
+        let mut meta = Metadata::new();
+        meta.insert("transfer_level".to_string(), crate::MetadataValue::String("universal".to_string()));
+        meta.insert("priority".to_string(), crate::MetadataValue::String("normal".to_string()));
+        memory.db.insert(id, vec, Some(meta)).unwrap();
+    }
+
+    /// `recall` no panica con pesos inválidos (0,0,0) y sigue retornando
+    /// resultados: valida que ni la normalización ni el sort con NaN rompan.
+    #[test]
+    fn test_recall_survives_invalid_score_weights() {
+        let mut memory = GenericMemory::<SoftwareDevelopment>::new(4).unwrap();
+
+        insert_recall_doc(&memory, "d1", &[1.0, 0.0, 0.0, 0.0]);
+        insert_recall_doc(&memory, "d2", &[0.9, 0.1, 0.0, 0.0]);
+
+        // Pesos inválidos: deben ignorarse (conservar defaults) — no NaN.
+        memory.set_score_weights(0.0, 0.0, 0.0);
+
+        let recalls = memory.recall(&[1.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert!(recalls.len() >= 2, "debe retornar ambos docs");
+        for r in &recalls {
+            assert!(r.combined_score.is_finite(), "combined_score no debe ser NaN");
+        }
+    }
+
+    /// Red de seguridad del sort: even si un score terminara siendo NaN, el
+    /// `unwrap_or(Equal)` evita el panic. Lo verificamos forzando el camino de
+    /// `recall_high_priority` con datos que produzcan score finito (no panic).
+    #[test]
+    fn test_recall_high_priority_no_panic() {
+        let memory = GenericMemory::<SoftwareDevelopment>::new(4).unwrap();
+        let mut meta = Metadata::new();
+        meta.insert("transfer_level".to_string(), crate::MetadataValue::String("universal".to_string()));
+        meta.insert("priority".to_string(), crate::MetadataValue::String("high".to_string()));
+        memory.db.insert("h1", &[1.0, 0.0, 0.0, 0.0], Some(meta)).unwrap();
+        let mut meta2 = Metadata::new();
+        meta2.insert("transfer_level".to_string(), crate::MetadataValue::String("universal".to_string()));
+        meta2.insert("priority".to_string(), crate::MetadataValue::String("critical".to_string()));
+        memory.db.insert("h2", &[0.8, 0.2, 0.0, 0.0], Some(meta2)).unwrap();
+
+        let recalls = memory.recall_high_priority(&[1.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert!(!recalls.is_empty());
     }
 }

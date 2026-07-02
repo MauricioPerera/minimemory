@@ -247,7 +247,7 @@ impl BM25Index {
             }
         }
 
-        // Ordenar por score descendente
+        // Ordenar por score descendente; desempate estable por id para orden determinista
         let mut results: Vec<_> = scores
             .into_iter()
             .map(|(id, score)| BM25SearchResult { id, score })
@@ -256,6 +256,7 @@ impl BM25Index {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         results.truncate(k);
 

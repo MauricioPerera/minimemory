@@ -1022,6 +1022,15 @@ impl AgentMemory {
     // Utilidades
     // ========================================================================
 
+    /// Convierte un [`crate::HybridSearchResult`] en [`MemoryRecall`].
+    ///
+    /// El `memory_type` se infiere del campo `type` de la metadata. Los valores
+    /// reconocidos mapean a su variante correspondiente. Cualquier valor
+    /// desconocido, no-string, o ausencia del campo cae por defecto a
+    /// [`MemoryType::Episode`]; el `type` original queda preservado en
+    /// `metadata` (que se devuelve intacto en el [`MemoryRecall`]), por lo que
+    /// un caller downstream puede recuperarlo si necesita discriminar tipos no
+    /// modelados por el enum.
     fn to_recall(&self, result: crate::HybridSearchResult) -> MemoryRecall {
         let memory_type = result
             .metadata
@@ -1034,10 +1043,15 @@ impl AgentMemory {
                     "api_knowledge" => MemoryType::ApiKnowledge,
                     "error_solution" => MemoryType::ErrorSolution,
                     "pattern" => MemoryType::Pattern,
+                    "documentation" => MemoryType::Documentation,
+                    "project_context" => MemoryType::ProjectContext,
+                    // Tipo no modelado: fallback a Episode (ver doc-comment).
                     _ => MemoryType::Episode,
                 },
+                // `type` presente pero no es String: fallback a Episode.
                 _ => MemoryType::Episode,
             })
+            // Sin campo `type`: fallback a Episode.
             .unwrap_or(MemoryType::Episode);
 
         let content = result
@@ -1059,6 +1073,9 @@ impl AgentMemory {
         }
     }
 
+    /// Como [`Self::to_recall`] pero para [`SearchResult`]. Mismo contrato de
+    /// fallback a [`MemoryType::Episode`] para tipos no modelados, con el
+    /// `type` original preservado en `metadata`.
     fn to_recall_from_search(&self, result: SearchResult) -> MemoryRecall {
         let memory_type = result
             .metadata
@@ -1071,10 +1088,15 @@ impl AgentMemory {
                     "api_knowledge" => MemoryType::ApiKnowledge,
                     "error_solution" => MemoryType::ErrorSolution,
                     "pattern" => MemoryType::Pattern,
+                    "documentation" => MemoryType::Documentation,
+                    "project_context" => MemoryType::ProjectContext,
+                    // Tipo no modelado: fallback a Episode (ver doc-comment).
                     _ => MemoryType::Episode,
                 },
+                // `type` presente pero no es String: fallback a Episode.
                 _ => MemoryType::Episode,
             })
+            // Sin campo `type`: fallback a Episode.
             .unwrap_or(MemoryType::Episode);
 
         let content = result
@@ -1151,9 +1173,17 @@ impl AgentMemory {
         Ok(deleted)
     }
 
-    /// Limpia memorias antiguas
+    /// Limpia memorias antiguas.
+    ///
+    /// Borra las memorias cuyo `timestamp` en metadata es anterior a
+    /// `now - max_age_days*86400`. La resta usa `saturating_sub`: si el reloj
+    /// del sistema esta antes de la epoca (`now = 0`) o `max_age_days` es tan
+    /// grande que la ventana excede el unix-time actual, el `cutoff` cae a 0 y
+    /// **no se borra nada** (ningun `timestamp` u64 es `< 0`). Es decir, un
+    /// `max_age_days` absurdo es seguro y conservador: nunca panica y nunca
+    /// borra documentos por error.
     pub fn cleanup_old(&self, max_age_days: u32) -> Result<usize> {
-        let cutoff = current_timestamp() - (max_age_days as u64 * 24 * 60 * 60);
+        let cutoff = current_timestamp().saturating_sub(max_age_days as u64 * 24 * 60 * 60);
         let mut deleted = 0;
 
         let all_ids = self.db().list_ids()?;
@@ -1335,5 +1365,103 @@ mod tests {
             Some("test-project".to_string())
         );
         assert!(memory.db().has_partial_index("project_test-project"));
+    }
+
+    /// Un `max_age_days` absurdo (u32::MAX) no panica y, por la semántica
+    /// conservadora de `saturating_sub` (cutoff = 0), no borra nada.
+    #[test]
+    fn test_cleanup_old_huge_max_age_safe() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut meta = crate::Metadata::new();
+        meta.insert("type".to_string(), crate::MetadataValue::String("episode".to_string()));
+        meta.insert("timestamp".to_string(), crate::MetadataValue::Int(now));
+
+        let vec = vec![1.0f32; 384];
+        memory
+            .db()
+            .insert_document("doc-fresh", Some(&vec), Some(meta))
+            .unwrap();
+
+        // No debe paniquear ni borrar el doc reciente.
+        let deleted = memory.cleanup_old(u32::MAX).unwrap();
+        assert_eq!(deleted, 0);
+        assert!(memory.db().contains("doc-fresh"));
+    }
+
+    /// `cleanup_old` con ventana normal sí borra memorias viejas.
+    #[test]
+    fn test_cleanup_old_deletes_old() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let mut meta_old = crate::Metadata::new();
+        meta_old.insert("type".to_string(), crate::MetadataValue::String("episode".to_string()));
+        // Timestamp antiguo (época + 1s) => siempre menor al cutoff con max_age >= 1 día.
+        meta_old.insert("timestamp".to_string(), crate::MetadataValue::Int(1));
+
+        let vec = vec![1.0f32; 384];
+        memory
+            .db()
+            .insert_document("doc-old", Some(&vec), Some(meta_old))
+            .unwrap();
+
+        let deleted = memory.cleanup_old(1).unwrap();
+        assert_eq!(deleted, 1);
+        assert!(!memory.db().contains("doc-old"));
+    }
+
+    /// `to_recall` mapea `type="documentation"` a `MemoryType::Documentation`
+    /// (antes caía a Episode), y un tipo desconocido cae a Episode **pero**
+    /// preserva el `type` original en `metadata`.
+    #[test]
+    fn test_to_recall_known_and_unknown_type() {
+        let config = MemoryConfig::small();
+        let memory = AgentMemory::new(config).unwrap();
+
+        let vec = vec![1.0f32; 384];
+
+        let mut meta_doc = crate::Metadata::new();
+        meta_doc.insert("type".to_string(), crate::MetadataValue::String("documentation".to_string()));
+        memory
+            .db()
+            .insert_document("doc-typed", Some(&vec), Some(meta_doc))
+            .unwrap();
+
+        let mut meta_unknown = crate::Metadata::new();
+        meta_unknown.insert("type".to_string(), crate::MetadataValue::String("custom_unmodeled".to_string()));
+        memory
+            .db()
+            .insert_document("doc-unknown", Some(&vec), Some(meta_unknown))
+            .unwrap();
+
+        let recalls = memory.recall_by_embedding(&vec, 10).unwrap();
+        let by_id: HashMap<String, MemoryRecall> = recalls
+            .into_iter()
+            .map(|r| (r.id.clone(), r))
+            .collect();
+
+        let doc = by_id.get("doc-typed").expect("doc-typed debe aparecer");
+        assert_eq!(doc.memory_type, MemoryType::Documentation);
+
+        let unknown = by_id.get("doc-unknown").expect("doc-unknown debe aparecer");
+        // Fallback documentado: tipo no modelado -> Episode.
+        assert_eq!(unknown.memory_type, MemoryType::Episode);
+        // El tipo original queda preservado en metadata.
+        let preserved = unknown
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("type"))
+            .and_then(|v| match v {
+                crate::MetadataValue::String(s) => Some(s.clone()),
+                _ => None,
+            });
+        assert_eq!(preserved.as_deref(), Some("custom_unmodeled"));
     }
 }

@@ -565,6 +565,12 @@ impl VectorDB {
 
     /// Elimina un vector por su ID.
     ///
+    /// Esto es una eliminación **física**: quita el documento del storage, del
+    /// índice vectorial, del índice BM25 y de los índices parciales. No es lo
+    /// mismo que el soft-delete lógico que aplican los métodos de búsqueda
+    /// (`metadata["deleted"] == true`), que sólo oculta el documento de
+    /// `list_documents` y las búsquedas híbridas pero no lo remueve.
+    ///
     /// # Retorna
     ///
     /// `true` si el vector existía y fue eliminado, `false` si no existía.
@@ -1162,6 +1168,13 @@ impl VectorDB {
             Self::validate_vector(vec)?;
         }
 
+        // Un filtro con una regex inválida se rechaza aquí (antes de evaluarlo
+        // documento a documento) para que el error sea visible y no se confunda
+        // con "0 coincidencias".
+        if let Some(ref filter) = params.filter {
+            crate::query::FilterEvaluator::validate(filter)?;
+        }
+
         HybridSearch::search(
             &params,
             self.index.as_ref(),
@@ -1174,6 +1187,9 @@ impl VectorDB {
     /// Búsqueda por keywords usando BM25.
     ///
     /// Requiere que la DB haya sido creada con `with_fulltext`.
+    ///
+    /// Los documentos con `metadata["deleted"] == true` se excluyen
+    /// (soft-delete lógico); [`delete`](Self::delete) es eliminación física.
     ///
     /// # Argumentos
     ///
@@ -1201,6 +1217,11 @@ impl VectorDB {
     ///
     /// No realiza ranking por similitud, solo filtra documentos.
     ///
+    /// Los documentos con `metadata["deleted"] == true` se excluyen
+    /// (soft-delete lógico); [`delete`](Self::delete) es eliminación física.
+    /// Un filtro con una regex que no compila se rechaza con
+    /// [`Error::InvalidFilter`] en vez de devolverse "0 coincidencias".
+    ///
     /// # Argumentos
     ///
     /// * `filter` - Filtro de metadata
@@ -1226,6 +1247,11 @@ impl VectorDB {
     /// Búsqueda vectorial con filtro de metadata.
     ///
     /// Combina búsqueda por similitud vectorial con filtrado de metadata.
+    ///
+    /// Los documentos con `metadata["deleted"] == true` se excluyen
+    /// (soft-delete lógico); [`delete`](Self::delete) es eliminación física.
+    /// Un filtro con una regex que no compila se rechaza con
+    /// [`Error::InvalidFilter`] en vez de devolverse "0 coincidencias".
     ///
     /// # Argumentos
     ///
@@ -1281,6 +1307,17 @@ impl VectorDB {
     ///
     /// This is the most SQL-like query method: SELECT * WHERE filter ORDER BY field LIMIT k OFFSET n.
     ///
+    /// # Soft-delete
+    ///
+    /// Los documentos cuyo metadata contiene `"deleted" == true`
+    /// (`MetadataValue::Bool(true)`) se excluyen de los resultados (soft-delete
+    /// lógico). [`delete`](Self::delete) es distinto: elimina el documento
+    /// físicamente (storage, índice y BM25). Un documento soft-deleted sigue
+    /// siendo devuelto por [`get`](Self::get) y por la búsqueda vectorial pura
+    /// [`search`](Self::search), pero no por este método ni por las búsquedas
+    /// híbridas (`filter_search`, `search_with_filter`, `keyword_search`,
+    /// `hybrid_search`).
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -1303,6 +1340,12 @@ impl VectorDB {
         limit: usize,
         offset: usize,
     ) -> Result<PagedResult<HybridSearchResult>> {
+        // Un filtro con una regex inválida se rechaza antes de evaluarlo para
+        // que el error sea visible (y no se confunda con "0 coincidencias").
+        if let Some(ref f) = filter {
+            crate::query::FilterEvaluator::validate(f)?;
+        }
+
         // Collect all matching documents
         let all: Vec<HybridSearchResult> = self
             .storage
@@ -1421,8 +1464,11 @@ impl VectorDB {
         // Total is all documents with vectors (the searchable set)
         let total = self.storage.iter_with_vectors().count();
 
-        // Fetch enough results for offset + limit
-        let fetch_k = offset + limit;
+        // Fetch enough results for offset + limit. Saturate the addition to
+        // avoid arithmetic overflow on extreme offset/limit, and clamp to the
+        // searchable set so we never ask the index for more than exists (which
+        // would also overflow the heap's `k + 1` capacity on huge `k`).
+        let fetch_k = offset.saturating_add(limit).min(total);
         let all_results = self
             .index
             .search(query, fetch_k, self.storage.as_ref(), self.config.distance)?;
@@ -1688,6 +1734,123 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
+    }
+
+    #[test]
+    fn test_regex_filter_invalid_surfaces_error() {
+        let db = create_fulltext_db();
+
+        let mut meta1 = Metadata::new();
+        meta1.insert("title", "Tech Article");
+
+        let mut meta2 = Metadata::new();
+        meta2.insert("title", "Food Recipe");
+
+        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1))
+            .unwrap();
+        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2))
+            .unwrap();
+
+        // Invalid regex must be reported as an error, not silently "0 results".
+        let err = db
+            .filter_search(Filter::regex("title", "[unclosed"), 10)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidFilter(_)));
+
+        // Same via search_with_filter and list_documents.
+        let err = db
+            .search_with_filter(&[1.0, 0.0, 0.0], 10, Filter::regex("title", "[unclosed"))
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidFilter(_)));
+
+        let err = db
+            .list_documents(Some(Filter::regex("title", "[unclosed")), None, 10, 0)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidFilter(_)));
+    }
+
+    #[test]
+    fn test_regex_filter_valid_still_works() {
+        let db = create_fulltext_db();
+
+        let mut meta1 = Metadata::new();
+        meta1.insert("title", "Tech Article");
+
+        let mut meta2 = Metadata::new();
+        meta2.insert("title", "Food Recipe");
+
+        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1))
+            .unwrap();
+        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2))
+            .unwrap();
+
+        let results = db
+            .filter_search(Filter::regex("title", "^Tech"), 10)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc-1");
+    }
+
+    #[test]
+    fn test_search_with_filter_huge_k_no_overflow() {
+        let db = create_test_db();
+
+        let mut meta1 = Metadata::new();
+        meta1.insert("category", "tech");
+        db.insert("doc-1", &[1.0, 0.0, 0.0], Some(meta1)).unwrap();
+
+        // k = usize::MAX with a filter must not panic (saturating fetch in the
+        // hybrid path clamps to the index size).
+        let results = db
+            .search_with_filter(&[1.0, 0.0, 0.0], usize::MAX, Filter::eq("category", "tech"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc-1");
+    }
+
+    #[test]
+    fn test_search_paged_extreme_offset_limit_no_overflow() {
+        let db = create_test_db();
+        db.insert("a", &[1.0, 0.0, 0.0], None).unwrap();
+        db.insert("b", &[0.0, 1.0, 0.0], None).unwrap();
+
+        // offset + limit that would overflow usize: must not panic.
+        let page = db.search_paged(&[1.0, 0.0, 0.0], 1, usize::MAX).unwrap();
+        // No results match such an offset, but it returns Ok without panicking.
+        assert_eq!(page.items.len(), 0);
+        assert_eq!(page.total, 2);
+    }
+
+    #[test]
+    fn test_soft_delete_excluded_from_list_and_filter() {
+        let db = create_fulltext_db();
+
+        let mut meta1 = Metadata::new();
+        meta1.insert("title", "Tech Article");
+        meta1.insert("category", "tech");
+        // Mark as soft-deleted via the magic metadata flag.
+        meta1.insert("deleted", true);
+
+        let mut meta2 = Metadata::new();
+        meta2.insert("title", "Food Recipe");
+        meta2.insert("category", "food");
+
+        db.insert_document("doc-1", Some(&[1.0, 0.0, 0.0]), Some(meta1))
+            .unwrap();
+        db.insert_document("doc-2", Some(&[0.0, 1.0, 0.0]), Some(meta2))
+            .unwrap();
+
+        // list_documents hides the soft-deleted doc.
+        let page = db.list_documents(None, None, 10, 0).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "doc-2");
+
+        // filter_search hides it too.
+        let results = db.filter_search(Filter::eq("category", "tech"), 10).unwrap();
+        assert!(results.is_empty());
+
+        // But get() still returns it (physical delete is a different thing).
+        assert!(db.get("doc-1").unwrap().is_some());
     }
 
     #[test]

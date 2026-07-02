@@ -83,12 +83,7 @@ impl WasmVectorDB {
     /// Crea una base de datos con configuracion HNSW personalizada.
     #[wasm_bindgen]
     pub fn new_hnsw(dimensions: usize, distance: &str, m: usize, ef_construction: usize) -> Result<WasmVectorDB, JsError> {
-        let dist = match distance {
-            "cosine" | "cos" => RustDistance::Cosine,
-            "euclidean" | "l2" => RustDistance::Euclidean,
-            "dot" | "dot_product" => RustDistance::DotProduct,
-            d => return Err(JsError::new(&format!("Unknown distance: {}", d))),
-        };
+        let dist = parse_distance(distance)?;
 
         let config = RustConfig::new(dimensions)
             .with_distance(dist)
@@ -270,7 +265,9 @@ impl WasmVectorDB {
                     "vector": vector,
                     "metadata": metadata.map(|m| metadata_to_json(&m)),
                 });
-                Ok(JsValue::from_str(&serde_json::to_string(&result).unwrap()))
+                let json = serde_json::to_string(&result)
+                    .map_err(|e| JsError::new(&e.to_string()))?;
+                Ok(JsValue::from_str(&json))
             }
             None => Ok(JsValue::NULL),
         }
@@ -622,30 +619,65 @@ impl WasmVectorDB {
         let entries: Vec<serde_json::Value> = serde_json::from_str(json)
             .map_err(|e| JsError::new(&format!("Invalid JSON: {}", e)))?;
 
+        let dimensions = self.inner.dimensions();
+
+        // Validar y parsear COMPLETAMENTE el snapshot antes de tocar el estado.
+        let mut parsed: Vec<(String, Option<Vec<f32>>, RustMetadata)> =
+            Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let id = entry["id"].as_str()
+                .ok_or_else(|| JsError::new("Missing 'id' field in snapshot entry"))?
+                .to_string();
+
+            let vector: Option<Vec<f32>> = entry
+                .get("vector")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|x| {
+                            x.as_f64()
+                                .map(|f| f as f32)
+                                .ok_or_else(|| JsError::new(&format!(
+                                    "Invalid vector element in entry '{}'",
+                                    id
+                                )))
+                        })
+                        .collect::<Result<Vec<f32>, JsError>>()
+                })
+                .transpose()?;
+
+            if let Some(ref vec) = vector {
+                if vec.len() != dimensions {
+                    return Err(JsError::new(&format!(
+                        "Vector dimension mismatch for entry '{}': expected {}, got {}",
+                        id,
+                        dimensions,
+                        vec.len()
+                    )));
+                }
+            }
+
+            let metadata_str = entry
+                .get("metadata")
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "{}".to_string());
+            let meta = parse_metadata_json(&metadata_str)?;
+
+            parsed.push((id, vector, meta));
+        }
+
+        // Solo si todo es valido, reemplazamos el contenido.
         self.inner.clear();
 
         let mut imported = 0;
-        for entry in &entries {
-            let id = entry["id"].as_str()
-                .ok_or_else(|| JsError::new("Missing 'id' field in snapshot entry"))?;
-
-            let vector: Option<Vec<f32>> = entry.get("vector")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect());
-
-            let metadata_str = entry.get("metadata")
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "{}".to_string());
-
-            let meta = parse_metadata_json(&metadata_str)?;
-
+        for (id, vector, meta) in parsed {
             if let Some(vec) = vector {
                 self.inner
-                    .insert(id, &vec, Some(meta))
+                    .insert(&id, &vec, Some(meta))
                     .map_err(|e| JsError::new(&e.to_string()))?;
             } else {
                 self.inner
-                    .insert_document(id, None, Some(meta))
+                    .insert_document(&id, None, Some(meta))
                     .map_err(|e| JsError::new(&e.to_string()))?;
             }
             imported += 1;
@@ -710,22 +742,7 @@ fn parse_metadata_json(json: &str) -> Result<RustMetadata, JsError> {
 
     if let serde_json::Value::Object(map) = value {
         for (key, val) in map {
-            match val {
-                serde_json::Value::String(s) => {
-                    meta.insert(&key, s);
-                }
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        meta.insert(&key, i);
-                    } else if let Some(f) = n.as_f64() {
-                        meta.insert(&key, f);
-                    }
-                }
-                serde_json::Value::Bool(b) => {
-                    meta.insert(&key, b);
-                }
-                _ => {} // Ignorar arrays y objetos anidados
-            }
+            meta.insert(&key, json_to_metadata_value(&val));
         }
     }
 
@@ -738,69 +755,80 @@ fn parse_filter_json(json: &str) -> Result<crate::query::Filter, JsError> {
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| JsError::new(&format!("Invalid filter JSON: {}", e)))?;
 
-    parse_filter_value(&value)
+    parse_filter_value(&value).map_err(|e| JsError::new(&e))
 }
 
-fn parse_filter_value(value: &serde_json::Value) -> Result<crate::query::Filter, JsError> {
+/// Lógica pura de parseo de filtro. Devuelve el mensaje de error como `String`
+/// para ser testeable en targets no-wasm (sin construir `JsError`).
+fn parse_filter_value(value: &serde_json::Value) -> Result<crate::query::Filter, String> {
     use crate::query::Filter;
 
-    if let serde_json::Value::Object(map) = value {
-        let mut filters: Vec<Filter> = Vec::new();
+    let serde_json::Value::Object(map) = value else {
+        return Err("Filter must be a JSON object".to_string());
+    };
 
-        for (key, val) in map {
-            if key == "$and" {
-                if let serde_json::Value::Array(arr) = val {
-                    let sub: Result<Vec<Filter>, _> = arr.iter().map(parse_filter_value).collect();
-                    filters.push(Filter::all(sub?));
-                }
-            } else if key == "$or" {
-                if let serde_json::Value::Array(arr) = val {
-                    let sub: Result<Vec<Filter>, _> = arr.iter().map(parse_filter_value).collect();
-                    filters.push(Filter::any(sub?));
-                }
-            } else if let serde_json::Value::Object(ops) = val {
-                // Operator: {"field": {"$gt": 5}}
-                for (op, target) in ops {
-                    let f = match op.as_str() {
-                        "$eq" => Filter::eq(key.as_str(), json_to_metadata_value(target)),
-                        "$ne" => Filter::ne(key.as_str(), json_to_metadata_value(target)),
-                        "$gt" => Filter::gt(key.as_str(), json_to_metadata_value(target)),
-                        "$gte" => Filter::gte(key.as_str(), json_to_metadata_value(target)),
-                        "$lt" => Filter::lt(key.as_str(), json_to_metadata_value(target)),
-                        "$lte" => Filter::lte(key.as_str(), json_to_metadata_value(target)),
-                        "$contains" => {
-                            if let Some(s) = target.as_str() {
-                                Filter::contains(key.as_str(), s)
-                            } else {
-                                continue;
-                            }
-                        }
-                        "$regex" => {
-                            if let Some(s) = target.as_str() {
-                                Filter::regex(key.as_str(), s)
-                            } else {
-                                continue;
-                            }
-                        }
-                        _ => continue,
-                    };
-                    filters.push(f);
-                }
+    let mut filters: Vec<Filter> = Vec::new();
+
+    for (key, val) in map {
+        if key == "$and" || key == "$or" {
+            let arr = val
+                .as_array()
+                .ok_or_else(|| format!("'{}' must be an array of filter objects", key))?;
+            let sub: Vec<Filter> = arr
+                .iter()
+                .map(parse_filter_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            filters.push(if key == "$and" {
+                Filter::all(sub)
             } else {
-                // Simple equality: {"field": "value"}
-                filters.push(Filter::eq(key.as_str(), json_to_metadata_value(val)));
+                Filter::any(sub)
+            });
+        } else if let serde_json::Value::Object(ops) = val {
+            // Operator: {"field": {"$gt": 5}}
+            if ops.is_empty() {
+                return Err(format!("Empty operator object for field '{}'", key));
             }
-        }
-
-        if filters.is_empty() {
-            Err(JsError::new("Empty filter"))
-        } else if filters.len() == 1 {
-            Ok(filters.into_iter().next().unwrap())
+            for (op, target) in ops {
+                let f = match op.as_str() {
+                    "$eq" => Filter::eq(key.as_str(), json_to_metadata_value(target)),
+                    "$ne" => Filter::ne(key.as_str(), json_to_metadata_value(target)),
+                    "$gt" => Filter::gt(key.as_str(), json_to_metadata_value(target)),
+                    "$gte" => Filter::gte(key.as_str(), json_to_metadata_value(target)),
+                    "$lt" => Filter::lt(key.as_str(), json_to_metadata_value(target)),
+                    "$lte" => Filter::lte(key.as_str(), json_to_metadata_value(target)),
+                    "$contains" => {
+                        let s = target.as_str().ok_or_else(|| {
+                            format!("'$contains' for field '{}' must be a string", key)
+                        })?;
+                        Filter::contains(key.as_str(), s)
+                    }
+                    "$regex" => {
+                        let s = target.as_str().ok_or_else(|| {
+                            format!("'$regex' for field '{}' must be a string", key)
+                        })?;
+                        Filter::regex(key.as_str(), s)
+                    }
+                    other => {
+                        return Err(format!(
+                            "Unknown filter operator '{}' for field '{}'",
+                            other, key
+                        ))
+                    }
+                };
+                filters.push(f);
+            }
         } else {
-            Ok(Filter::all(filters))
+            // Simple equality: {"field": "value"}
+            filters.push(Filter::eq(key.as_str(), json_to_metadata_value(val)));
         }
+    }
+
+    if filters.is_empty() {
+        Err("Empty filter".to_string())
+    } else if filters.len() == 1 {
+        Ok(filters.into_iter().next().unwrap())
     } else {
-        Err(JsError::new("Filter must be a JSON object"))
+        Ok(Filter::all(filters))
     }
 }
 
@@ -817,7 +845,15 @@ fn json_to_metadata_value(val: &serde_json::Value) -> crate::types::MetadataValu
             }
         }
         serde_json::Value::Bool(b) => crate::types::MetadataValue::Bool(*b),
-        _ => crate::types::MetadataValue::String(val.to_string()),
+        serde_json::Value::Array(arr) => crate::types::MetadataValue::List(
+            arr.iter().map(json_to_metadata_value).collect(),
+        ),
+        serde_json::Value::Object(obj) => crate::types::MetadataValue::Map(
+            obj.iter()
+                .map(|(k, v)| (k.clone(), json_to_metadata_value(v)))
+                .collect(),
+        ),
+        serde_json::Value::Null => crate::types::MetadataValue::String("null".to_string()),
     }
 }
 
@@ -874,4 +910,106 @@ fn metadata_to_json(meta: &RustMetadata) -> serde_json::Value {
     }
 
     serde_json::Value::Object(map)
+}
+
+#[cfg(all(test, feature = "wasm"))]
+mod tests {
+    use super::*;
+    use crate::types::MetadataValue;
+    use std::collections::HashMap;
+
+    #[test]
+    fn parse_metadata_preserves_scalars_list_and_map() {
+        let json = r#"{"name":"x","score":5,"active":true,"tags":["a","b"],"nested":{"k":1}}"#;
+        let meta = parse_metadata_json(json).unwrap();
+        assert_eq!(meta.get("name").unwrap(), &MetadataValue::String("x".to_string()));
+        assert_eq!(meta.get("score").unwrap(), &MetadataValue::Int(5));
+        assert_eq!(meta.get("active").unwrap(), &MetadataValue::Bool(true));
+        match meta.get("tags").unwrap() {
+            MetadataValue::List(l) => {
+                assert_eq!(l.len(), 2);
+                assert_eq!(l[0], MetadataValue::String("a".to_string()));
+                assert_eq!(l[1], MetadataValue::String("b".to_string()));
+            }
+            v => panic!("expected List, got {:?}", v),
+        }
+        match meta.get("nested").unwrap() {
+            MetadataValue::Map(m) => {
+                assert_eq!(m.get("k").unwrap(), &MetadataValue::Int(1));
+            }
+            v => panic!("expected Map, got {:?}", v),
+        }
+    }
+
+    #[test]
+    fn metadata_roundtrip_export_import_preserves_list_and_map() {
+        let mut meta = RustMetadata::new();
+        meta.insert(
+            "tags",
+            MetadataValue::List(vec![
+                MetadataValue::String("a".into()),
+                MetadataValue::Int(1),
+            ]),
+        );
+        let mut nested = HashMap::new();
+        nested.insert("k".to_string(), MetadataValue::Int(1));
+        meta.insert("nested", MetadataValue::Map(nested));
+
+        let exported = metadata_to_json(&meta);
+        let s = serde_json::to_string(&exported).unwrap();
+        let reimported = parse_metadata_json(&s).unwrap();
+        let re_exported = metadata_to_json(&reimported);
+        assert_eq!(exported, re_exported);
+    }
+
+    /// Helper: parsea JSON valido y aplica la logica pura de filtro
+    /// (sin construir `JsError`, para correr en targets no-wasm).
+    fn parse_filter(s: &str) -> Result<crate::query::Filter, String> {
+        let v: serde_json::Value = serde_json::from_str(s).unwrap();
+        parse_filter_value(&v)
+    }
+
+    #[test]
+    fn parse_filter_rejects_unknown_operator() {
+        assert!(parse_filter(r#"{"field":{"$foo":1}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_filter_rejects_and_not_array() {
+        assert!(parse_filter(r#"{"$and":{"x":1}}"#).is_err());
+        assert!(parse_filter(r#"{"$or":{"x":1}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_filter_rejects_contains_non_string() {
+        assert!(parse_filter(r#"{"field":{"$contains":5}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_filter_rejects_regex_non_string() {
+        assert!(parse_filter(r#"{"field":{"$regex":5}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_filter_rejects_empty_operator_object() {
+        assert!(parse_filter(r#"{"field":{}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_filter_rejects_non_object_top_level() {
+        assert!(parse_filter_value(&serde_json::json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn parse_filter_valid_equality_still_works() {
+        assert!(parse_filter(r#"{"category":"tech"}"#).is_ok());
+    }
+
+    #[test]
+    fn parse_filter_valid_operators_still_works() {
+        assert!(parse_filter(r#"{"field":{"$gt":5}}"#).is_ok());
+        assert!(parse_filter(r#"{"field":{"$contains":"substr"}}"#).is_ok());
+        assert!(parse_filter(r#"{"$and":[{"a":1},{"b":2}]}"#).is_ok());
+        assert!(parse_filter(r#"{"$or":[{"a":1},{"b":2}]}"#).is_ok());
+    }
 }

@@ -180,6 +180,21 @@ impl Filter {
 
     /// Crea un filtro de regex sobre un campo string.
     ///
+    /// El patrón se compila con `regex_lite` y se evalúa contra el valor del
+    /// campo como coincidencia parcial (no requiere anclarlo).
+    ///
+    /// # Patrones inválidos
+    ///
+    /// A diferencia de otros operadores, un patrón de regex puede no compilar
+    /// (p. ej. `"[unclosed"`). Como [`FilterEvaluator::evaluate`] devuelve
+    /// `bool` y no puede propagar el error, un patrón inválido se detecta al
+    /// **aplicar** el filtro: los métodos públicos de `VectorDB` que aceptan
+    /// un `Filter` (`filter_search`, `search_with_filter`, `hybrid_search`,
+    /// `list_documents`, etc.) validan el filtro antes de evaluarlo y devuelven
+    /// [`Error::InvalidFilter`](crate::Error::InvalidFilter) si algún patrón
+    /// no compila. Así un patrón roto se reporta como error en vez de
+    /// confundirse con "0 coincidencias".
+    ///
     /// # Ejemplo
     ///
     /// ```rust
@@ -295,6 +310,34 @@ impl FilterEvaluator {
                 filters.iter().any(|f| Self::evaluate(f, metadata))
             }
             Filter::Not(filter) => !Self::evaluate(filter, metadata),
+        }
+    }
+
+    /// Valida el filtro antes de aplicarlo.
+    ///
+    /// Recorre el árbol de condiciones y verifica que todo operador sea
+    /// utilizable. Hoy esto significa comprobar que los patrones de `Regex`
+    /// compilen: un patrón inválido no puede propagarse desde
+    /// [`evaluate`](Self::evaluate) (que devuelve `bool`), por lo que el
+    /// llamador debe invocar esto al aplicar el filtro para rechazarlo con
+    /// [`Error::InvalidFilter`](crate::Error::InvalidFilter) en vez de
+    /// devolver "0 coincidencias" de forma silenciosa.
+    pub fn validate(filter: &Filter) -> Result<(), crate::Error> {
+        match filter {
+            Filter::Condition { op, .. } => op.validate(),
+            Filter::And(filters) => {
+                for f in filters {
+                    Self::validate(f)?;
+                }
+                Ok(())
+            }
+            Filter::Or(filters) => {
+                for f in filters {
+                    Self::validate(f)?;
+                }
+                Ok(())
+            }
+            Filter::Not(f) => Self::validate(f),
         }
     }
 
@@ -522,5 +565,35 @@ mod tests {
 
         let filter = Filter::not_exists("field");
         assert!(FilterEvaluator::evaluate(&filter, None));
+    }
+
+    #[test]
+    fn test_regex_valid_compiles_and_matches() {
+        let meta = create_test_metadata();
+
+        let filter = Filter::regex("title", "^Hello");
+        assert!(!FilterEvaluator::evaluate(&filter, Some(&meta)));
+
+        let filter = Filter::regex("title", "^Test");
+        assert!(FilterEvaluator::evaluate(&filter, Some(&meta)));
+
+        // Valid patterns must pass validation.
+        assert!(FilterEvaluator::validate(&Filter::regex("title", "^Test")).is_ok());
+    }
+
+    #[test]
+    fn test_regex_invalid_surfaces_error() {
+        // An invalid pattern must be rejected by validate (and thus by the
+        // VectorDB methods that apply filters), not silently "no match".
+        let filter = Filter::regex("title", "[unclosed");
+        let err = FilterEvaluator::validate(&filter).unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidFilter(_)));
+
+        // Invalid regex nested in boolean combinators is also detected.
+        let combined = Filter::all(vec![
+            Filter::eq("category", "tech"),
+            Filter::regex("title", "(?P<unclosed"),
+        ]);
+        assert!(FilterEvaluator::validate(&combined).is_err());
     }
 }

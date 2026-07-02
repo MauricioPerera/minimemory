@@ -649,6 +649,18 @@ impl ReplicationManager {
     }
 
     /// Exporta un snapshot completo de la DB para replicación inicial.
+    ///
+    /// **Advertencia de uso:** las entradas producidas usan secuencias
+    /// posicionales (`0,1,2,...`) y `origin_id = "snapshot"` — **no son
+    /// secuencias reales** del `ChangeLog` remoto. Por eso un snapshot debe
+    /// aplicarse **solo** vía [`Self::apply_snapshot`], que descarta
+    /// `new_sequence` y no toca ningún `ReplicationState`. **No** pases estas
+    /// entradas por [`Self::sync`]: `sync` actualiza
+    /// `state.last_synced_sequence` con `new_sequence` (aquí `N-1`), y un
+    /// `sync` posterior con cambios **reales** de secuencia baja contra el
+    /// mismo `remote_id` los filtraría (`c.sequence > last_synced_sequence`).
+    /// Si necesitas mezclar snapshot y sync incremental, usa un `remote_id`
+    /// dedicado (p. ej. `"snapshot"`) que nunca se reutilice para sync real.
     pub fn create_snapshot(db: &VectorDB) -> Result<Vec<ChangeEntry>> {
         let ids = db.list_ids()?;
         let mut entries = Vec::with_capacity(ids.len());
@@ -671,6 +683,12 @@ impl ReplicationManager {
     }
 
     /// Aplica un snapshot a una DB vacía.
+    ///
+    /// Es la **única vía documentada** para aplicar un snapshot: delega en
+    /// [`Self::apply_changes`] (estático, sin acceso a `ReplicationState`) y
+    /// descarta `result.new_sequence`, de modo que el tracking de sync queda
+    /// intacto. Ver la advertencia de [`Self::create_snapshot`] sobre no
+    /// enrutar snapshots por [`Self::sync`].
     pub fn apply_snapshot(db: &VectorDB, snapshot: &[ChangeEntry]) -> Result<usize> {
         let result = Self::apply_changes(db, snapshot)?;
         Ok(result.applied)

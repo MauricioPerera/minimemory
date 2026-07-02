@@ -125,6 +125,14 @@ impl ScalarQuantParams {
     /// Quantize a single f32 value to i8
     #[inline]
     pub fn quantize_value(&self, val: f32) -> i8 {
+        let range = self.max_val - self.min_val;
+        // Degenerate range (constant input, min == max) or a corrupt/zero
+        // scale: emit a fixed level. dequantize_value maps any level back to
+        // min_val in this case, so the round-trip is well defined (no NaN,
+        // no division by zero).
+        if !range.is_finite() || range <= 0.0 || !self.scale.is_finite() || self.scale == 0.0 {
+            return 0;
+        }
         let clamped = val.clamp(self.min_val, self.max_val);
         let normalized = (clamped - self.min_val) * self.scale;
         (normalized - 128.0).round() as i8
@@ -133,6 +141,12 @@ impl ScalarQuantParams {
     /// Dequantize a single i8 value back to f32
     #[inline]
     pub fn dequantize_value(&self, val: i8) -> f32 {
+        let range = self.max_val - self.min_val;
+        // Constant input (min == max) or corrupt scale: return the constant
+        // value, avoiding a 0.0 / 0.0 (or x / 0.0) NaN.
+        if !range.is_finite() || range <= 0.0 || !self.scale.is_finite() || self.scale == 0.0 {
+            return self.min_val;
+        }
         let normalized = (val as f32 + 128.0) / self.scale;
         normalized + self.min_val
     }
@@ -142,8 +156,8 @@ impl ScalarQuantParams {
     pub fn quantize_value_3bit(&self, val: f32) -> u8 {
         let clamped = val.clamp(self.min_val, self.max_val);
         let range = self.max_val - self.min_val;
-        if range <= 0.0 {
-            return 3; // midpoint
+        if !range.is_finite() || range <= 0.0 {
+            return 3; // midpoint of the 8 levels
         }
         let normalized = (clamped - self.min_val) / range * 7.0;
         (normalized.round() as u8).min(7)
@@ -153,6 +167,9 @@ impl ScalarQuantParams {
     #[inline]
     pub fn dequantize_value_3bit(&self, val: u8) -> f32 {
         let range = self.max_val - self.min_val;
+        if !range.is_finite() || range <= 0.0 {
+            return self.min_val;
+        }
         self.min_val + (val as f32 / 7.0) * range
     }
 }
@@ -234,7 +251,12 @@ impl QuantizedVector {
                     let word_idx = i / INT3_VALUES_PER_WORD;
                     let pos_in_word = i % INT3_VALUES_PER_WORD;
                     let shift = pos_in_word * 3;
-                    let val = ((data[word_idx] >> shift) & 0x7) as u8;
+                    // Guard against inconsistent deserialized vectors where
+                    // `dimensions` claims more values than `data` can hold.
+                    let val = match data.get(word_idx) {
+                        Some(&word) => ((word >> shift) & 0x7) as u8,
+                        None => 0,
+                    };
                     result.push(params.dequantize_value_3bit(val));
                 }
                 result
@@ -244,7 +266,10 @@ impl QuantizedVector {
                 for i in 0..*dimensions {
                     let word_idx = i / 64;
                     let bit_idx = i % 64;
-                    let bit = (data[word_idx] >> bit_idx) & 1;
+                    let bit = match data.get(word_idx) {
+                        Some(&word) => (word >> bit_idx) & 1,
+                        None => 0,
+                    };
                     result.push(if bit == 1 { 1.0 } else { -1.0 });
                 }
                 result
@@ -417,6 +442,11 @@ pub fn cosine_distance_polar_symmetric(
     dimensions: usize,
 ) -> f32 {
     let pairs = dimensions / 2;
+    // With 0 dimensions (pairs == 0) the loop does not run and dot stays 0.0;
+    // `0.0 / 0.0` would yield NaN. Two empty vectors are trivially identical.
+    if pairs == 0 {
+        return 0.0;
+    }
     let mut dot = 0.0f32;
 
     for p in 0..pairs {
@@ -698,6 +728,14 @@ fn unpack_int3(word: u64, pos: usize) -> u8 {
 pub fn cosine_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
     debug_assert_eq!(a.len(), b.len());
 
+    // Guard against inconsistent `dimensions` vs `data` length (e.g. a vector
+    // deserialized from a corrupt/truncated source). Indexing past the end
+    // would panic; return a safe bounded "not similar" distance instead.
+    let needed = dimensions.div_ceil(INT3_VALUES_PER_WORD);
+    if a.len() < needed || b.len() < needed {
+        return 1.0;
+    }
+
     let mut dot: i32 = 0;
     let mut norm_a: i32 = 0;
     let mut norm_b: i32 = 0;
@@ -741,6 +779,11 @@ pub fn cosine_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
 pub fn euclidean_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
     debug_assert_eq!(a.len(), b.len());
 
+    let needed = dimensions.div_ceil(INT3_VALUES_PER_WORD);
+    if a.len() < needed || b.len() < needed {
+        return f32::MAX;
+    }
+
     let mut sum: i32 = 0;
 
     let full_words = dimensions / INT3_VALUES_PER_WORD;
@@ -772,6 +815,11 @@ pub fn euclidean_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
 pub fn dot_product_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
     debug_assert_eq!(a.len(), b.len());
 
+    let needed = dimensions.div_ceil(INT3_VALUES_PER_WORD);
+    if a.len() < needed || b.len() < needed {
+        return f32::MAX;
+    }
+
     let mut dot: i32 = 0;
 
     let full_words = dimensions / INT3_VALUES_PER_WORD;
@@ -800,6 +848,15 @@ pub fn dot_product_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32
 /// This is a rough approximation where Hamming distance correlates with angular distance
 #[inline]
 pub fn cosine_distance_binary(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
+    if dimensions == 0 {
+        // Avoid 0.0 / 0.0 = NaN; two empty binary vectors are trivially identical.
+        return 0.0;
+    }
+    let needed = dimensions.div_ceil(64);
+    if a.len() < needed || b.len() < needed {
+        // Inconsistent `dimensions` vs `data` length: do not panic.
+        return 1.0;
+    }
     let hamming = hamming_distance_binary(a, b);
     // Convert Hamming to approximate cosine distance
     // Hamming/dimensions gives fraction of differing bits
@@ -826,6 +883,10 @@ pub fn manhattan_distance_int8(a: &[i8], b: &[i8]) -> f32 {
 #[inline]
 pub fn manhattan_distance_int3(a: &[u64], b: &[u64], dimensions: usize) -> f32 {
     debug_assert_eq!(a.len(), b.len());
+    let needed = dimensions.div_ceil(INT3_VALUES_PER_WORD);
+    if a.len() < needed || b.len() < needed {
+        return f32::MAX;
+    }
     let mut sum: i32 = 0;
     let full_words = dimensions / INT3_VALUES_PER_WORD;
     let remainder = dimensions % INT3_VALUES_PER_WORD;
@@ -1322,5 +1383,121 @@ mod tests {
         // Different directions should have larger distance
         let dist = quantized_distance(&qa, &qb, crate::Distance::Cosine).unwrap();
         assert!(dist > 0.0, "Different vectors should have positive distance");
+    }
+
+    // ========================================================================
+    // Degenerate / inconsistent input robustness
+    // ========================================================================
+
+    #[test]
+    fn test_int8_constant_vector_roundtrip_no_nan() {
+        // All values equal => min == max. Quantize to a fixed level and
+        // dequantize back to the constant, without NaN or division by zero.
+        let samples: Vec<Vec<f32>> = vec![vec![2.5; 8]];
+        let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_slice()).collect();
+        let quantizer = Quantizer::int8_trained(8, &refs);
+
+        let constant = vec![2.5; 8];
+        let qvec = quantizer.quantize(&constant).unwrap();
+        let restored = qvec.to_f32();
+
+        assert_eq!(restored.len(), 8);
+        for r in &restored {
+            assert!(r.is_finite(), "restored value is NaN/inf: {r}");
+            assert!((r - 2.5).abs() < 1e-6, "round-trip should be the constant: {r}");
+        }
+    }
+
+    #[test]
+    fn test_int3_constant_vector_roundtrip_no_nan() {
+        let samples: Vec<Vec<f32>> = vec![vec![1.3; 8]];
+        let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_slice()).collect();
+        let quantizer = Quantizer::int3_trained(8, &refs);
+
+        let constant = vec![1.3; 8];
+        let qvec = quantizer.quantize(&constant).unwrap();
+        let restored = qvec.to_f32();
+
+        assert_eq!(restored.len(), 8);
+        for r in &restored {
+            assert!(r.is_finite(), "restored value is NaN/inf: {r}");
+            assert!((r - 1.3).abs() < 1e-6, "round-trip should be the constant: {r}");
+        }
+    }
+
+    #[test]
+    fn test_polar_zero_dimensions_distance_not_nan() {
+        // dimensions == 0 (even) is accepted by Quantizer::polar; the symmetric
+        // distance must not produce NaN (0.0 / 0.0).
+        let quantizer = Quantizer::polar(0);
+        let q = quantizer.quantize(&[]).unwrap();
+
+        if let QuantizedVector::Polar { data, dimensions, .. } = &q {
+            assert_eq!(*dimensions, 0);
+            let dist = cosine_distance_polar_symmetric(data, data, *dimensions);
+            assert!(dist.is_finite(), "zero-dim polar distance is NaN: {dist}");
+            assert_eq!(dist, 0.0);
+        } else {
+            panic!("Expected Polar");
+        }
+    }
+
+    #[test]
+    fn test_polar_small_even_dimensions_ok() {
+        // Small even dimension (2) round-trips and distances are finite.
+        let quantizer = Quantizer::polar(2);
+        let v = vec![0.7, -0.3];
+        let q = quantizer.quantize(&v).unwrap();
+        let restored = q.to_f32();
+        assert_eq!(restored.len(), 2);
+        for r in &restored {
+            assert!(r.is_finite());
+        }
+
+        if let QuantizedVector::Polar { data, dimensions, .. } = &q {
+            let dist = cosine_distance_polar_symmetric(data, data, *dimensions);
+            assert!(dist.is_finite(), "polar self-distance NaN: {dist}");
+        }
+    }
+
+    #[test]
+    fn test_int3_inconsistent_dimensions_does_not_panic() {
+        // A deserialized Int3 vector whose `dimensions` exceeds what `data`
+        // can hold (1 word = 21 values). Must not panic on to_f32 or distance.
+        let corrupt = QuantizedVector::Int3 {
+            data: vec![0u64; 1],
+            params: ScalarQuantParams::new(-1.0, 1.0),
+            dimensions: 100,
+        };
+        let f = corrupt.to_f32();
+        assert_eq!(f.len(), 100);
+        for v in &f {
+            assert!(v.is_finite(), "to_f32 produced NaN/inf");
+        }
+
+        let other = QuantizedVector::Int3 {
+            data: vec![0u64; 1],
+            params: ScalarQuantParams::new(-1.0, 1.0),
+            dimensions: 100,
+        };
+        // Direct distance calls with inconsistent data/dimensions must not panic.
+        if let (
+            QuantizedVector::Int3 { data: da, dimensions: dim_a, .. },
+            QuantizedVector::Int3 { data: db, .. },
+        ) = (&corrupt, &other)
+        {
+            let _ = cosine_distance_int3(da, db, *dim_a);
+            let _ = euclidean_distance_int3(da, db, *dim_a);
+            let _ = dot_product_distance_int3(da, db, *dim_a);
+            let _ = manhattan_distance_int3(da, db, *dim_a);
+        }
+    }
+
+    #[test]
+    fn test_binary_zero_dimensions_not_nan() {
+        let empty: Vec<u64> = vec![];
+        let dist = cosine_distance_binary(&empty, &empty, 0);
+        assert!(dist.is_finite(), "binary zero-dim distance NaN: {dist}");
+        assert_eq!(dist, 0.0);
     }
 }

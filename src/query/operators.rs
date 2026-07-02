@@ -108,6 +108,24 @@ impl FilterOp {
             },
         }
     }
+
+    /// Valida el operador.
+    ///
+    /// Los operadores tipados son siempre válidos salvo `Regex`, cuyo patrón
+    /// puede no compilar. Un patrón de regex inválido no puede propagarse desde
+    /// [`evaluate`](Self::evaluate) (que devuelve `bool`), por lo que se
+    /// detecta aquí para que el llamador rechace el filtro antes de aplicarlo
+    /// y el error no se confunda con "0 coincidencias".
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if let FilterOp::Regex(pattern) = self {
+            if regex_lite::Regex::new(pattern).is_err() {
+                return Err(crate::Error::InvalidFilter(format!(
+                    "invalid regex pattern: {pattern}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Compara dos valores para igualdad.

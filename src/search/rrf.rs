@@ -67,8 +67,12 @@ pub fn reciprocal_rank_fusion(
     }
 
     let mut results: Vec<_> = rrf_scores.into_iter().collect();
-    // Mayor RRF score = mejor
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Mayor RRF score = mejor; desempate estable por id para orden determinista
+    results.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
 
     results
 }
@@ -112,7 +116,11 @@ pub fn weighted_reciprocal_rank_fusion(
     }
 
     let mut results: Vec<_> = rrf_scores.into_iter().collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
 
     results
 }

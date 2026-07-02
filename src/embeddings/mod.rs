@@ -228,6 +228,15 @@ impl Embedder {
 
     /// Convierte el Embedder en una función compatible con `AgentMemory::set_embed_fn`.
     ///
+    /// # Semántica ante errores
+    ///
+    /// `set_embed_fn` exige una firma `Fn(&str) -> Vec<f32>` (sin `Result`), por lo que
+    /// el error de `embed` no puede propagarse por el canal de retorno. Ante un fallo
+    /// (tokenización, forward pass, modelo corrupto, OOM, etc.) la closure **panic**
+    /// con un mensaje descriptivo en lugar de devolver un vector de ceros silencioso:
+    /// un embedding cero insertado en la base de datos contamina la búsqueda sin
+    /// señal visible, así que se prefiere fallar ruidosamente en el punto de uso.
+    ///
     /// # Ejemplo
     ///
     /// ```rust,ignore
@@ -242,9 +251,15 @@ impl Embedder {
         use std::sync::Arc;
         let embedder = Arc::new(self);
         move |text: &str| -> Vec<f32> {
-            embedder
-                .embed(text)
-                .unwrap_or_else(|_| vec![0.0; embedder.dimensions()])
+            match embedder.embed(text) {
+                Ok(v) => v,
+                Err(e) => panic!(
+                    "into_embed_fn: falló la generación del embedding ({} dims, entrada de {} bytes): {}",
+                    embedder.dimensions(),
+                    text.len(),
+                    e
+                ),
+            }
         }
     }
 }
