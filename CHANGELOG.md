@@ -5,6 +5,12 @@ All notable changes to minimemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-07-02
+
+### Added
+- **WAL durability (opt-in, native Rust only):** `enable_wal(path)` / `enable_wal_with(path, WalConfig)` append every successful insert/update/delete/clear to an append-only log (O(1) per op). `WalConfig::new().with_fsync_on_append(true)` survives power loss; the default (`false`) flushes to the OS and survives process crashes. `checkpoint(snapshot_path)` writes an atomic `.mmdb` snapshot then truncates the WAL. `VectorDB::open_with_wal(snapshot, wal)` and `new_with_wal(config, wal)` recover by replaying the WAL with idempotent upsert semantics; torn tails from a mid-append crash recover to the last valid entry. Not yet applied to `insert_chunk`/`ingest_markdown` (v1).
+- **Metadata indexes (opt-in, core — Rust only, not exposed in WASM/JS bindings):** `create_metadata_index("field")` (retroactive over existing storage), `drop_metadata_index`, `list_metadata_indexes`. Accelerates `$eq` and ranges (`$gt`/`$gte`/`$lt`/`$lte`) on indexed fields; `$and` intersects, `$or` unions when all branches are indexable; everything else falls back to full-scan with identical results (the index only prunes candidates, never changes results — covered by an equivalence test). Indexes are not persisted in `.mmdb` (recreate with one retroactive call after `open()`); `Float` in `$eq` and `$ne`/`$contains`/`$regex` are not accelerated (correct fallback).
+
 ## [3.0.1] - 2026-07-01
 
 ### Changed

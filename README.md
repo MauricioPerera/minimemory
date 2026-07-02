@@ -2,7 +2,7 @@
 
 Embedded vector database for Rust, JavaScript, and Python. Like SQLite for vectors.
 
-**466KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **377 tests** | **51 browser tests**
+**510KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **437 tests** | **51 browser tests**
 
 [![npm](https://img.shields.io/npm/v/@rckflr/minimemory)](https://www.npmjs.com/package/@rckflr/minimemory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -60,11 +60,13 @@ const results = JSON.parse(db.search(new Float32Array(384), 10));
 | **Filters** | $eq, $ne, $gt, $gte, $lt, $lte, $contains, $regex, $and, $or |
 | **Query** | ORDER BY any field, OFFSET/LIMIT pagination, PagedResult |
 | **Persistence** | .mmdb binary format v3 with CRC32 checksums, atomic writes |
+| **Durability (WAL)** | Opt-in write-ahead log; per-op append, checkpoint compaction, crash recovery (native Rust only) |
+| **Metadata indexes** | Opt-in per-field indexes; sub-linear `$eq` and range filters (Rust core, not in WASM/JS bindings) |
 | **Validation** | Rejects NaN/Inf vectors (`Error::InvalidVector`), dimension checks on insert and update |
 | **Search contract** | Returns `min(k, qualifying)`; offset applied before truncation, filters before RRF fusion |
 | **Replication** | `ConflictResolution` (LWW / KeepLocal / ApplyRemote); compaction preserves unexported log entries |
 | **Indexing** | `VectorDB::rebuild_index()` — mandatory for IVF after bulk load to activate clustering |
-| **WASM** | 466KB, runs in browser + Cloudflare Workers + Node.js |
+| **WASM** | 510KB, runs in browser + Cloudflare Workers + Node.js |
 | **Extras** | Reranker (trait-based), agent memory system, local embeddings (Candle) |
 
 ## Quantization
@@ -107,6 +109,34 @@ db.filter_search('{"$and": [{"category": "tech"}, {"year": {"$gte": 2024}}]}', 1
 db.filter_search('{"title": {"$regex": "^Rust"}}', 100);
 ```
 
+## Metadata Indexes
+
+Per-field indexes turn `$eq` and range (`$gt`/`$gte`/`$lt`/`$lte`) filters from a full scan into a candidate lookup. `$and` intersects indexed branches; `$or` unions them when every branch is indexable. The planner always re-evaluates the full filter over the candidates, so an index can only speed a query up — it never changes results (verified by an equivalence test against direct evaluation). Anything not accelerated (`$ne`, `$contains`, `$regex`, `Float` in `$eq`) falls back to full-scan with identical results.
+
+```rust
+use minimemory::{VectorDB, Config, Filter, Metadata};
+
+let mut db = VectorDB::new(Config::new(128))?;
+
+let mut m1 = Metadata::new();
+m1.insert("category", "tech").insert("score", 0.9f64);
+db.insert("a", &vec![0.1; 128], Some(m1))?;
+
+let mut m2 = Metadata::new();
+m2.insert("category", "tech").insert("score", 0.3f64);
+db.insert("b", &vec![0.2; 128], Some(m2))?;
+
+// Retroactive: indexes everything already in storage.
+db.create_metadata_index("category")?;
+
+let hits = db.filter_search(
+    Filter::eq("category", "tech").and(Filter::gte("score", 0.5f64)),
+    100,
+)?;
+```
+
+Limitations: indexes are not persisted in `.mmdb` — recreate them with one retroactive `create_metadata_index` call after `open()`. Available in the Rust core only; not exposed in the WASM/JS bindings.
+
 ## Pagination
 
 ```rust
@@ -145,6 +175,32 @@ localStorage.setItem("my-db", snapshot);
 // Later...
 db.import_snapshot(localStorage.getItem("my-db"));
 ```
+
+## Durability (WAL)
+
+minimemory is memory-first: mutations apply in RAM and a `.mmdb` snapshot is a point-in-time dump of the whole database. The write-ahead log (WAL) is an opt-in layer that makes every individual mutation durable without taking a full snapshot.
+
+With a WAL enabled, each successful `insert`/`update`/`delete`/`clear` is appended to the log (O(1) per op) **after** it has been applied in memory. `WalConfig::new()` (the default) flushes appends to the OS, which survives a process crash; `WalConfig::new().with_fsync_on_append(true)` issues an explicit `fsync` per append and also survives power loss. `checkpoint(snapshot_path)` writes an atomic `.mmdb` snapshot and then truncates the WAL (compaction); the order is deliberate, so a crash between the snapshot and the truncate still leaves a recoverable state. Recovery via `open_with_wal` (existing snapshot) or `new_with_wal` (no snapshot yet) replays the log with idempotent upsert semantics; a torn tail from a crash mid-append is truncated to the last valid entry.
+
+```rust
+use minimemory::{VectorDB, Config};
+use minimemory::wal::WalConfig;
+
+let mut db = VectorDB::new(Config::new(384))?;
+db.enable_wal("appending.wal")?;          // &mut self; default survives process crash
+db.insert("doc-1", &vec![0.1; 384], None)?;
+
+// Opt in to power-loss durability.
+db.enable_wal_with("appending.wal", WalConfig::new().with_fsync_on_append(true))?;
+db.insert("doc-2", &vec![0.2; 384], None)?;
+
+db.checkpoint("snap.mmdb")?;              // &self: atomic snapshot + WAL truncate
+
+// Recover: load snapshot, replay any WAL entries appended after it.
+let db = VectorDB::open_with_wal("snap.mmdb", "appending.wal")?;
+```
+
+Limitations: the WAL is native Rust only (not available in the WASM/JS bindings) and, in this first version, does not cover `insert_chunk`/`ingest_markdown`.
 
 ## Indexing & IVF
 
@@ -241,14 +297,14 @@ export default {
 | Project | Description | Link |
 |---------|-------------|------|
 | **minimemory** | Core vector DB (Rust + WASM) | [GitHub](https://github.com/MauricioPerera/minimemory) |
-| **@rckflr/minimemory** | npm package (466KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
+| **@rckflr/minimemory** | npm package (510KB WASM) | [npm](https://www.npmjs.com/package/@rckflr/minimemory) |
 | **miniCMS** | PocketBase-like CMS in browser | [Live](https://minicms.pages.dev) / [GitHub](https://github.com/MauricioPerera/minicms) |
 | **minimemory-do-demo** | Cloudflare DO benchmark | [Live](https://minimemory-do-demo.rckflr.workers.dev) / [GitHub](https://github.com/MauricioPerera/minimemory-do-demo) |
 
 ## Architecture
 
 ```
-minimemory (~22,900 LOC Rust)
+minimemory (~25,400 LOC Rust)
 ├── db.rs              — VectorDB main API
 ├── distance/          — Cosine, Euclidean, DotProduct, Manhattan (SIMD)
 ├── index/             — Flat, HNSW, IVF
@@ -256,6 +312,8 @@ minimemory (~22,900 LOC Rust)
 ├── query/             — Filters ($eq, $gt, $regex, $and, $or)
 ├── search/            — Hybrid search (BM25 + vector + RRF)
 ├── storage/           — Memory, Disk (.mmdb v3), format
+├── wal.rs             — Write-ahead log (opt-in durability, native only)
+├── metadata_index.rs  — Per-field metadata indexes (sub-linear filters)
 ├── reranker.rs        — Trait-based cross-encoder
 ├── agent_memory.rs    — Semantic + episodic + working memory
 ├── memory_traits.rs   — Domain-agnostic memory system
