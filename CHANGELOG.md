@@ -5,6 +5,12 @@ All notable changes to minimemory will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-07-02
+
+### Added
+- **OKF (Open Knowledge Format) v0.1 support:** ingest and search Google's OKF bundles — trees of `.md` files with YAML frontmatter (a required `type` field) that carry curated context for AI agents. The `okf` module wraps `VectorDB` with a zero-dep frontmatter parser (scalars and string lists; nested structures ignored per documented limitation) and permissive consumption per spec: unknown `type`s are ingested, files without `type` or with broken frontmatter are skipped and reported in `IngestStats`, and `index.md`/`log.md` are excluded anywhere in the tree. `OkfIndex` reuses the existing chunking + BM25 + metadata index machinery (a metadata index on `okf_type` is created retroactively in the constructor); `ingest_bundle(path)` walks a directory natively, `ingest_concept(id, content)` ingests a single concept from a string (wasm-portable, idempotent upsert), `search(query, k, type_filter)` does BM25 keyword search with a sub-linear `okf_type` filter and switches to hybrid when an `embed_fn` is configured, plus `concepts()` and `remove_concept()`. `examples/okf_demo.rs` shows the end-to-end flow.
+- **WASM/JS binding for OKF — `WasmOkfIndex`:** BM25-only in v1 (no JS embed callback). Exposes `new()`, `with_chunk_size(size, overlap)`, `ingest_concept`, `search(query, k, type_filter?)` (returns a JSON array of `{ concept_id, chunk_id, score, title?, snippet }`), `concepts()`, `remove_concept`, `len`/`is_empty`, and `export_snapshot`/`import_snapshot` — the snapshot round-trip fully restores concepts and the `okf_type` metadata index. An idiomatic `OkfIndex` TS wrapper ships in `npm-src/index.ts`.
+
 ## [3.1.0] - 2026-07-02
 
 ### Added

@@ -89,6 +89,34 @@ if (saved) {
 
 `import_snapshot` is atomic: the snapshot is validated before the existing database is cleared, so a malformed import leaves the current data intact. Metadata values of type List and Map round-trip faithfully (they are preserved on export and read back on import).
 
+## OKF (Open Knowledge Format)
+
+Index [OKF v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) knowledge bundles in the browser — markdown concepts with YAML frontmatter (a required `type` field), Google Cloud's format for giving AI agents curated context. `OkfIndex` ingests them and searches by keywords (BM25) with an optional `type` filter, with no backend and no embeddings required.
+
+```javascript
+import { OkfIndex } from 'minimemory';
+
+const okf = await OkfIndex.create();          // or OkfIndex.create({ targetSize: 800, overlap: 100 })
+
+okf.ingestConcept(
+  "tables/users",
+  "---\ntype: table\ntitle: Users\ntags: [users, auth]\n---\n# Users\nid, name, email."
+);
+
+// BM25 keyword search filtered to one OKF `type`.
+const hits = okf.search("users", 5, "table");
+// [{ concept_id: "tables/users", chunk_id: "tables/users#0", score: ..., title: "Users", snippet: "..." }]
+
+console.log(okf.concepts());   // ["tables/users"]
+okf.removeConcept("tables/users");
+
+// Persist in the browser; the round-trip restores concepts and the okf_type index.
+localStorage.setItem("okf", okf.export());
+okf.import(localStorage.getItem("okf"));
+```
+
+`OkfIndex` (from `npm-src/index.ts`) is the idiomatic wrapper around the raw `WasmOkfIndex` binding. API: `OkfIndex.create(opts?)`, `ingestConcept(id, md)`, `search(query, k?, typeFilter?)` → `OkfHit[]`, `concepts()`, `removeConcept(id)`, `count`, `empty`, `export()`, `import(json)`, `dispose()`. v1 limitation: BM25-only (no JS embedding callback), so chunks are stored without vectors.
+
 ## Quantization (Memory Compression)
 
 | Constructor | Compression | Accuracy | Use Case |

@@ -2,7 +2,7 @@
 
 Embedded vector database for Rust, JavaScript, and Python. Like SQLite for vectors.
 
-**520KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **437 tests** | **51 browser tests**
+**520KB WASM** | **Zero deps** | **HNSW + BM25 + Filters** | **5 quantization types** | **453 tests** | **51 browser tests**
 
 [![npm](https://img.shields.io/npm/v/@rckflr/minimemory)](https://www.npmjs.com/package/@rckflr/minimemory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -62,6 +62,7 @@ const results = JSON.parse(db.search(new Float32Array(384), 10));
 | **Persistence** | .mmdb binary format v3 with CRC32 checksums, atomic writes |
 | **Durability (WAL)** | Opt-in write-ahead log; per-op append, checkpoint compaction, crash recovery (native Rust only) |
 | **Metadata indexes** | Opt-in per-field indexes; sub-linear `$eq` and range filters (Rust and WASM/JS) |
+| **OKF** | Ingest and search [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) v0.1 bundles — markdown + YAML frontmatter context for AI agents (Rust + WASM/JS) |
 | **Validation** | Rejects NaN/Inf vectors (`Error::InvalidVector`), dimension checks on insert and update |
 | **Search contract** | Returns `min(k, qualifying)`; offset applied before truncation, filters before RRF fusion |
 | **Replication** | `ConflictResolution` (LWW / KeepLocal / ApplyRemote); compaction preserves unexported log entries |
@@ -136,6 +137,60 @@ let hits = db.filter_search(
 ```
 
 Limitations: indexes are not persisted in `.mmdb` — recreate them with one retroactive `create_metadata_index` call after `open()`. Also available from JS: `create_metadata_index` / `drop_metadata_index` / `list_metadata_indexes` on `WasmVectorDB` (not included in snapshots — recreate after `import_snapshot`).
+
+## OKF (Open Knowledge Format)
+
+[OKF v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) is a Google Cloud spec (June 2026) for "bundles": directory trees of `.md` files where each non-reserved file is a "concept" — YAML frontmatter with a required `type` field, followed by a markdown body — meant to carry curated context to AI agents. minimemory ingests these bundles and makes them searchable by keywords and `type`, reusing its chunking, BM25, and metadata-index machinery. This is early tooling for the format.
+
+Per spec, consumption is permissive: unknown `type`s are ingested, files without `type` or with broken frontmatter are skipped (and reported in `IngestStats`), and `index.md`/`log.md` are excluded anywhere in the tree. The frontmatter parser is minimal and dependency-free (scalars and string lists; nested maps/list-of-maps, anchors, and multiline scalars are ignored without error).
+
+**Rust:**
+```rust
+use std::path::Path;
+use minimemory::chunking::ChunkConfig;
+use minimemory::okf::{OkfConfig, OkfIndex};
+
+let index = OkfIndex::new(OkfConfig::new(ChunkConfig::default()))?;
+
+// Ingest a bundle directory (native): walks the tree, parses frontmatter,
+// skips index.md/log.md, and reports skipped files in `stats`.
+let stats = index.ingest_bundle(Path::new("my_bundle"))?;
+// stats.ingested, stats.skipped: Vec<(rel_path, reason)>
+
+// BM25 keyword search filtered to one OKF `type` (uses the okf_type metadata index).
+for hit in index.search("base de datos embebida", 5, Some("database"))? {
+    println!("[{}] {} — {}", hit.concept_id, hit.title.as_deref().unwrap_or("?"), hit.snippet);
+}
+
+// A single concept can also be ingested from its markdown source (wasm-portable, idempotent upsert).
+index.ingest_concept(
+    "tables/users",
+    "---\ntype: table\ntitle: Users\ntags: [users, auth]\n---\n# Users\nid, name.\n",
+)?;
+```
+
+With `OkfConfig::new(chunk).with_dimensions(d).with_embed_fn(f)`, chunks are inserted with vectors and `search` switches to hybrid (BM25 + semantic + RRF), still respecting `type_filter`. See `examples/okf_demo.rs` for the end-to-end flow.
+
+**JavaScript/TypeScript:**
+```javascript
+import { OkfIndex } from '@rckflr/minimemory';
+
+const okf = await OkfIndex.create();          // or OkfIndex.create({ targetSize: 800, overlap: 100 })
+
+okf.ingestConcept(
+  "tables/users",
+  "---\ntype: table\ntitle: Users\n---\n# Users\nid, name."
+);
+
+const hits = okf.search("users", 5, "table");   // OkfHit[] = { concept_id, chunk_id, score, title?, snippet }
+console.log(okf.concepts());                    // ["tables/users"]
+
+// Persist in the browser; the round-trip restores concepts and the okf_type index.
+localStorage.setItem("okf", okf.export());
+okf.import(localStorage.getItem("okf"));
+```
+
+v1 limitation: `WasmOkfIndex` is BM25-only (no JS embedding callback), so all chunks are inserted without vectors. See the full example at `examples/okf_demo.rs`.
 
 ## Pagination
 
@@ -317,6 +372,7 @@ minimemory (~25,400 LOC Rust)
 ├── storage/           — Memory, Disk (.mmdb v3), format
 ├── wal.rs             — Write-ahead log (opt-in durability, native only)
 ├── metadata_index.rs  — Per-field metadata indexes (sub-linear filters)
+├── okf.rs             — OKF (Open Knowledge Format) v0.1 ingest + search
 ├── reranker.rs        — Trait-based cross-encoder
 ├── agent_memory.rs    — Semantic + episodic + working memory
 ├── memory_traits.rs   — Domain-agnostic memory system
