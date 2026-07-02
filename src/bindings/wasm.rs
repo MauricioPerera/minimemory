@@ -32,6 +32,8 @@
 use wasm_bindgen::prelude::*;
 
 use crate::{
+    chunking::{ChunkConfig as RustChunkConfig, ChunkStrategy},
+    okf::{OkfConfig, OkfIndex as RustOkfIndex},
     quantization::QuantizationType, Config as RustConfig, Distance as RustDistance,
     IndexType as RustIndexType, Metadata as RustMetadata, VectorDB as RustVectorDB,
 };
@@ -591,99 +593,14 @@ impl WasmVectorDB {
     /// Returns JSON string that can be saved to IndexedDB, localStorage, etc.
     #[wasm_bindgen]
     pub fn export_snapshot(&self) -> Result<String, JsError> {
-        let ids = self.inner.list_ids()
-            .map_err(|e| JsError::new(&e.to_string()))?;
-
-        let mut entries = Vec::new();
-        for id in &ids {
-            if let Ok(Some((vector, metadata))) = self.inner.get(id) {
-                let mut entry = serde_json::json!({ "id": id });
-                if let Some(vec) = vector {
-                    entry["vector"] = serde_json::json!(vec);
-                }
-                if let Some(meta) = metadata {
-                    entry["metadata"] = metadata_to_json(&meta);
-                }
-                entries.push(entry);
-            }
-        }
-
-        serde_json::to_string(&entries)
-            .map_err(|e| JsError::new(&e.to_string()))
+        db_export_snapshot(&self.inner)
     }
 
     /// Import database from a JSON snapshot (created by export_snapshot).
     /// Clears existing data before importing.
     #[wasm_bindgen]
     pub fn import_snapshot(&self, json: &str) -> Result<usize, JsError> {
-        let entries: Vec<serde_json::Value> = serde_json::from_str(json)
-            .map_err(|e| JsError::new(&format!("Invalid JSON: {}", e)))?;
-
-        let dimensions = self.inner.dimensions();
-
-        // Validar y parsear COMPLETAMENTE el snapshot antes de tocar el estado.
-        let mut parsed: Vec<(String, Option<Vec<f32>>, RustMetadata)> =
-            Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let id = entry["id"].as_str()
-                .ok_or_else(|| JsError::new("Missing 'id' field in snapshot entry"))?
-                .to_string();
-
-            let vector: Option<Vec<f32>> = entry
-                .get("vector")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|x| {
-                            x.as_f64()
-                                .map(|f| f as f32)
-                                .ok_or_else(|| JsError::new(&format!(
-                                    "Invalid vector element in entry '{}'",
-                                    id
-                                )))
-                        })
-                        .collect::<Result<Vec<f32>, JsError>>()
-                })
-                .transpose()?;
-
-            if let Some(ref vec) = vector {
-                if vec.len() != dimensions {
-                    return Err(JsError::new(&format!(
-                        "Vector dimension mismatch for entry '{}': expected {}, got {}",
-                        id,
-                        dimensions,
-                        vec.len()
-                    )));
-                }
-            }
-
-            let metadata_str = entry
-                .get("metadata")
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "{}".to_string());
-            let meta = parse_metadata_json(&metadata_str)?;
-
-            parsed.push((id, vector, meta));
-        }
-
-        // Solo si todo es valido, reemplazamos el contenido.
-        self.inner.clear();
-
-        let mut imported = 0;
-        for (id, vector, meta) in parsed {
-            if let Some(vec) = vector {
-                self.inner
-                    .insert(&id, &vec, Some(meta))
-                    .map_err(|e| JsError::new(&e.to_string()))?;
-            } else {
-                self.inner
-                    .insert_document(&id, None, Some(meta))
-                    .map_err(|e| JsError::new(&e.to_string()))?;
-            }
-            imported += 1;
-        }
-
-        Ok(imported)
+        db_import_snapshot(&self.inner, json)
     }
 
     // =========================================================================
@@ -731,6 +648,248 @@ impl WasmVectorDB {
         let indexes = self.inner.list_metadata_indexes();
         serde_json::to_string(&indexes).unwrap_or_else(|_| "[]".to_string())
     }
+}
+
+// ============================================================================
+// OKF — Open Knowledge Format
+// ============================================================================
+
+/// Índice OKF (Open Knowledge Format) para WebAssembly.
+///
+/// Ingiere conceptos OKF (markdown + frontmatter YAML con campo `type`) y los
+/// busca por keywords (BM25) con filtro por `okf_type`.
+///
+/// # Limitación v1
+///
+/// Sólo modo BM25: sin vectores ni `embed_fn`. La búsqueda semántica/híbrida
+/// requeriría un callback JS→Rust de embeddings, que queda fuera de esta v1.
+/// En consecuencia todos los chunks se insertan sin vector.
+#[wasm_bindgen]
+pub struct WasmOkfIndex {
+    inner: RustOkfIndex,
+}
+
+#[wasm_bindgen]
+impl WasmOkfIndex {
+    /// Crea un índice OKF en modo solo-BM25 con chunking por defecto.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<WasmOkfIndex, JsError> {
+        let cfg = OkfConfig::new(RustChunkConfig::default());
+        let idx = RustOkfIndex::new(cfg).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Self { inner: idx })
+    }
+
+    /// Crea un índice OKF con chunking de tamaño fijo + overlap.
+    ///
+    /// # Arguments
+    /// * `target_size` - Tamaño objetivo de cada chunk (caracteres).
+    /// * `overlap` - Caracteres de overlap entre chunks consecutivos.
+    #[wasm_bindgen]
+    pub fn with_chunk_size(target_size: usize, overlap: usize) -> Result<WasmOkfIndex, JsError> {
+        let chunk = RustChunkConfig::new(ChunkStrategy::BySize { target_size, overlap });
+        let cfg = OkfConfig::new(chunk);
+        let idx = RustOkfIndex::new(cfg).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Self { inner: idx })
+    }
+
+    /// Ingerea un concepto desde string (portable). Reemplaza los chunks previos
+    /// del mismo `concept_id` (upsert idempotente). Devuelve la cantidad de
+    /// chunks insertados (`0` si se salta por falta de `type` o frontmatter roto).
+    #[wasm_bindgen]
+    pub fn ingest_concept(&self, concept_id: &str, content: &str) -> Result<usize, JsError> {
+        self.inner
+            .ingest_concept(concept_id, content)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Busca conceptos por keywords (BM25). Retorna un JSON array de hits:
+    /// `[{ concept_id, chunk_id, score, title?, snippet }, ...]`.
+    ///
+    /// `type_filter` restringe a un `type` OKF concreto (`null` = sin filtro).
+    #[wasm_bindgen]
+    pub fn search(
+        &self,
+        query: &str,
+        k: usize,
+        type_filter: Option<String>,
+    ) -> Result<String, JsError> {
+        let hits = self
+            .inner
+            .search(query, k, type_filter.as_deref())
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let arr: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|h| {
+                let mut obj = serde_json::json!({
+                    "concept_id": h.concept_id,
+                    "chunk_id": h.chunk_id,
+                    "score": h.score,
+                    "snippet": h.snippet,
+                });
+                if let Some(ref t) = h.title {
+                    obj["title"] = serde_json::Value::String(t.clone());
+                }
+                obj
+            })
+            .collect();
+
+        serde_json::to_string(&arr).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Lista los Concept IDs únicos ingeridos como JSON array de strings.
+    #[wasm_bindgen]
+    pub fn concepts(&self) -> String {
+        let c = self.inner.concepts();
+        serde_json::to_string(&c).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Borra todos los chunks de un concepto. Devuelve la cantidad borrada.
+    #[wasm_bindgen]
+    pub fn remove_concept(&self, concept_id: &str) -> Result<usize, JsError> {
+        self.inner
+            .remove_concept(concept_id)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Número de documentos (chunks) en el índice.
+    #[wasm_bindgen]
+    pub fn len(&self) -> usize {
+        self.inner.db().len()
+    }
+
+    /// Verifica si el índice está vacío.
+    #[wasm_bindgen]
+    pub fn is_empty(&self) -> bool {
+        self.inner.db().is_empty()
+    }
+
+    /// Exporta el índice como JSON snapshot (ids, vectores, metadata).
+    ///
+    /// # Round-trip del snapshot
+    ///
+    /// `OkfIndex` no mantiene un registro de conceptos separado: `concepts()`
+    /// se deriva de los documentos de la [`RustVectorDB`] subyacente (campo de
+    /// metadata `okf_concept`). El snapshot vuelca todos los documentos con su
+    /// metadata, así que `import_snapshot` **restaura los conceptos**: vuelven
+    /// a listarse y a ser buscables.
+    ///
+    /// El metadata index sobre `okf_type` (creado en `OkfIndex::new`) **no se
+    /// serializa** en el snapshot, pero: (a) en la MISMA instancia, el `clear`
+    /// interno preserva el registro del índice y las reinserciones lo repueblan,
+    /// así que el filtro por `okf_type` sigue funcionando tras importar; (b) en
+    /// una instancia RECIENTE construida con `new`/`with_chunk_size`, el
+    /// constructor recrea el índice sobre la DB vacía antes del import, y las
+    /// inserciones del import lo pueblan incrementalmente. En ambos casos el
+    /// round-trip restaura por completo conceptos, búsqueda y filtro.
+    #[wasm_bindgen]
+    pub fn export_snapshot(&self) -> Result<String, JsError> {
+        db_export_snapshot(self.inner.db())
+    }
+
+    /// Importa un JSON snapshot (de [`export_snapshot`](Self::export_snapshot)),
+    /// reemplazando el contenido del índice. Devuelve la cantidad de documentos
+    /// importados. Ver [`export_snapshot`](Self::export_snapshot) para el
+    /// comportamiento del round-trip de conceptos e índice de metadata.
+    #[wasm_bindgen]
+    pub fn import_snapshot(&self, json: &str) -> Result<usize, JsError> {
+        db_import_snapshot(self.inner.db(), json)
+    }
+}
+
+/// Exporta una [`RustVectorDB`] como JSON snapshot (ids, vectores, metadata).
+/// Lógica compartida entre [`WasmVectorDB`] y [`WasmOkfIndex`].
+fn db_export_snapshot(db: &RustVectorDB) -> Result<String, JsError> {
+    let ids = db.list_ids()
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    let mut entries = Vec::new();
+    for id in &ids {
+        if let Ok(Some((vector, metadata))) = db.get(id) {
+            let mut entry = serde_json::json!({ "id": id });
+            if let Some(vec) = vector {
+                entry["vector"] = serde_json::json!(vec);
+            }
+            if let Some(meta) = metadata {
+                entry["metadata"] = metadata_to_json(&meta);
+            }
+            entries.push(entry);
+        }
+    }
+
+    serde_json::to_string(&entries)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Importa un JSON snapshot (de [`db_export_snapshot`]) en una [`RustVectorDB`],
+/// reemplazando su contenido. Valida y parsea TODO antes de tocar el estado.
+fn db_import_snapshot(db: &RustVectorDB, json: &str) -> Result<usize, JsError> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(json)
+        .map_err(|e| JsError::new(&format!("Invalid JSON: {}", e)))?;
+
+    let dimensions = db.dimensions();
+
+    // Validar y parsear COMPLETAMENTE el snapshot antes de tocar el estado.
+    let mut parsed: Vec<(String, Option<Vec<f32>>, RustMetadata)> =
+        Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let id = entry["id"].as_str()
+            .ok_or_else(|| JsError::new("Missing 'id' field in snapshot entry"))?
+            .to_string();
+
+        let vector: Option<Vec<f32>> = entry
+            .get("vector")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|x| {
+                        x.as_f64()
+                            .map(|f| f as f32)
+                            .ok_or_else(|| JsError::new(&format!(
+                                "Invalid vector element in entry '{}'",
+                                id
+                            )))
+                    })
+                    .collect::<Result<Vec<f32>, JsError>>()
+            })
+            .transpose()?;
+
+        if let Some(ref vec) = vector {
+            if vec.len() != dimensions {
+                return Err(JsError::new(&format!(
+                    "Vector dimension mismatch for entry '{}': expected {}, got {}",
+                    id,
+                    dimensions,
+                    vec.len()
+                )));
+            }
+        }
+
+        let metadata_str = entry
+            .get("metadata")
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+        let meta = parse_metadata_json(&metadata_str)?;
+
+        parsed.push((id, vector, meta));
+    }
+
+    // Solo si todo es valido, reemplazamos el contenido.
+    db.clear();
+
+    let mut imported = 0;
+    for (id, vector, meta) in parsed {
+        if let Some(vec) = vector {
+            db.insert(&id, &vec, Some(meta))
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        } else {
+            db.insert_document(&id, None, Some(meta))
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        }
+        imported += 1;
+    }
+
+    Ok(imported)
 }
 
 /// Trunca un vector a las dimensiones especificadas y lo normaliza.
@@ -1128,6 +1287,143 @@ mod tests {
         assert_eq!(
             result_ids(&fresh.filter_search(r#"{"category":"tech"}"#, 100).unwrap()),
             expected
+        );
+    }
+
+    // =========================================================================
+    // OKF (WasmOkfIndex)
+    // =========================================================================
+
+    fn okf_concept(_id: &str, type_: &str, title: &str, body: &str) -> String {
+        format!("---\ntype: {type_}\ntitle: {title}\n---\n{body}\n")
+    }
+
+    /// IDs de concepto de un JSON array de hits de search, ordenados.
+    fn hit_concepts(json: &str) -> Vec<String> {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let mut ids: Vec<String> = arr
+            .iter()
+            .map(|v| v["concept_id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Cantidad de hits en un JSON array de search.
+    fn hit_len(json: &str) -> usize {
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        arr.len()
+    }
+
+    /// Concept IDs de `concepts()`, ordenados (el orden de list_documents no
+    /// está garantizado).
+    fn sorted_concepts(json: &str) -> Vec<String> {
+        let mut v: Vec<String> = serde_json::from_str(json).unwrap();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn okf_ingest_and_search_with_and_without_type_filter() {
+        let idx = WasmOkfIndex::new().unwrap();
+        assert!(idx.is_empty());
+        idx.ingest_concept("a", &okf_concept("a", "doc", "Alpha", "rust programming language"))
+            .unwrap();
+        idx.ingest_concept("b", &okf_concept("b", "note", "Beta", "rust memory safety notes"))
+            .unwrap();
+        assert!(!idx.is_empty());
+        assert_eq!(idx.len(), 2); // 2 chunks (un cuerpo corto = 1 chunk cado)
+
+        // concepts() lista ambos (el orden de list_documents no es garantizado).
+        assert_eq!(
+            sorted_concepts(&idx.concepts()),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        // Sin filtro: ambos conceptos aparecen.
+        let all = idx.search("rust", 10, None).unwrap();
+        let both = hit_concepts(&all);
+        assert!(both.contains(&"a".to_string()));
+        assert!(both.contains(&"b".to_string()));
+
+        // Con filtro doc: sólo "a".
+        let only_doc = idx.search("rust", 10, Some("doc".to_string())).unwrap();
+        let doc_hits = hit_concepts(&only_doc);
+        assert_eq!(doc_hits, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn okf_remove_concept_drops_chunks_and_search() {
+        let idx = WasmOkfIndex::new().unwrap();
+        idx.ingest_concept("c", &okf_concept("c", "doc", "C", "old content alpha"))
+            .unwrap();
+        assert_ne!(hit_len(&idx.search("alpha", 10, None).unwrap()), 0);
+
+        let removed = idx.remove_concept("c").unwrap();
+        assert!(removed >= 1);
+        assert_eq!(hit_len(&idx.search("alpha", 10, None).unwrap()), 0);
+
+        assert!(sorted_concepts(&idx.concepts()).is_empty());
+    }
+
+    #[test]
+    fn okf_ingest_skipped_returns_zero_without_error() {
+        let idx = WasmOkfIndex::new().unwrap();
+        // Sin campo type → saltado, 0 chunks, sin error.
+        let n = idx.ingest_concept("x", "---\ntitle: no type\n---\nbody").unwrap();
+        assert_eq!(n, 0);
+        assert!(sorted_concepts(&idx.concepts()).is_empty());
+    }
+
+    #[test]
+    fn okf_with_chunk_size_constructs_and_ingests() {
+        let idx = WasmOkfIndex::with_chunk_size(50, 10).unwrap();
+        let n = idx
+            .ingest_concept("big", &okf_concept("big", "doc", "Big", "alpha beta gamma delta epsilon zeta"))
+            .unwrap();
+        assert!(n >= 1);
+        assert!(idx.len() >= 1);
+    }
+
+    #[test]
+    fn okf_snapshot_roundtrip_restores_concepts_search_and_type_filter() {
+        let idx = WasmOkfIndex::new().unwrap();
+        idx.ingest_concept("a", &okf_concept("a", "doc", "Alpha", "rust programming"))
+            .unwrap();
+        idx.ingest_concept("b", &okf_concept("b", "note", "Beta", "rust memory notes"))
+            .unwrap();
+        let snap = idx.export_snapshot().unwrap();
+
+        // Instancia fresca: el constructor recrea el índice okf_type sobre la
+        // DB vacía; el import inserta los docs (con su metadata) y puebla el
+        // índice. Conceptos, búsqueda y filtro quedan restaurados.
+        let fresh = WasmOkfIndex::new().unwrap();
+        let imported = fresh.import_snapshot(&snap).unwrap();
+        assert_eq!(imported, 2);
+
+        assert_eq!(
+            sorted_concepts(&fresh.concepts()),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        // Búsqueda sin filtro encuentra ambos.
+        let all = fresh.search("rust", 10, None).unwrap();
+        let both = hit_concepts(&all);
+        assert!(both.contains(&"a".to_string()));
+        assert!(both.contains(&"b".to_string()));
+
+        // Filtro por okf_type sigue operativo (índice repoblado por el import).
+        let only_doc = fresh.search("rust", 10, Some("doc".to_string())).unwrap();
+        assert_eq!(hit_concepts(&only_doc), vec!["a".to_string()]);
+
+        // Misma instancia: export -> import conserva todo.
+        let snap2 = fresh.export_snapshot().unwrap();
+        fresh.import_snapshot(&snap2).unwrap();
+        assert_eq!(fresh.len(), 2);
+        assert_eq!(
+            hit_concepts(&fresh.search("rust", 10, Some("note".to_string())).unwrap()),
+            vec!["b".to_string()]
         );
     }
 }

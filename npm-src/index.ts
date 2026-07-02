@@ -9,10 +9,10 @@
  */
 
 // Re-export raw WASM bindings for advanced users
-export { WasmVectorDB } from "../pkg/minimemory.js";
+export { WasmVectorDB, WasmOkfIndex } from "../pkg/minimemory.js";
 export { default as initWasm } from "../pkg/minimemory.js";
 
-import init, { WasmVectorDB } from "../pkg/minimemory.js";
+import init, { WasmVectorDB, WasmOkfIndex } from "../pkg/minimemory.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +40,14 @@ export interface DocumentEntry {
   id: string;
   vector?: number[];
   metadata?: Record<string, any>;
+}
+
+export interface OkfHit {
+  concept_id: string;
+  chunk_id: string;
+  score: number;
+  title?: string;
+  snippet: string;
 }
 
 export type Distance = "cosine" | "euclidean" | "dot" | "manhattan";
@@ -281,6 +289,102 @@ export class MiniMemory {
   /** Free WASM memory. Call when done with the database. */
   dispose(): void {
     this.db.free();
+  }
+}
+
+// ─── OKF (Open Knowledge Format) ────────────────────────────────────────────
+
+export interface OkfIndexOptions {
+  /** Fixed-size chunk target size in characters (enables fixed-size chunking). */
+  targetSize?: number;
+  /** Overlap between consecutive chunks in characters (default 50). */
+  overlap?: number;
+}
+
+/**
+ * Idiomatic wrapper around the raw `WasmOkfIndex` binding.
+ *
+ * Ingests OKF concepts (markdown + frontmatter YAML with a `type` field) and
+ * searches them by keywords (BM25) with an optional `type` filter.
+ *
+ * v1 limitation: BM25-only mode (no vectors / no embeddings). Snapshot export
+ * and import round-trip fully restores concepts, search, and the `okf_type`
+ * metadata index (recreated by the constructor, repopulated by import).
+ */
+export class OkfIndex {
+  private idx: WasmOkfIndex;
+
+  private constructor(idx: WasmOkfIndex) {
+    this.idx = idx;
+  }
+
+  /**
+   * Create a new OkfIndex. Call this instead of using the raw binding directly.
+   *
+   * ```ts
+   * const okf = await OkfIndex.create();
+   * const okf = await OkfIndex.create({ targetSize: 800, overlap: 100 });
+   * ```
+   */
+  static async create(opts?: OkfIndexOptions, wasmUrl?: any): Promise<OkfIndex> {
+    await init(wasmUrl);
+    const idx =
+      opts && (opts.targetSize != null || opts.overlap != null)
+        ? WasmOkfIndex.with_chunk_size(
+            opts.targetSize ?? 800,
+            opts.overlap ?? 50,
+          )
+        : new WasmOkfIndex();
+    return new OkfIndex(idx);
+  }
+
+  /**
+   * Ingest a single concept from its markdown source (idempotent upsert:
+   * replaces previous chunks of the same `conceptId`). Returns the number of
+   * chunks inserted (0 if skipped due to missing `type` or broken frontmatter).
+   */
+  ingestConcept(conceptId: string, content: string): number {
+    return this.idx.ingest_concept(conceptId, content);
+  }
+
+  /** Keyword (BM25) search over ingested concepts, optionally filtered by OKF `type`. */
+  search(query: string, k: number = 10, typeFilter?: string): OkfHit[] {
+    return JSON.parse(this.idx.search(query, k, typeFilter ?? null));
+  }
+
+  /** Unique concept IDs ingested so far. */
+  concepts(): string[] {
+    return JSON.parse(this.idx.concepts());
+  }
+
+  /** Remove all chunks of a concept. Returns the number of chunks deleted. */
+  removeConcept(conceptId: string): number {
+    return this.idx.remove_concept(conceptId);
+  }
+
+  /** Number of chunks in the index. */
+  get count(): number {
+    return this.idx.len();
+  }
+
+  /** Whether the index is empty. */
+  get empty(): boolean {
+    return this.idx.is_empty();
+  }
+
+  /** Export the index as a JSON snapshot string (for IndexedDB, localStorage, etc.). */
+  export(): string {
+    return this.idx.export_snapshot();
+  }
+
+  /** Import from a JSON snapshot (replaces contents). Returns docs imported. */
+  import(snapshot: string): number {
+    return this.idx.import_snapshot(snapshot);
+  }
+
+  /** Free WASM memory. Call when done with the index. */
+  dispose(): void {
+    this.idx.free();
   }
 }
 
