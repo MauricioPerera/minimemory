@@ -147,6 +147,7 @@ mod error;
 pub mod index;
 pub mod memory_traits;
 pub mod metadata_index;
+pub mod okf;
 pub mod partial_index;
 pub mod quantization;
 pub mod query;
