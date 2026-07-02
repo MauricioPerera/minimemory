@@ -155,6 +155,7 @@ pub mod search;
 mod storage;
 pub mod transfer;
 mod types;
+pub mod wal;
 
 // Local embeddings (optional)
 #[cfg(feature = "embeddings")]
